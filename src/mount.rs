@@ -59,6 +59,30 @@ fn is_mounted(target: &str) -> bool {
 /// 5. `/dev/shm` — shared memory
 /// 6. `/run` — runtime state (PID files, sockets)
 /// 7. `/sys/fs/cgroup` — cgroup v2 unified hierarchy
+/// Mount devtmpfs on `/dev` — must be the very first mount.
+///
+/// This creates `/dev/console`, `/dev/null`, `/dev/ttyS0`, etc.
+/// Required before console setup or any device access.
+pub fn mount_devtmpfs() -> Result<()> {
+    let target = Path::new("/dev");
+    if !target.exists() {
+        std::fs::create_dir_all(target)?;
+    }
+    // Mount devtmpfs — ignore EBUSY (already mounted by kernel)
+    match mount(
+        Some("devtmpfs"),
+        "/dev",
+        Some("devtmpfs"),
+        MsFlags::MS_NOSUID,
+        Some("mode=0755"),
+    ) {
+        Ok(()) => {}
+        Err(nix::errno::Errno::EBUSY) => {} // Already mounted
+        Err(e) => return Err(anyhow::anyhow!("failed to mount devtmpfs: {e}")),
+    }
+    Ok(())
+}
+
 pub fn mount_essential_filesystems() -> Result<()> {
     info!("mounting essential filesystems");
 

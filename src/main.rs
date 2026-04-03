@@ -53,29 +53,56 @@ fn main() {
     }
 }
 
-fn run() -> Result<()> {
-    // Phase 1: Console + logging
-    console::setup_console().unwrap_or_else(|e| {
-        eprintln!("console setup failed: {e}, continuing with inherited stdio");
-    });
+/// Write directly to kernel log ring buffer (visible on serial console).
+fn kmsg(msg: &str) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().write(true).open("/dev/kmsg") {
+        let _ = writeln!(f, "kybernet: {msg}");
+    }
+}
 
+fn run() -> Result<()> {
+    // Immediate output to confirm we're running (before ANY initialization)
+    {
+        use std::io::Write;
+        let _ = std::io::stderr().write_all(b"kybernet: PID 1 starting\n");
+    }
+
+    // Phase 1: Mount devtmpfs so /dev/kmsg exists
+    mount::mount_devtmpfs().unwrap_or_else(|e| {
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr(), "kybernet: devtmpfs mount failed: {e}");
+    });
+    kmsg("phase 1: devtmpfs mounted");
+
+    // Phase 2: Logging
     init_logging();
+    kmsg("phase 2: logging initialized");
     info!(pid = std::process::id(), "kybernet starting");
 
-    // Phase 2: Essential filesystem mounts
+    // Phase 3: Console setup — redirect stdio to serial/console
+    console::setup_console().unwrap_or_else(|e| {
+        kmsg(&format!("console setup failed: {e}"));
+    });
+    kmsg("phase 3: console setup done");
+
+    // Phase 4: Mount remaining essential filesystems
     mount::mount_essential_filesystems()?;
+    kmsg("phase 4: filesystems mounted");
 
-    // Phase 3: Signal handling
+    // Phase 5: Signal handling
     let signal_fd = signals::setup_signals()?;
+    kmsg("phase 5: signals configured");
 
-    // Phase 4: Load configuration
+    // Phase 6: Load configuration
     let config = load_config()?;
-    info!(mode = %config.boot_mode, "configuration loaded");
+    kmsg(&format!("phase 6: config loaded (mode={})", config.boot_mode));
 
-    // Phase 5: Initialize argonaut
-    let tmpfiles = config.tmpfiles.clone(); // only clone what we need
-    let mut init = ArgonautInit::new(config); // move config
+    // Phase 7: Initialize argonaut
+    let tmpfiles = config.tmpfiles.clone();
+    let mut init = ArgonautInit::new(config);
     let mut tracker = HealthTracker::new();
+    kmsg("phase 7: argonaut initialized");
 
     // Phase 6: Execute tmpfiles
     if !tmpfiles.is_empty() {
@@ -101,11 +128,37 @@ fn run() -> Result<()> {
     // Phase 9: Start services (wave-based)
     start_services(&mut init)?;
 
-    // Phase 10: Event loop
+    // Phase 12: Event loop
+    kmsg("entering main event loop");
     info!("entering main event loop");
     event_loop(&mut init, &mut tracker, &signal_fd, &notify_listener)?;
 
     Ok(())
+}
+
+/// Set up early console output before devtmpfs is mounted.
+///
+/// Tries `/dev/console` first (kernel creates this for PID 1),
+/// then falls back to keeping inherited stdio.
+fn early_console_setup() {
+    use std::fs::OpenOptions;
+    use std::os::unix::io::AsRawFd;
+
+    // The kernel should have /dev/console available for PID 1 even without devtmpfs
+    if let Ok(console) = OpenOptions::new().read(true).write(true).open("/dev/console") {
+        let fd = console.as_raw_fd();
+        // SAFETY: dup2 to redirect stdio to /dev/console
+        unsafe {
+            libc::dup2(fd, 0);
+            libc::dup2(fd, 1);
+            libc::dup2(fd, 2);
+            if fd > 2 {
+                libc::close(fd);
+            }
+        }
+        std::mem::forget(console); // Don't close the fd
+    }
+    // If /dev/console doesn't exist, keep inherited stdio
 }
 
 /// Initialize tracing/logging.
