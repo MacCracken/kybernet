@@ -265,8 +265,10 @@ fn start_services(init: &mut ArgonautInit) -> Result<()> {
         info!(wave = wave_idx, services = ?names, "starting wave");
 
         for (name, _spec) in wave {
+            kmsg(&format!("starting service: {name}"));
             match init.start_service(name) {
                 Ok(pid) => {
+                    kmsg(&format!("service started: {name} (pid={pid})"));
                     info!(service = %name, pid = pid, "service started");
                     // Move to cgroup
                     if pid > 0
@@ -416,10 +418,10 @@ fn process_pending_restarts(init: &mut ArgonautInit, pending: &mut VecDeque<Pend
             break; // Not yet time — queue is ordered by time
         }
         let restart = pending.pop_front().unwrap();
-        info!(service = %restart.service_name, "executing delayed restart");
+        kmsg(&format!("executing restart: {}", restart.service_name));
         match init.restart_service(&restart.service_name, Duration::from_secs(5)) {
             Ok(pid) => {
-                info!(service = %restart.service_name, pid = pid, "service restarted");
+                kmsg(&format!("service restarted: {} (pid={})", restart.service_name, pid));
                 if pid > 0
                     && let Err(e) = cgroup::move_to_cgroup(&restart.service_name, pid)
                 {
@@ -441,11 +443,12 @@ fn handle_signal(
 ) -> Result<()> {
     match signo as i32 {
         libc::SIGCHLD => {
-            // Reap all zombies (including orphaned processes)
-            let _reaped = reaper::reap_zombies();
-            // Reap tracked services and determine crash actions
+            // Reap tracked services FIRST (before waitpid(-1) steals them)
             let service_exits = init.reap_services();
+            // Then reap any remaining zombies (orphaned processes)
+            let _reaped = reaper::reap_zombies();
             for (name, code, action) in &service_exits {
+                kmsg(&format!("service exited: {name} (code={code}, action={action:?})"));
                 info!(
                     service = %name,
                     exit_code = code,
@@ -460,15 +463,14 @@ fn handle_signal(
 
                 // Schedule restart if needed (non-blocking, via timerfd)
                 if let argonaut::CrashAction::Restart { delay_ms } = action {
-                    info!(
-                        service = %name,
-                        delay_ms = delay_ms,
-                        "scheduling delayed restart"
-                    );
+                    kmsg(&format!("scheduling restart: {name} (delay={delay_ms}ms)"));
                     pending_restarts.push_back(PendingRestart {
                         service_name: name.clone(),
                         restart_at: Instant::now() + Duration::from_millis(*delay_ms),
                     });
+                }
+                if let argonaut::CrashAction::GiveUp { reason } = action {
+                    kmsg(&format!("giving up on: {name} ({reason})"));
                 }
             }
         }
@@ -509,6 +511,7 @@ fn handle_signal(
 ///
 /// This function does not return — it ends with a `reboot` syscall.
 fn shutdown(init: &mut ArgonautInit, shutdown_type: ShutdownType) -> ! {
+    kmsg(&format!("shutdown: {shutdown_type}"));
     info!(shutdown_type = %shutdown_type, "executing shutdown");
 
     match init.plan_shutdown(shutdown_type) {
