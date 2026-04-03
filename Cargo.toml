@@ -1,0 +1,28 @@
+[package]
+name = "kybernet"
+version = "0.50.0"
+edition = "2024"
+rust-version = "1.89"
+license = "GPL-3.0-only"
+description = "Kybernet — PID 1 helmsman for AGNOS (uses argonaut)"
+homepage = "https://github.com/MacCracken/kybernet"
+repository = "https://github.com/MacCracken/kybernet"
+readme = "README.md"
+keywords = ["init", "pid1", "boot", "agnos"]
+categories = ["os"]
+publish = false
+exclude = [".claude/", ".github/", "docs/", "scripts/"]
+
+[dependencies]
+argonaut = { version = "0.90", path = "../argonaut", features = ["audit", "security"] }
+agnosys = { version = "0.50", path = "../agnosys", features = ["security"] }
+anyhow = "1"
+libc = "0.2"
+nix = { version = "0.31", features = ["signal", "process", "socket", "uio", "resource", "sched", "mount", "fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[dev-dependencies]
+tempfile = "3"

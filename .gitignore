@@ -1,0 +1,36 @@
+# Build
+/target/
+**/*.rs.bk
+
+# Cargo (binary — track Cargo.lock)
+!Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Coverage / profiling
+/coverage/
+*.profraw
+*.profdata
+lcov.info
+tarpaulin-report.*
+
+# Claude Code
+.claude/
+
+# Benchmarks
+/target/criterion/
+
+# Environment / secrets
+.env
+.env.*
+*.pem
+*.key
