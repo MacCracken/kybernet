@@ -231,4 +231,36 @@ mod tests {
         let tfd = create_timerfd(Duration::from_millis(100)).expect("create_timerfd failed");
         assert!(tfd.raw() >= 0);
     }
+
+    #[test]
+    fn drain_timerfd_returns_nonzero_after_expiration() {
+        let tfd = create_timerfd(Duration::from_millis(10)).expect("create_timerfd failed");
+        // Wait for at least one expiration
+        std::thread::sleep(Duration::from_millis(50));
+        let count = drain_timerfd(tfd.raw()).expect("drain_timerfd failed");
+        assert!(count >= 1, "expected at least 1 expiration, got {count}");
+    }
+
+    #[test]
+    fn into_raw_fd_keeps_fd_open() {
+        // Documents the console.rs fix: into_raw_fd transfers ownership
+        // so the File destructor does NOT close the fd.
+        use std::fs::OpenOptions;
+        use std::os::unix::io::IntoRawFd;
+
+        let file = OpenOptions::new()
+            .read(true)
+            .open("/dev/null")
+            .expect("failed to open /dev/null");
+        let raw = file.into_raw_fd();
+
+        // fd should still be valid after into_raw_fd
+        let ret = unsafe { libc::fcntl(raw, libc::F_GETFD) };
+        assert!(ret >= 0, "fd should be open after into_raw_fd");
+
+        // Clean up
+        unsafe {
+            libc::close(raw);
+        }
+    }
 }

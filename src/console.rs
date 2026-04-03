@@ -4,7 +4,7 @@
 //! Must run before any logging or output.
 
 use std::fs::OpenOptions;
-use std::os::unix::io::AsRawFd;
+use std::os::unix::io::{AsRawFd, IntoRawFd};
 
 use anyhow::{Context, Result};
 use tracing::info;
@@ -39,7 +39,7 @@ pub fn setup_console() -> Result<()> {
 
     // Open /dev/console as fd 1 (stdout), fallback to /dev/null
     let console_fd = match OpenOptions::new().write(true).open("/dev/console") {
-        Ok(f) => f.as_raw_fd(),
+        Ok(f) => f.into_raw_fd(),
         Err(_) => {
             // Fallback: dup /dev/null to fd 1
             // SAFETY: dup2 is safe when both fds are valid

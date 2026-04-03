@@ -107,7 +107,7 @@ fn run() -> Result<()> {
     let mut tracker = HealthTracker::new();
     kmsg("phase 7: argonaut initialized");
 
-    // Phase 6: Execute tmpfiles
+    // Phase 8: Execute tmpfiles
     if !tmpfiles.is_empty() {
         let cmds = argonaut::generate_tmpfile_commands(&tmpfiles);
         if let Err(e) = argonaut::run_command_sequence(&cmds) {
@@ -116,7 +116,7 @@ fn run() -> Result<()> {
         init.mark_step_complete(BootStage::StartSecurity);
     }
 
-    // Phase 7: Boot stages
+    // Phase 9: Boot stages
     run_boot_stages(&mut init)?;
 
     // Phase 8: Notify socket — bind BEFORE starting services so services inherit NOTIFY_SOCKET
@@ -325,8 +325,8 @@ fn event_loop(
 
             match token {
                 TOKEN_SIGNAL => {
-                    // Read signal from signalfd
-                    if let Ok(Some(sig_info)) = signal_fd.read_signal() {
+                    // Drain all queued signals (multiple may arrive between epoll_wait calls)
+                    while let Ok(Some(sig_info)) = signal_fd.read_signal() {
                         handle_signal(init, sig_info.ssi_signo, &mut pending_restarts)?;
                     }
                 }
@@ -389,28 +389,34 @@ fn event_loop(
 }
 
 /// Process pending restarts whose delay has elapsed.
+///
+/// Scans the entire queue rather than stopping at the first future item,
+/// because restarts are pushed with varying delays and the queue is not
+/// sorted by `restart_at`.
 fn process_pending_restarts(init: &mut ArgonautInit, pending: &mut VecDeque<PendingRestart>) {
     let now = Instant::now();
-    while let Some(front) = pending.front() {
-        if front.restart_at > now {
-            break; // Not yet time — queue is ordered by time
+    let mut ready: Vec<String> = Vec::new();
+    pending.retain(|r| {
+        if r.restart_at <= now {
+            ready.push(r.service_name.clone());
+            false
+        } else {
+            true
         }
-        let restart = pending.pop_front().unwrap();
-        kmsg(&format!("executing restart: {}", restart.service_name));
-        match init.restart_service(&restart.service_name, Duration::from_secs(5)) {
+    });
+    for name in &ready {
+        kmsg(&format!("executing restart: {name}"));
+        match init.restart_service(name, Duration::from_secs(5)) {
             Ok(pid) => {
-                kmsg(&format!(
-                    "service restarted: {} (pid={})",
-                    restart.service_name, pid
-                ));
+                kmsg(&format!("service restarted: {name} (pid={pid})"));
                 if pid > 0
-                    && let Err(e) = cgroup::move_to_cgroup(&restart.service_name, pid)
+                    && let Err(e) = cgroup::move_to_cgroup(name, pid)
                 {
-                    warn!(service = %restart.service_name, error = %e, "cgroup setup after restart failed");
+                    warn!(service = %name, error = %e, "cgroup setup after restart failed");
                 }
             }
             Err(e) => {
-                error!(service = %restart.service_name, error = %e, "delayed restart failed");
+                error!(service = %name, error = %e, "delayed restart failed");
             }
         }
     }
