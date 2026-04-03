@@ -51,27 +51,7 @@ cp "${REPOS}/ifran/target/${TARGET}/release/ifran" "${INITRAMFS_DIR}/usr/lib/agn
 strip "${INITRAMFS_DIR}/usr/lib/agnos/ifran"
 echo "  ifran → /usr/lib/agnos/ifran"
 
-# Busybox for basic tools (ls, ps, kill, etc.)
-BUSYBOX="/usr/lib/initcpio/busybox"
-if [ -f "$BUSYBOX" ]; then
-    cp "$BUSYBOX" "${INITRAMFS_DIR}/bin/busybox"
-    chmod +x "${INITRAMFS_DIR}/bin/busybox"
-    for cmd in sh sleep echo kill cat ls ps mount; do
-        ln -sf busybox "${INITRAMFS_DIR}/bin/$cmd"
-    done
-    for lib in $(ldd "$BUSYBOX" 2>/dev/null | grep -oP '/\S+'); do
-        [ -f "$lib" ] && mkdir -p "${INITRAMFS_DIR}$(dirname "$lib")" && cp "$lib" "${INITRAMFS_DIR}${lib}"
-    done
-    [ -f /lib64/ld-linux-x86-64.so.2 ] && mkdir -p "${INITRAMFS_DIR}/lib64" && cp /lib64/ld-linux-x86-64.so.2 "${INITRAMFS_DIR}/lib64/"
-fi
-
-# Shutdown trigger (kill -TERM 1 after 10s)
-cat > "${INITRAMFS_DIR}/usr/bin/shutdown-after.sh" << 'EOF'
-#!/bin/sh
-sleep 10
-kill -TERM 1
-EOF
-chmod +x "${INITRAMFS_DIR}/usr/bin/shutdown-after.sh"
+# No busybox — all real AGNOS binaries. agnoshi is the emergency shell.
 
 # Desktop config — all real services
 cat > "${INITRAMFS_DIR}/etc/argonaut/config.json" << 'EOF'
