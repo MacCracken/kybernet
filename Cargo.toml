@@ -15,7 +15,7 @@ exclude = [".claude/", ".github/", "docs/", "scripts/"]
 
 [dependencies]
 argonaut = { version = "0.90", path = "../argonaut", features = ["audit", "security"] }
-agnosys = { version = "0.50", path = "../agnosys", features = ["security"] }
+agnosys = { version = "0.51", path = "../agnosys", features = ["security"] }
 anyhow = "1"
 libc = "0.2"
 nix = { version = "0.31", features = ["signal", "process", "socket", "uio", "resource", "sched", "mount", "fs"] }

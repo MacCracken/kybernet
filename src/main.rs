@@ -96,7 +96,10 @@ fn run() -> Result<()> {
 
     // Phase 6: Load configuration
     let config = load_config()?;
-    kmsg(&format!("phase 6: config loaded (mode={})", config.boot_mode));
+    kmsg(&format!(
+        "phase 6: config loaded (mode={})",
+        config.boot_mode
+    ));
 
     // Phase 7: Initialize argonaut
     let tmpfiles = config.tmpfiles.clone();
@@ -134,31 +137,6 @@ fn run() -> Result<()> {
     event_loop(&mut init, &mut tracker, &signal_fd, &notify_listener)?;
 
     Ok(())
-}
-
-/// Set up early console output before devtmpfs is mounted.
-///
-/// Tries `/dev/console` first (kernel creates this for PID 1),
-/// then falls back to keeping inherited stdio.
-fn early_console_setup() {
-    use std::fs::OpenOptions;
-    use std::os::unix::io::AsRawFd;
-
-    // The kernel should have /dev/console available for PID 1 even without devtmpfs
-    if let Ok(console) = OpenOptions::new().read(true).write(true).open("/dev/console") {
-        let fd = console.as_raw_fd();
-        // SAFETY: dup2 to redirect stdio to /dev/console
-        unsafe {
-            libc::dup2(fd, 0);
-            libc::dup2(fd, 1);
-            libc::dup2(fd, 2);
-            if fd > 2 {
-                libc::close(fd);
-            }
-        }
-        std::mem::forget(console); // Don't close the fd
-    }
-    // If /dev/console doesn't exist, keep inherited stdio
 }
 
 /// Initialize tracing/logging.
@@ -421,7 +399,10 @@ fn process_pending_restarts(init: &mut ArgonautInit, pending: &mut VecDeque<Pend
         kmsg(&format!("executing restart: {}", restart.service_name));
         match init.restart_service(&restart.service_name, Duration::from_secs(5)) {
             Ok(pid) => {
-                kmsg(&format!("service restarted: {} (pid={})", restart.service_name, pid));
+                kmsg(&format!(
+                    "service restarted: {} (pid={})",
+                    restart.service_name, pid
+                ));
                 if pid > 0
                     && let Err(e) = cgroup::move_to_cgroup(&restart.service_name, pid)
                 {
@@ -448,7 +429,9 @@ fn handle_signal(
             // Then reap any remaining zombies (orphaned processes)
             let _reaped = reaper::reap_zombies();
             for (name, code, action) in &service_exits {
-                kmsg(&format!("service exited: {name} (code={code}, action={action:?})"));
+                kmsg(&format!(
+                    "service exited: {name} (code={code}, action={action:?})"
+                ));
                 info!(
                     service = %name,
                     exit_code = code,

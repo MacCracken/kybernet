@@ -49,16 +49,6 @@ fn is_mounted(target: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Mount all essential filesystems for PID 1.
-///
-/// Order matters:
-/// 1. `/proc` — needed for process info and mount checks
-/// 2. `/sys` — needed for device info and cgroups
-/// 3. `/dev` — needed for device nodes (devtmpfs)
-/// 4. `/dev/pts` — pseudo-terminals
-/// 5. `/dev/shm` — shared memory
-/// 6. `/run` — runtime state (PID files, sockets)
-/// 7. `/sys/fs/cgroup` — cgroup v2 unified hierarchy
 /// Mount devtmpfs on `/dev` — must be the very first mount.
 ///
 /// This creates `/dev/console`, `/dev/null`, `/dev/ttyS0`, etc.
@@ -83,6 +73,19 @@ pub fn mount_devtmpfs() -> Result<()> {
     Ok(())
 }
 
+/// Mount all essential filesystems for PID 1.
+///
+/// Order matters:
+///
+/// 1. `/proc` — needed for process info and mount checks
+/// 2. `/sys` — needed for device info and cgroups
+/// 3. `/dev/pts` — pseudo-terminals
+/// 4. `/dev/shm` — shared memory
+/// 5. `/run` — runtime state (PID files, sockets)
+/// 6. `/sys/fs/cgroup` — cgroup v2 unified hierarchy
+///
+/// Note: `/dev` (devtmpfs) is mounted separately via [`mount_devtmpfs`]
+/// before this function is called.
 pub fn mount_essential_filesystems() -> Result<()> {
     info!("mounting essential filesystems");
 
@@ -104,15 +107,6 @@ pub fn mount_essential_filesystems() -> Result<()> {
         "sysfs",
         MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC,
         None,
-    )?;
-
-    // /dev (devtmpfs — kernel populates device nodes)
-    mount_if_needed(
-        "devtmpfs",
-        "/dev",
-        "devtmpfs",
-        MsFlags::MS_NOSUID,
-        Some("mode=0755"),
     )?;
 
     // /dev/pts
@@ -178,24 +172,16 @@ mod tests {
 
     #[test]
     fn proc_is_mounted() {
-        // /proc should be mounted on any Linux system running tests
         assert!(is_mounted("/proc"), "/proc should be mounted");
     }
 
     #[test]
     fn nonexistent_path_is_not_mounted() {
-        assert!(
-            !is_mounted("/nonexistent_mount_point_12345"),
-            "nonexistent path should not be mounted"
-        );
+        assert!(!is_mounted("/nonexistent_mount_point_12345"));
     }
 
     #[test]
     fn is_mounted_does_not_match_partial_paths() {
-        // "/pro" should not match "/proc"
-        assert!(
-            !is_mounted("/pro"),
-            "partial path should not match a real mount point"
-        );
+        assert!(!is_mounted("/pro"), "partial path should not match /proc");
     }
 }
