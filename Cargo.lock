@@ -4,18 +4,8 @@ version = 4
 
 [[package]]
 name = "agnosys"
-version = "0.50.0"
-source = "git+https://github.com/MacCracken/agnosys#f71cd9e50fb07dd1e95092fdfd42b46864705194"
-dependencies = [
- "bitflags",
- "libc",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "agnosys"
 version = "0.51.0"
+source = "git+https://github.com/MacCracken/agnosys#176e7ec45e8b6cd10347a2b8491c42655ff94c1c"
 dependencies = [
  "bitflags",
  "libc",
@@ -50,8 +40,9 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 [[package]]
 name = "argonaut"
 version = "0.90.0"
+source = "git+https://github.com/MacCracken/argonaut#63bfc3a3e9f4880263b85112c4baeb4c703c327d"
 dependencies = [
- "agnosys 0.50.0",
+ "agnosys",
  "anyhow",
  "chrono",
  "libro",
@@ -302,7 +293,7 @@ dependencies = [
 name = "kybernet"
 version = "0.50.0"
 dependencies = [
- "agnosys 0.51.0",
+ "agnosys",
  "anyhow",
  "argonaut",
  "libc",

@@ -14,8 +14,8 @@ publish = false
 exclude = [".claude/", ".github/", "docs/", "scripts/"]
 
 [dependencies]
-argonaut = { version = "0.90", path = "../argonaut", features = ["audit", "security"] }
-agnosys = { version = "0.51", path = "../agnosys", features = ["security"] }
+argonaut = { version = "0.90", git = "https://github.com/MacCracken/argonaut", features = ["audit", "security"] }
+agnosys = { version = "0.51", git = "https://github.com/MacCracken/agnosys", features = ["security"] }
 anyhow = "1"
 libc = "0.2"
 nix = { version = "0.31", features = ["signal", "process", "socket", "uio", "resource", "sched", "mount", "fs"] }
