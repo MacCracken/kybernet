@@ -1,0 +1,4 @@
+timestamp,label,boot_mode,boot_time_ms
+2026-04-03T12:06:55Z,qemu-minimal,desktop,2980
+2026-04-03T12:06:55Z,qemu-desktop-real,desktop,3280
+2026-04-03T12:06:55Z,qemu-edge,desktop,3800
