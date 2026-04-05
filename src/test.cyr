@@ -1,0 +1,164 @@
+# kybernet_test.cyr — integration test for upgraded kybernet modules
+# Tests: Result returns, Option types, str_builder, callbacks
+
+# Cyrius stdlib (vendored in lib/)
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/io.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/fnptr.cyr"
+include "lib/assert.cyr"
+include "lib/tagged.cyr"
+include "lib/callback.cyr"
+include "lib/agnosys/syscalls.cyr"
+# Kybernet modules
+include "src/lib/console.cyr"
+include "src/lib/signals.cyr"
+include "src/lib/reaper.cyr"
+include "src/lib/privdrop.cyr"
+include "src/lib/mount.cyr"
+include "src/lib/cgroup.cyr"
+include "src/lib/eventloop.cyr"
+
+fn test_constants() {
+    println("--- constants ---");
+    assert_eq(SYS_READ, 0, "SYS_READ");
+    assert_eq(SYS_MOUNT, 165, "SYS_MOUNT");
+    assert_eq(SIGCHLD, 17, "SIGCHLD");
+    assert_eq(EPOLLIN, 1, "EPOLLIN");
+    assert_eq(TOKEN_SIGNAL, 1, "TOKEN_SIGNAL");
+    assert_eq(TOKEN_HEALTH, 2, "TOKEN_HEALTH");
+    return 0;
+}
+
+fn test_process() {
+    println("--- process ---");
+    var pid = sys_getpid();
+    assert(pid > 0, "getpid");
+    var ppid = sys_getppid();
+    assert(ppid > 0, "getppid");
+    return 0;
+}
+
+fn test_wait_macros() {
+    println("--- wait ---");
+    assert(WIFEXITED(0) == 1, "WIFEXITED(0)");
+    assert_eq(WEXITSTATUS(256), 1, "WEXITSTATUS(256)");
+    assert(WIFSIGNALED(9) == 1, "WIFSIG(9)");
+    assert_eq(WTERMSIG(9), 9, "WTERMSIG(9)");
+    return 0;
+}
+
+fn test_signals() {
+    println("--- signals ---");
+    var set = sigset_new();
+    sigset_add(set, SIGCHLD);
+    sigset_add(set, SIGTERM);
+    sigset_add(set, SIGPWR);
+    assert(sigset_has(set, SIGCHLD) == 1, "has SIGCHLD");
+    assert(sigset_has(set, SIGKILL) == 0, "!has SIGKILL");
+    assert_eq(classify_signal(SIGCHLD), SIG_CLASS_CHILD, "class CHLD");
+    assert_eq(classify_signal(SIGTERM), SIG_CLASS_TERM, "class TERM");
+    assert_eq(classify_signal(99), SIG_CLASS_NONE, "class unknown");
+    assert(is_handled_signal(SIGCHLD) == 1, "handled SIGCHLD");
+    assert(is_handled_signal(SIGKILL) == 0, "!handled SIGKILL");
+    return 0;
+}
+
+fn test_epoll() {
+    println("--- epoll ---");
+    var ev = epoll_event_new(EPOLLIN, 42);
+    assert_eq(load32(ev), EPOLLIN, "ev events");
+    assert_eq(load64(ev + 4), 42, "ev data");
+    var ts = timerspec_new(10, 1);
+    assert_eq(load64(ts), 10, "interval");
+
+    # Live epoll test
+    var epfd_r = epoll_new();
+    assert(is_ok(epfd_r) == 1, "epoll_create");
+    if (is_ok(epfd_r) == 1) {
+        var epfd = result_unwrap(epfd_r);
+        var tfd_r = timer_new(1);
+        if (is_ok(tfd_r) == 1) {
+            var r = epoll_add_read(epfd, result_unwrap(tfd_r), TOKEN_WATCHDOG);
+            assert(is_ok(r) == 1, "epoll_add");
+            sys_close(result_unwrap(tfd_r));
+        }
+        owned_fd_close(epfd);
+    }
+    return 0;
+}
+
+fn test_fileops() {
+    println("--- fileops ---");
+    var r = sys_mkdir("/tmp/cyr_ktest2", 0x1C0);
+    assert(is_err(r) == 0, "mkdir");
+    sys_rmdir("/tmp/cyr_ktest2");
+
+    var fd = sys_open("/tmp/cyr_ktest2_f", O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);
+    assert(fd >= 0, "open");
+    if (fd >= 0) {
+        sys_write(fd, "test\n", 5);
+        sys_close(fd);
+        sys_unlink("/tmp/cyr_ktest2_f");
+    }
+    return 0;
+}
+
+fn test_cgroup() {
+    println("--- cgroup ---");
+    var path = cgroup_path("myservice");
+    assert(str_contains(path, "kybernet.slice") == 1, "path has slice");
+    assert(str_ends_with(path, "myservice") == 1, "path ends service");
+
+    var file = cgroup_file("myservice", "cgroup.procs");
+    assert(str_ends_with(file, "cgroup.procs") == 1, "file ends procs");
+    return 0;
+}
+
+fn test_privdrop() {
+    println("--- privdrop ---");
+    var root = is_root();
+    if (root == 0) {
+        # Not root — verify drop_privileges returns NOT_ROOT
+        var r = drop_privileges(1000, 1000);
+        assert(is_err_result(r) == 1, "not root fails");
+        assert_eq(payload(r), PRIV_NOT_ROOT, "PRIV_NOT_ROOT");
+    } else {
+        assert(root == 1, "is root");
+    }
+    return 0;
+}
+
+fn _dbl(x) { return x * 2; }
+fn _sum(a, x) { return a + x; }
+
+fn test_callbacks() {
+    println("--- callbacks ---");
+    var v = vec_new();
+    vec_push(v, 1);
+    vec_push(v, 2);
+    vec_push(v, 3);
+    var mapped = vec_map(v, &_dbl);
+    assert_eq(vec_get(mapped, 0), 2, "map");
+    assert_eq(vec_fold(v, 0, &_sum), 6, "fold");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_constants();
+    test_process();
+    test_wait_macros();
+    test_signals();
+    test_epoll();
+    test_fileops();
+    test_cgroup();
+    test_privdrop();
+    test_callbacks();
+    return assert_summary();
+}
+var exit_code = main();
+syscall(60, exit_code);

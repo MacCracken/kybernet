@@ -1,0 +1,11 @@
+[package]
+name = "kybernet"
+version = "0.9.0"
+description = "PID 1 init system for AGNOS"
+license = "GPL-3.0-only"
+language = "cyrius"
+
+[build]
+entry = "src/main.cyr"
+test = "src/test.cyr"
+output = "kybernet"

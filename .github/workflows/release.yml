@@ -2,66 +2,43 @@ name: Release
 
 on:
   push:
-    tags:
-      - "[0-9]*.[0-9]*.[0-9]*"
-
-permissions:
-  contents: write
+    tags: ['*']
 
 jobs:
   ci:
-    name: CI Gate
     uses: ./.github/workflows/ci.yml
 
   release:
-    name: Build & Release
+    needs: ci
     runs-on: ubuntu-latest
-    needs: [ci]
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
 
-      - name: Verify version consistency
+      - name: Verify VERSION matches tag
         run: |
-          FILE_VERSION=$(cat VERSION | tr -d '[:space:]')
-          CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
-          TAG_VERSION="${GITHUB_REF_NAME}"
-          if [ "$FILE_VERSION" != "$TAG_VERSION" ]; then
-            echo "ERROR: VERSION ($FILE_VERSION) != tag ($TAG_VERSION)"
+          VERSION=$(cat VERSION | tr -d '[:space:]')
+          TAG="${GITHUB_REF#refs/tags/}"
+          if [ "$VERSION" != "$TAG" ]; then
+            echo "ERROR: VERSION ($VERSION) does not match tag ($TAG)"
             exit 1
           fi
-          if [ "$CARGO_VERSION" != "$TAG_VERSION" ]; then
-            echo "ERROR: Cargo.toml ($CARGO_VERSION) != tag ($TAG_VERSION)"
-            exit 1
-          fi
-          echo "Version verified: $TAG_VERSION"
 
-      - name: Build release (linux-amd64)
-        run: cargo build --release
-        env:
-          RUSTFLAGS: "-D warnings"
-
-      - name: Build release (linux-arm64)
-        uses: houseabsolute/actions-rust-cross@v1
-        with:
-          command: build
-          target: aarch64-unknown-linux-gnu
-          args: --release
-
-      - name: Package binaries
+      - name: Clone Cyrius toolchain
         run: |
-          TAG="${GITHUB_REF_NAME}"
-          mkdir -p dist
-          cp target/release/kybernet "dist/kybernet-${TAG}-linux-amd64"
-          cp target/aarch64-unknown-linux-gnu/release/kybernet "dist/kybernet-${TAG}-linux-arm64" 2>/dev/null || true
-          cd dist && sha256sum * > SHA256SUMS
+          git clone --depth 1 https://github.com/MacCracken/cyrius.git ../cyrius
+          cd ../cyrius
+          sh bootstrap/bootstrap.sh
+          cat stage1/cc2.cyr | ./build/stage1f > ./build/cc2 && chmod +x ./build/cc2
 
-      - name: Create GitHub Release
+      - name: Build
+        run: |
+          sh scripts/build.sh
+          cp build/kybernet kybernet-x86_64
+
+      - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          name: "kybernet ${{ github.ref_name }}"
           generate_release_notes: true
-          prerelease: ${{ startsWith(github.ref_name, '0.') }}
-          files: |
-            dist/*
+          files: kybernet-x86_64

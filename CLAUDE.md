@@ -2,59 +2,73 @@
 
 ## Project Identity
 
-**Kybernet** (Greek: κυβερνήτης, "helmsman") — PID 1 binary for AGNOS. The helmsman that steers the Argo. Uses the argonaut library for service management, boot sequencing, and health checks. Handles the unsafe kernel interactions that argonaut's `forbid(unsafe_code)` cannot.
+**Kybernet** (Greek: kybernetes, "helmsman") — PID 1 init system for AGNOS. Written in Cyrius.
 
-- **Type**: Binary crate (uses argonaut library)
+- **Type**: Cyrius binary (PID 1 init)
 - **License**: GPL-3.0-only
-- **MSRV**: 1.89
-- **Version**: SemVer 0.D.M pre-1.0
-- **publish**: false (ships via ark, not crates.io)
+- **Version**: 0.9.0
+- **Language**: Cyrius (self-hosting, zero external dependencies)
 
-## Consumers
+## Goal
 
-AGNOS boot (PID 1), systemd delegate mode
+The helmsman that steers the Argo. Manages system boot, essential mounts, signal handling, zombie reaping, cgroup isolation, and orderly shutdown. All in Cyrius — no Rust, no C, no libc.
+
+## Build
+
+```sh
+sh scripts/build.sh        # Build (requires ../cyrius/build/cc2)
+sh scripts/test.sh         # Run 33 tests
+```
+
+## Project Structure
+
+```
+kybernet/
+├── VERSION, CLAUDE.md, README.md, CHANGELOG.md, LICENSE
+├── src/
+│   ├── main.cyr          # Boot sequence + event loop
+│   ├── test.cyr           # Integration tests (33 assertions)
+│   └── lib/
+│       ├── console.cyr    # Stdio redirect
+│       ├── signals.cyr    # Signal blocking + signalfd
+│       ├── reaper.cyr     # Zombie reaping
+│       ├── privdrop.cyr   # Privilege dropping
+│       ├── mount.cyr      # Essential filesystem mounts
+│       ├── cgroup.cyr     # Cgroup v2 management
+│       └── eventloop.cyr  # Epoll + timerfd
+├── scripts/
+│   ├── build.sh           # Build script
+│   └── test.sh            # Test runner
+├── rust-old/              # Previous Rust implementation (reference)
+└── build/                 # Generated binaries (gitignored)
+```
+
+## Dependencies (vendored in lib/)
+
+Cyrius stdlib is vendored in `lib/` — no external path dependencies at compile time.
+Only the compiler binary (`cc2`) is needed from the cyrius repo.
+
+- string, fmt, alloc, io, vec, str, fnptr — core stdlib
+- tagged — Option/Result types
+- callback — vec_map, vec_filter, fork_with_pre_exec
+- agnosys — Linux syscall bindings
+- assert — test framework (test.cyr only)
 
 ## Development Process
 
-### P(-1): Scaffold Hardening (before any new features)
-
-1. Test + benchmark sweep of existing code
-2. Cleanliness check: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo audit`, `cargo deny check`
-3. Get baseline benchmarks (`./scripts/bench-history.sh`)
-4. Initial refactor + audit (performance, memory, security, edge cases)
-5. Cleanliness check — must be clean after audit
-6. Additional tests/benchmarks from observations
-7. Post-audit benchmarks — prove the wins
-8. Repeat audit if heavy
-
-### Development Loop (continuous)
-
-1. Work phase — new features, roadmap items, bug fixes
-2. Cleanliness check: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo audit`, `cargo deny check`
-3. Test + benchmark additions for new code
-4. Run benchmarks (`./scripts/bench-history.sh`)
-5. Audit phase — review performance, memory, security, throughput, correctness
-6. Cleanliness check — must be clean after audit
-7. Deeper tests/benchmarks from audit observations
-8. Run benchmarks again — prove the wins
-9. If audit heavy → return to step 5
-10. Documentation — update CHANGELOG, roadmap, docs
-11. Return to step 1
-
-### Key Principles
-
-- **Never skip benchmarks.** Numbers don't lie. The CSV history is the proof.
-- **Own the stack.** Depend on argonaut and agnosys, not external init libraries.
-- **Minimal unsafe.** Every `unsafe` block gets a `// SAFETY:` comment explaining the invariant.
-- **No panics.** PID 1 must never panic — propagate errors, log, and degrade gracefully.
-- **Boot time is sacred.** Desktop < 3s, Edge < 1s. Measure everything.
-- **`tracing` on all operations** — structured logging for audit trail.
-- **Test in QEMU** — real kernel, real PID 1 semantics.
-- **`#[non_exhaustive]`** on all public enums.
-- **`#[must_use]`** on all pure functions.
+```
+1. Make changes to src/lib/*.cyr or src/main.cyr
+2. Build: sh scripts/build.sh
+3. Test: sh scripts/test.sh (33 tests must pass)
+4. All functions return Result or Option where failure is possible
+5. Use str_builder for path construction
+6. Use klog() for stderr logging
+```
 
 ## DO NOT
-- **Do not commit or push** — the user handles all git operations (commit, push, tag)
+
+- **Do not commit or push** — the user handles all git operations
 - **NEVER use `gh` CLI** — use `curl` to GitHub API only
-- Do not add unnecessary dependencies — keep it lean
-- Do not skip benchmarks before claiming performance improvements
+- Do not modify Cyrius libraries from this repo — changes go in `../cyrius/`
+- Do not add C, Rust, or assembly files — everything is Cyrius
+- Test after every change

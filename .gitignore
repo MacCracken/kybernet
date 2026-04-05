@@ -1,9 +1,6 @@
-# Build
-/target/
-**/*.rs.bk
-
-# Cargo (binary — track Cargo.lock)
-!Cargo.lock
+# Build output
+/build/
+/rust-old/target/
 
 # IDE
 .idea/
@@ -16,21 +13,19 @@
 .DS_Store
 Thumbs.db
 
-# Coverage / profiling
-/coverage/
-*.profraw
-*.profdata
-lcov.info
-tarpaulin-report.*
-
 # Claude Code
 .claude/
 
-# Benchmarks
-/target/criterion/
+# Core dumps
+*.core
 
 # Environment / secrets
 .env
 .env.*
 *.pem
 *.key
+
+# Coverage
+/coverage/
+*.profraw
+*.profdata

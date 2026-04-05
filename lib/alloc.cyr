@@ -1,0 +1,41 @@
+# alloc.cyr — heap allocator using brk syscall
+# Usage: include "lib/alloc.cyr"
+# Call alloc_init() before any allocations.
+#
+# Bump allocator: fast, no individual free.
+# alloc(size) returns aligned pointer or 0 on failure.
+# alloc_reset() frees everything (batch).
+
+var _heap_base = 0;
+var _heap_ptr = 0;
+var _heap_end = 0;
+
+fn alloc_init() {
+    _heap_base = syscall(12, 0);
+    _heap_end = _heap_base + 0x100000;
+    syscall(12, _heap_end);
+    _heap_ptr = _heap_base;
+    return _heap_base;
+}
+
+fn alloc(size) {
+    # Align to 8 bytes
+    size = (size + 7) & (0 - 8);
+    var ptr = _heap_ptr;
+    _heap_ptr = _heap_ptr + size;
+    if (_heap_ptr > _heap_end) {
+        # Grow heap
+        _heap_end = _heap_end + 0x100000;
+        syscall(12, _heap_end);
+    }
+    return ptr;
+}
+
+fn alloc_reset() {
+    _heap_ptr = _heap_base;
+    return 0;
+}
+
+fn alloc_used() {
+    return _heap_ptr - _heap_base;
+}

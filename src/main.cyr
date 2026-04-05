@@ -1,0 +1,168 @@
+# kybernet — AGNOS PID 1 init system
+# Written in Cyrius. Manages system boot, services, and shutdown.
+#
+# Boot sequence:
+#   1. Setup console (redirect stdio)
+#   2. Mount essential filesystems
+#   3. Block signals + create signalfd
+#   4. Setup epoll event loop
+#   5. Start services (future)
+#   6. Event loop: dispatch signals, timers, health checks
+#   7. Shutdown on SIGTERM/SIGINT
+
+# Cyrius stdlib (vendored in lib/)
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/io.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/fnptr.cyr"
+include "lib/tagged.cyr"
+include "lib/callback.cyr"
+include "lib/agnosys/syscalls.cyr"
+
+# Kybernet modules
+include "src/lib/console.cyr"
+include "src/lib/signals.cyr"
+include "src/lib/reaper.cyr"
+include "src/lib/privdrop.cyr"
+include "src/lib/mount.cyr"
+include "src/lib/cgroup.cyr"
+include "src/lib/eventloop.cyr"
+
+fn kmsg(msg) {
+    var fd = sys_open("/dev/kmsg", O_WRONLY, 0);
+    if (fd >= 0) {
+        sys_write(fd, msg, strlen(msg));
+        sys_close(fd);
+    }
+    return 0;
+}
+
+fn klog(msg) {
+    sys_write(STDERR_FD, "kybernet: ", 10);
+    sys_write(STDERR_FD, msg, strlen(msg));
+    sys_write(STDERR_FD, "\n", 1);
+    return 0;
+}
+
+fn shutdown(cmd) {
+    klog("syncing filesystems...");
+    sys_sync();
+    klog("shutdown");
+    sys_reboot(cmd);
+    # If reboot fails, pause forever
+    sys_pause();
+    return 0;
+}
+
+fn handle_signal(signum) {
+    var cls = classify_signal(signum);
+    if (cls == SIG_CLASS_CHILD) {
+        reap_and_log();
+        return 0;
+    }
+    if (cls == SIG_CLASS_TERM) {
+        klog("received SIGTERM");
+        shutdown(RB_POWER_OFF);
+        return 0;
+    }
+    if (cls == SIG_CLASS_INT) {
+        klog("received SIGINT");
+        shutdown(RB_AUTOBOOT);
+        return 0;
+    }
+    if (cls == SIG_CLASS_HUP) {
+        klog("received SIGHUP — reload not implemented");
+        return 0;
+    }
+    if (cls == SIG_CLASS_PWR) {
+        klog("received SIGPWR — power failure");
+        shutdown(RB_POWER_OFF);
+        return 0;
+    }
+    return 0;
+}
+
+fn run() {
+    klog("starting");
+
+    # Phase 1: Console
+    var con_r = setup_console();
+    if (is_err_result(con_r) == 1) {
+        klog("console setup failed (continuing)");
+    }
+
+    # Phase 2: Mount devtmpfs first, then essential filesystems
+    mount_devtmpfs();
+    var mount_r = mount_essential();
+    if (is_ok(mount_r) == 1) {
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "mounted ");
+        str_builder_add_int(sb, result_unwrap(mount_r));
+        str_builder_add_cstr(sb, " filesystems");
+        var msg = str_builder_build(sb);
+        klog(str_data(msg));
+    }
+
+    # Phase 3: Signals
+    var sfd_r = setup_signals();
+    if (is_err_result(sfd_r) == 1) {
+        klog("signal setup failed");
+        return 1;
+    }
+    var sfd = result_unwrap(sfd_r);
+
+    # Phase 4: Event loop
+    var epfd_r = eventloop_setup(sfd, 30, 10);
+    if (is_err_result(epfd_r) == 1) {
+        klog("eventloop setup failed");
+        return 1;
+    }
+    var epfd = result_unwrap(epfd_r);
+
+    klog("ready — entering event loop");
+
+    # Phase 5: Event loop
+    var running = 1;
+    while (running == 1) {
+        var events = epoll_wait_events(epfd, 8, 0 - 1);
+        var elen = vec_len(events);
+        var ei = 0;
+        while (ei < elen) {
+            var ev = vec_get(events, ei);
+            var tok = event_token(ev);
+            if (tok == TOKEN_SIGNAL) {
+                var sig = read_signal(sfd);
+                if (is_some(sig) == 1) {
+                    handle_signal(unwrap(sig));
+                }
+            }
+            if (tok == TOKEN_HEALTH) {
+                timerfd_drain(sfd);
+            }
+            if (tok == TOKEN_WATCHDOG) {
+                timerfd_drain(sfd);
+            }
+            ei = ei + 1;
+        }
+    }
+
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    # Check if we're PID 1
+    if (sys_getpid() != 1) {
+        klog("WARNING: not running as PID 1");
+    }
+
+    var exit_code = run();
+    return exit_code;
+}
+
+var r = main();
+syscall(60, r);

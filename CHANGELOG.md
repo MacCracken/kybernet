@@ -7,6 +7,24 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pr
 
 ---
 
+## [0.9.0] — 2026-04-05
+
+### Changed
+- **Complete rewrite from Rust to Cyrius** — 727 lines (was 1649 Rust)
+- All 7 modules + main entry point in Cyrius
+- Result/Option error handling throughout (via tagged.cyr)
+- String builder for path construction
+- Data-driven mount table (not hardcoded calls)
+- Callback library for functional patterns (vec_map, vec_filter, fork_with_pre_exec)
+- OwnedFd pattern, structured EpollEvent returns
+- PrivError enum with specific error codes and verification
+- 33 integration tests
+
+### Added
+- src/main.cyr — full boot sequence + event loop + signal dispatch + shutdown
+- scripts/build.sh, scripts/test.sh — Cyrius build tooling
+- rust-old/ — preserved Rust implementation for reference
+
 ## [0.51.0] — 2026-04-03
 
 ### Fixed

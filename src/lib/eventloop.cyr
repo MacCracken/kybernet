@@ -1,0 +1,122 @@
+# kybernet/eventloop.cyr — epoll event loop for PID 1
+# Requires: agnosys/syscalls.cyr, tagged.cyr
+#
+# Improved over Rust: OwnedFd pattern with explicit close,
+# structured event returns, Result throughout.
+
+# Event source tokens
+enum EventToken {
+    TOKEN_SIGNAL = 1;
+    TOKEN_HEALTH = 2;
+    TOKEN_WATCHDOG = 3;
+    TOKEN_RESTART = 4;
+    TOKEN_NOTIFY = 5;
+}
+
+# OwnedFd — wraps a file descriptor, must be explicitly closed
+# (Cyrius has no Drop trait, so caller must call owned_fd_close)
+struct OwnedFd { fd; }
+
+fn owned_fd_new(fd) {
+    var ofd = alloc(8);
+    store64(ofd, fd);
+    return ofd;
+}
+
+fn owned_fd_raw(ofd) { return load64(ofd); }
+
+fn owned_fd_close(ofd) {
+    var fd = load64(ofd);
+    if (fd >= 0) {
+        sys_close(fd);
+        store64(ofd, 0 - 1);
+    }
+    return 0;
+}
+
+# Create epoll instance
+# Returns: Result(OwnedFd)
+fn epoll_new() {
+    var fd = sys_epoll_create();
+    if (fd < 0) { return Err(0 - fd); }
+    return Ok(owned_fd_new(fd));
+}
+
+# Register fd for reading with epoll
+fn epoll_add_read(epfd, fd, token) {
+    var ev = epoll_event_new(EPOLLIN, token);
+    var r = sys_epoll_ctl(owned_fd_raw(epfd), EPOLL_CTL_ADD, fd, ev);
+    if (is_err(r) == 1) { return Err(err_code(r)); }
+    return Ok(0);
+}
+
+# Create a repeating timer
+# Returns: Result(fd)
+fn timer_new(interval_sec) {
+    var tfd = sys_timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+    if (tfd < 0) { return Err(0 - tfd); }
+    var ts = timerspec_new(interval_sec, interval_sec);
+    sys_timerfd_settime(tfd, 0, ts, 0);
+    return Ok(tfd);
+}
+
+# Parsed event from epoll_wait
+struct EpollEvent { token; flags; }
+
+# Wait for events. Returns vec of EpollEvent pointers.
+fn epoll_wait_events(epfd, maxevents, timeout_ms) {
+    var events_buf = alloc(maxevents * 12);
+    var results = vec_new();
+    var rgo = 1;
+    var n = 0;
+    while (rgo == 1) {
+        n = sys_epoll_wait(owned_fd_raw(epfd), events_buf, maxevents, timeout_ms);
+        if (n >= 0) { rgo = 0; }
+        else {
+            if (err_code(n) == EINTR) { n = 0; }
+            else { rgo = 0; }
+        }
+    }
+    # Parse events into structured results
+    var ei = 0;
+    while (ei < n) {
+        var ev = alloc(16);
+        store64(ev, load64(events_buf + ei * 12 + 4));
+        store64(ev + 8, load32(events_buf + ei * 12));
+        vec_push(results, ev);
+        ei = ei + 1;
+    }
+    return results;
+}
+
+fn event_token(ev) { return load64(ev); }
+fn event_flags(ev) { return load64(ev + 8); }
+
+# Setup the full event loop: create epoll, add signalfd + timers
+# Returns: Result(epoll OwnedFd)
+fn eventloop_setup(signal_fd, health_sec, watchdog_sec) {
+    var epfd_r = epoll_new();
+    if (is_err_result(epfd_r) == 1) { return epfd_r; }
+    var epfd = result_unwrap(epfd_r);
+
+    # Register signal fd
+    epoll_add_read(epfd, signal_fd, TOKEN_SIGNAL);
+
+    # Health check timer
+    if (health_sec > 0) {
+        var hfd_r = timer_new(health_sec);
+        if (is_ok(hfd_r) == 1) {
+            epoll_add_read(epfd, result_unwrap(hfd_r), TOKEN_HEALTH);
+        }
+    }
+
+    # Watchdog timer
+    if (watchdog_sec > 0) {
+        var wfd_r = timer_new(watchdog_sec);
+        if (is_ok(wfd_r) == 1) {
+            epoll_add_read(epfd, result_unwrap(wfd_r), TOKEN_WATCHDOG);
+        }
+    }
+
+    return Ok(epfd);
+}
