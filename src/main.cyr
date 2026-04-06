@@ -20,7 +20,8 @@ include "lib/str.cyr"
 include "lib/fnptr.cyr"
 include "lib/tagged.cyr"
 include "lib/callback.cyr"
-include "lib/agnosys/syscalls.cyr"
+# agnosys (sibling repo dep — build with -D LINUX or -D AGNOS)
+include "../agnosys/lib/syscalls.cyr"
 
 # Kybernet modules
 include "src/lib/console.cyr"
