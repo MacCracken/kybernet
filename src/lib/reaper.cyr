@@ -12,25 +12,20 @@ struct ReapedProcess { pid; exit_code; }
 fn reap_zombies() {
     var results = vec_new();
     var status_buf[1];
-    var rgo = 1;
-    while (rgo == 1) {
+    while (1 == 1) {
         var pid = sys_waitpid(0 - 1, &status_buf, WNOHANG);
-        if (pid <= 0) {
-            rgo = 0;
-        } else {
-            var status = load32(&status_buf);
-            var code = 0;
-            if (WIFEXITED(status) == 1) {
-                code = WEXITSTATUS(status);
-            }
-            if (WIFSIGNALED(status) == 1) {
-                code = 128 + WTERMSIG(status);
-            }
-            var rp = alloc(16);
-            store64(rp, pid);
-            store64(rp + 8, code);
-            vec_push(results, rp);
+        if (pid <= 0) { break; }
+        var status = load32(&status_buf);
+        var code = 0;
+        if (WIFEXITED(status) == 1) {
+            code = WEXITSTATUS(status);
+        } elif (WIFSIGNALED(status) == 1) {
+            code = 128 + WTERMSIG(status);
         }
+        var rp = alloc(16);
+        store64(rp, pid);
+        store64(rp + 8, code);
+        vec_push(results, rp);
     }
     return results;
 }

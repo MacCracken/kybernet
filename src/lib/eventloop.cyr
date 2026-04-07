@@ -67,15 +67,12 @@ struct EpollEvent { token; flags; }
 fn epoll_wait_events(epfd, maxevents, timeout_ms) {
     var events_buf = alloc(maxevents * 12);
     var results = vec_new();
-    var rgo = 1;
     var n = 0;
-    while (rgo == 1) {
+    while (1 == 1) {
         n = sys_epoll_wait(owned_fd_raw(epfd), events_buf, maxevents, timeout_ms);
-        if (n >= 0) { rgo = 0; }
-        else {
-            if (err_code(n) == EINTR) { n = 0; }
-            else { rgo = 0; }
-        }
+        if (n >= 0) { break; }
+        if (err_code(n) == EINTR) { continue; }
+        break;
     }
     # Parse events into structured results
     for (var ei = 0; ei < n; ei = ei + 1) {

@@ -12,16 +12,11 @@ fn is_mounted(target) {
     var n = file_read_all("/proc/self/mounts", buf, 8192);
     if (n <= 0) { return 0; }
     var tlen = strlen(target);
-    var mi = 0;
-    while (mi < n - tlen) {
-        if (load8(buf + mi) == 32) {
-            if (memeq(buf + mi + 1, target, tlen) == 1) {
-                var after = load8(buf + mi + 1 + tlen);
-                if (after == 32) { return 1; }
-                if (after == 10) { return 1; }
-            }
+    for (var mi = 0; mi < n - tlen; mi = mi + 1) {
+        if (load8(buf + mi) == 32 && memeq(buf + mi + 1, target, tlen) == 1) {
+            var after = load8(buf + mi + 1 + tlen);
+            if (after == 32 || after == 10) { return 1; }
         }
-        mi = mi + 1;
     }
     return 0;
 }

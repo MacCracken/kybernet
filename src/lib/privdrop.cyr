@@ -19,36 +19,27 @@ enum PrivError {
 # Returns: Result (Ok(0) on success, Err(PrivError) on failure)
 fn drop_privileges(uid, gid) {
     # Verify we're root before trying (fail fast)
-    if (sys_geteuid() != 0) {
-        if (uid > 0) { return Err(PRIV_NOT_ROOT); }
-        if (gid > 0) { return Err(PRIV_NOT_ROOT); }
-    }
+    if (sys_geteuid() != 0 && uid > 0) { return Err(PRIV_NOT_ROOT); }
+    if (sys_geteuid() != 0 && gid > 0) { return Err(PRIV_NOT_ROOT); }
 
     # Drop supplementary groups first
-    if (gid > 0) {
-        var r = sys_setgroups(0, 0);
-        if (is_err(r) == 1) { return Err(PRIV_SETGROUPS_FAIL); }
+    if (gid > 0 && is_err(sys_setgroups(0, 0)) == 1) {
+        return Err(PRIV_SETGROUPS_FAIL);
     }
 
     # Set GID (must be before setuid — can't change after losing root)
-    if (gid > 0) {
-        var r2 = sys_setgid(gid);
-        if (is_err(r2) == 1) { return Err(PRIV_SETGID_FAIL); }
+    if (gid > 0 && is_err(sys_setgid(gid)) == 1) {
+        return Err(PRIV_SETGID_FAIL);
     }
 
     # Set UID last (irreversible)
-    if (uid > 0) {
-        var r3 = sys_setuid(uid);
-        if (is_err(r3) == 1) { return Err(PRIV_SETUID_FAIL); }
+    if (uid > 0 && is_err(sys_setuid(uid)) == 1) {
+        return Err(PRIV_SETUID_FAIL);
     }
 
     # Verify the drop actually took effect
-    if (uid > 0) {
-        if (sys_getuid() != uid) { return Err(PRIV_VERIFY_FAIL); }
-    }
-    if (gid > 0) {
-        if (sys_getgid() != gid) { return Err(PRIV_VERIFY_FAIL); }
-    }
+    if (uid > 0 && sys_getuid() != uid) { return Err(PRIV_VERIFY_FAIL); }
+    if (gid > 0 && sys_getgid() != gid) { return Err(PRIV_VERIFY_FAIL); }
 
     return Ok(0);
 }
