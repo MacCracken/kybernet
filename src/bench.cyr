@@ -4,20 +4,7 @@
 # Build: sh scripts/bench.sh
 # Run:   ./build/kybernet_bench
 
-# Cyrius stdlib (vendored in lib/)
-include "lib/string.cyr"
-include "lib/fmt.cyr"
-include "lib/alloc.cyr"
-include "lib/io.cyr"
-include "lib/vec.cyr"
-include "lib/str.cyr"
-include "lib/fnptr.cyr"
-include "lib/tagged.cyr"
-include "lib/callback.cyr"
-include "lib/bench.cyr"
-include "lib/agnosys/syscalls.cyr"
-
-# Kybernet modules
+# Kybernet modules (deps resolved via cyrb.toml)
 include "src/lib/console.cyr"
 include "src/lib/signals.cyr"
 include "src/lib/reaper.cyr"

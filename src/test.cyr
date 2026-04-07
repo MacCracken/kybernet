@@ -1,19 +1,7 @@
 # kybernet_test.cyr — integration test for upgraded kybernet modules
 # Tests: Result returns, Option types, str_builder, callbacks
 
-# Cyrius stdlib (vendored in lib/)
-include "lib/string.cyr"
-include "lib/fmt.cyr"
-include "lib/alloc.cyr"
-include "lib/io.cyr"
-include "lib/vec.cyr"
-include "lib/str.cyr"
-include "lib/fnptr.cyr"
-include "lib/assert.cyr"
-include "lib/tagged.cyr"
-include "lib/callback.cyr"
-include "lib/agnosys/syscalls.cyr"
-# Kybernet modules
+# Kybernet modules (deps resolved via cyrb.toml)
 include "src/lib/console.cyr"
 include "src/lib/signals.cyr"
 include "src/lib/reaper.cyr"
@@ -241,6 +229,120 @@ fn test_caps() {
     return 0;
 }
 
+fn test_agnostik_security() {
+    println("--- agnostik security ---");
+
+    # security_context_new
+    var ctx = security_context_new("test-service");
+    assert_eq(secctx_run_as_user(ctx), 0, "ctx uid default 0");
+    assert_eq(secctx_run_as_group(ctx), 0, "ctx gid default 0");
+    assert_eq(secctx_no_new_privs(ctx), 1, "ctx no_new_privs default 1");
+    assert(secctx_sandbox(ctx) != 0, "ctx sandbox non-null");
+
+    # sandbox_config_new
+    var sbox = sandbox_config_new();
+    assert_eq(sandbox_net_access(sbox), NET_NONE, "sandbox net default none");
+    assert_eq(sandbox_isolate_net(sbox), 1, "sandbox isolate_net default 1");
+
+    # cgroup_limits_new
+    var cg = cgroup_limits_new();
+    assert_eq(cglim_memory_max(cg), 0, "cglim mem default 0");
+    cglim_set_memory_max(cg, 268435456);
+    assert_eq(cglim_memory_max(cg), 268435456, "cglim mem set 256MB");
+    cglim_set_pids_max(cg, 64);
+    assert_eq(cglim_pids_max(cg), 64, "cglim pids set 64");
+
+    # capability_set_new
+    var caps = capability_set_new();
+    var bounding = capset_bounding(caps);
+    assert_eq(vec_len(bounding), 0, "capset empty");
+    vec_push(bounding, CAP_NET_BIND_SERVICE);
+    vec_push(bounding, CAP_SYS_CHROOT);
+    assert_eq(vec_len(capset_bounding(caps)), 2, "capset 2 caps");
+
+    # namespace_config_new
+    var ns = namespace_config_new();
+    assert_eq(ns_pid(ns), 0, "ns pid default 0");
+    ns_set_pid(ns, 1);
+    assert_eq(ns_pid(ns), 1, "ns pid set 1");
+
+    # resource_limits_new
+    var rl = resource_limits_new();
+    assert_eq(rlim_max_memory(rl), 268435456, "rlim default 256MB");
+    assert_eq(rlim_max_fds(rl), 256, "rlim default 256 fds");
+    assert_eq(rlim_max_procs(rl), 64, "rlim default 64 procs");
+
+    # seccomp_profile_new
+    var prof = seccomp_profile_new(SECCOMP_KILL_PROCESS);
+    assert_eq(scprof_default_action(prof), SECCOMP_KILL_PROCESS, "scprof default kill");
+    var rules = scprof_syscalls(prof);
+    var rule = seccomp_rule_new(SECCOMP_ALLOW);
+    var names = scrule_names(rule);
+    vec_push(names, 0);
+    vec_push(names, 1);
+    vec_push(names, 3);
+    vec_push(rules, rule);
+    assert_eq(vec_len(scprof_syscalls(prof)), 1, "scprof 1 rule");
+
+    # seccomp_from_profile integration
+    var b = seccomp_from_profile(prof);
+    assert_eq(seccomp_count(b), 3, "from_profile 3 syscalls");
+
+    # landlock_ruleset_new
+    var llrs = landlock_ruleset_new();
+    var fs = llrs_fs_rules(llrs);
+    var llr = landlock_fs_rule_new("/tmp");
+    var acc = llfsr_allowed_access(llr);
+    vec_push(acc, LL_READ_FILE);
+    vec_push(acc, LL_READ_DIR);
+    vec_push(fs, llr);
+    assert_eq(vec_len(llrs_fs_rules(llrs)), 1, "llrs 1 fs rule");
+
+    # filesystem_rule_new
+    var fsr = filesystem_rule_new("/etc", FS_READ_ONLY);
+    assert_eq(fsrule_access(fsr), FS_READ_ONLY, "fsrule read-only");
+    assert_eq(fsrule_readonly(fsr), 0, "fsrule readonly default 0");
+
+    # agnostik error types
+    var err = agnostik_err_new(ERR_PERMISSION_DENIED, str_from("test"));
+    assert_eq(agnostik_err_kind(err), ERR_PERMISSION_DENIED, "err kind");
+    assert_eq(agnostik_err_code(err), CODE_PERMISSION_DENIED, "err code 1002");
+    assert_eq(agnostik_err_is_retriable(err), 0, "perm denied not retriable");
+
+    var terr = agnostik_err_new(ERR_TIMEOUT, 0);
+    assert_eq(agnostik_err_is_retriable(terr), 1, "timeout retriable");
+
+    return 0;
+}
+
+fn test_agnostik_agent() {
+    println("--- agnostik agent ---");
+
+    # agent_config_new
+    var ac = agent_config_new("test-agent");
+    assert_eq(aconf_type(ac), AGENT_TYPE_USER, "aconf default user type");
+    assert_eq(aconf_restart_policy(ac), RESTART_NEVER, "aconf default no restart");
+    assert(aconf_limits(ac) != 0, "aconf has limits");
+
+    var limits = aconf_limits(ac);
+    assert_eq(rlim_max_memory(limits), 268435456, "aconf limits 256MB");
+
+    # Set sandbox
+    var sbox = sandbox_config_new();
+    sandbox_set_net_access(sbox, NET_LOCALHOST_ONLY);
+    aconf_set_sandbox(ac, sbox);
+    var got_sbox = aconf_sandbox(ac);
+    assert_eq(sandbox_net_access(got_sbox), NET_LOCALHOST_ONLY, "aconf sandbox net");
+
+    # health_check_new
+    var hc = health_check_new();
+    assert_eq(hc_interval(hc), 30, "hc 30s interval");
+    assert_eq(hc_timeout(hc), 5, "hc 5s timeout");
+    assert_eq(hc_retries(hc), 3, "hc 3 retries");
+
+    return 0;
+}
+
 fn test_notify_constants() {
     println("--- notify constants ---");
     assert_eq(TOKEN_NOTIFY, 5, "TOKEN_NOTIFY");
@@ -267,6 +369,8 @@ fn main() {
     test_seccomp_builder();
     test_sandbox_builder();
     test_caps();
+    test_agnostik_security();
+    test_agnostik_agent();
     return assert_summary();
 }
 var exit_code = main();

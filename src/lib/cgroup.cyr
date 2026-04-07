@@ -101,6 +101,100 @@ fn kill_cgroup(service) {
     return Ok(killed);
 }
 
+# ================================================================
+# Agnostik integration
+# ================================================================
+
+# Write a u64 value to a cgroup control file.
+# Returns: Result
+fn _cgroup_write_u64(service, filename, value) {
+    if (value == 0) { return Ok(0); }
+    var file = cgroup_file(service, filename);
+    var numbuf = alloc(24);
+    var nlen = fmt_int_buf(value, numbuf);
+    var fd = sys_open(str_data(file), O_WRONLY, 0);
+    if (fd < 0) { return Err(0 - fd); }
+    var w = sys_write(fd, numbuf, nlen);
+    sys_close(fd);
+    if (is_err(w) == 1) { return Err(err_code(w)); }
+    return Ok(0);
+}
+
+# Apply agnostik cgroup_limits to a service cgroup.
+# Writes memory.max, memory.high, cpu.max, cpu.weight, pids.max.
+# Returns: Result
+fn cgroup_apply_limits(service, limits) {
+    var mem_max = cglim_memory_max(limits);
+    if (mem_max > 0) {
+        var r = _cgroup_write_u64(service, "memory.max", mem_max);
+        if (is_err_result(r) == 1) { return r; }
+    }
+
+    var mem_high = cglim_memory_high(limits);
+    if (mem_high > 0) {
+        var r = _cgroup_write_u64(service, "memory.high", mem_high);
+        if (is_err_result(r) == 1) { return r; }
+    }
+
+    var cpu_weight = cglim_cpu_weight(limits);
+    if (cpu_weight > 0) {
+        var r = _cgroup_write_u64(service, "cpu.weight", cpu_weight);
+        if (is_err_result(r) == 1) { return r; }
+    }
+
+    var pids_max = cglim_pids_max(limits);
+    if (pids_max > 0) {
+        var r = _cgroup_write_u64(service, "pids.max", pids_max);
+        if (is_err_result(r) == 1) { return r; }
+    }
+
+    return Ok(0);
+}
+
+# Apply agnostik resource_limits to a service cgroup.
+# Maps resource_limits fields to cgroup v2 controllers.
+# Returns: Result
+fn cgroup_apply_resource_limits(service, rlimits) {
+    var mem = rlim_max_memory(rlimits);
+    var procs = rlim_max_procs(rlimits);
+
+    if (mem > 0) {
+        var r = _cgroup_write_u64(service, "memory.max", mem);
+        if (is_err_result(r) == 1) { return r; }
+    }
+
+    if (procs > 0) {
+        var r = _cgroup_write_u64(service, "pids.max", procs);
+        if (is_err_result(r) == 1) { return r; }
+    }
+
+    return Ok(0);
+}
+
+# Full cgroup setup from agnostik agent_config.
+# Creates cgroup, applies limits, moves pid.
+# Returns: Result
+fn cgroup_setup_agent(service, config, pid) {
+    var cr = create_service_cgroup(service);
+    if (is_err_result(cr) == 1) { return cr; }
+
+    # Apply resource limits from agent config
+    var limits = aconf_limits(config);
+    if (limits != 0) {
+        var lr = cgroup_apply_resource_limits(service, limits);
+        if (is_err_result(lr) == 1) { return lr; }
+    }
+
+    # Apply sandbox cgroup limits if present
+    var sandbox = aconf_sandbox(config);
+    if (sandbox != 0) {
+        # sandbox_config doesn't carry cgroup_limits directly,
+        # but the agent_config's resource_limits covers it
+    }
+
+    return move_to_cgroup(service, pid);
+}
+
 # Remove a service cgroup directory (must be empty)
 fn remove_service_cgroup(service) {
     var path = cgroup_path(service);

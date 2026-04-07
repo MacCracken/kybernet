@@ -123,6 +123,39 @@ fn seccomp_apply(builder) {
     return seccomp_load(seccomp_filter_ptr(info), seccomp_filter_len(info));
 }
 
+# ================================================================
+# Agnostik integration
+# ================================================================
+
+# Build a seccomp filter from an agnostik seccomp_profile.
+# Iterates profile's syscall rules and adds allowed syscalls to builder.
+# Returns: SeccompBuilder ready for seccomp_apply()
+fn seccomp_from_profile(profile) {
+    var b = seccomp_builder_new();
+    var rules = scprof_syscalls(profile);
+    var rlen = vec_len(rules);
+    for (var ri = 0; ri < rlen; ri = ri + 1) {
+        var rule = vec_get(rules, ri);
+        if (scrule_action(rule) == SECCOMP_ALLOW) {
+            var names = scrule_names(rule);
+            var nlen = vec_len(names);
+            for (var ni = 0; ni < nlen; ni = ni + 1) {
+                seccomp_allow(b, vec_get(names, ni));
+            }
+        }
+    }
+    return b;
+}
+
+# Build and load a seccomp filter from an agnostik seccomp_profile.
+# Must be called after set_no_new_privs().
+# Returns: Result
+fn seccomp_apply_profile(profile) {
+    var b = seccomp_from_profile(profile);
+    if (seccomp_count(b) == 0) { return Ok(0); }
+    return seccomp_apply(b);
+}
+
 # Create a basic service seccomp filter.
 # Allows: read, write, close, fstat, mmap, mprotect, munmap, brk,
 #         rt_sigreturn, exit, exit_group, sigaltstack, arch_prctl,

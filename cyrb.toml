@@ -9,3 +9,16 @@ language = "cyrius"
 entry = "src/main.cyr"
 test = "src/test.cyr"
 output = "kybernet"
+
+[deps]
+stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "fnptr", "tagged", "callback", "assert", "bench"]
+
+[deps.agnosys]
+git = "https://github.com/MacCracken/agnosys"
+tag = "0.90.0"
+modules = ["lib/syscalls_linux.cyr"]
+
+[deps.agnostik]
+git = "https://github.com/MacCracken/agnostik"
+tag = "0.95.0"
+modules = ["src/security.cyr", "src/agent.cyr", "src/error.cyr"]

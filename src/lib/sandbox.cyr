@@ -169,6 +169,122 @@ fn sandbox_apply(builder) {
     return Ok(0);
 }
 
+# ================================================================
+# Agnostik integration
+# ================================================================
+
+# Convert agnostik LandlockFsAccess flags vec to kernel Landlock bitmask.
+fn _ll_access_to_kernel(access_vec) {
+    var mask = 0;
+    var alen = vec_len(access_vec);
+    for (var ai = 0; ai < alen; ai = ai + 1) {
+        var flag = vec_get(access_vec, ai);
+        # agnostik LL_ enums map 1:1 to kernel bit positions
+        switch (flag) {
+            case 0: mask = mask | LANDLOCK_ACCESS_FS_EXECUTE;
+            case 1: mask = mask | LANDLOCK_ACCESS_FS_WRITE_FILE;
+            case 2: mask = mask | LANDLOCK_ACCESS_FS_READ_FILE;
+            case 3: mask = mask | LANDLOCK_ACCESS_FS_READ_DIR;
+            case 4: mask = mask | LANDLOCK_ACCESS_FS_REMOVE_DIR;
+            case 5: mask = mask | LANDLOCK_ACCESS_FS_REMOVE_FILE;
+            case 6: mask = mask | LANDLOCK_ACCESS_FS_MAKE_CHAR;
+            case 7: mask = mask | LANDLOCK_ACCESS_FS_MAKE_DIR;
+            case 8: mask = mask | LANDLOCK_ACCESS_FS_MAKE_REG;
+            case 9: mask = mask | LANDLOCK_ACCESS_FS_MAKE_SOCK;
+            case 10: mask = mask | LANDLOCK_ACCESS_FS_MAKE_FIFO;
+            case 11: mask = mask | LANDLOCK_ACCESS_FS_MAKE_BLOCK;
+            case 12: mask = mask | LANDLOCK_ACCESS_FS_MAKE_SYM;
+            default: return mask;
+        }
+    }
+    return mask;
+}
+
+# Build a sandbox from an agnostik landlock_ruleset.
+# Converts agnostik fs rules to kybernet sandbox rules and applies.
+# Returns: Result (Ok(0)=applied, Ok(1)=landlock unavailable, Err(errno))
+fn sandbox_from_ruleset(ruleset) {
+    var fs_rules = llrs_fs_rules(ruleset);
+    var rlen = vec_len(fs_rules);
+    if (rlen == 0) { return Ok(0); }
+
+    # Build handled access mask from all rules
+    var handled = LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_WRITE_FILE
+                | LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR
+                | LANDLOCK_ACCESS_FS_REMOVE_DIR | LANDLOCK_ACCESS_FS_REMOVE_FILE
+                | LANDLOCK_ACCESS_FS_MAKE_CHAR | LANDLOCK_ACCESS_FS_MAKE_DIR
+                | LANDLOCK_ACCESS_FS_MAKE_REG | LANDLOCK_ACCESS_FS_MAKE_SOCK
+                | LANDLOCK_ACCESS_FS_MAKE_FIFO | LANDLOCK_ACCESS_FS_MAKE_BLOCK
+                | LANDLOCK_ACCESS_FS_MAKE_SYM;
+
+    var attr = alloc(8);
+    store64(attr, handled);
+
+    var ruleset_fd = syscall(SYS_LANDLOCK_CREATE_RULESET, attr, 8, 0);
+    if (ruleset_fd < 0) {
+        var errno = 0 - ruleset_fd;
+        if (errno == 38) { return Ok(1); }
+        if (errno == 95) { return Ok(1); }
+        return Err(errno);
+    }
+
+    for (var ri = 0; ri < rlen; ri = ri + 1) {
+        var rule = vec_get(fs_rules, ri);
+        var path = llfsr_path(rule);
+        var access_vec = llfsr_allowed_access(rule);
+        var allowed = _ll_access_to_kernel(access_vec);
+
+        if (allowed != 0) {
+            var path_fd = syscall(SYS_OPEN, path, O_PATH_FLAG | O_CLOEXEC_FLAG, 0);
+            if (path_fd < 0) {
+                sys_close(ruleset_fd);
+                return Err(0 - path_fd);
+            }
+
+            var beneath = alloc(16);
+            memset(beneath, 0, 16);
+            store64(beneath, allowed);
+            store32(beneath + 8, path_fd);
+
+            var ret = syscall(SYS_LANDLOCK_ADD_RULE, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, beneath, 0);
+            sys_close(path_fd);
+
+            if (ret < 0) {
+                sys_close(ruleset_fd);
+                return Err(0 - ret);
+            }
+        }
+    }
+
+    var ret = syscall(SYS_LANDLOCK_RESTRICT_SELF, ruleset_fd, 0);
+    sys_close(ruleset_fd);
+    if (ret < 0) { return Err(0 - ret); }
+    return Ok(0);
+}
+
+# Build sandbox from agnostik sandbox_config.
+# Extracts fs_rules, converts to filesystem_rule access levels, applies.
+# Returns: Result
+fn sandbox_from_config(config) {
+    var fs_rules = sandbox_fs_rules(config);
+    var rlen = vec_len(fs_rules);
+    if (rlen == 0) { return Ok(0); }
+
+    var b = sandbox_builder_new();
+    for (var ri = 0; ri < rlen; ri = ri + 1) {
+        var rule = vec_get(fs_rules, ri);
+        var path = fsrule_path(rule);
+        var access = fsrule_access(rule);
+        switch (access) {
+            case 0: return 0;
+            case 1: sandbox_allow_read(b, path);
+            case 2: sandbox_allow_read_write(b, path);
+            default: return 0;
+        }
+    }
+    return sandbox_apply(b);
+}
+
 # Create a basic service sandbox.
 # Allows: read /usr, /lib, /etc; read-write /tmp, /var; exec /usr/bin, /usr/lib
 fn sandbox_basic_service() {

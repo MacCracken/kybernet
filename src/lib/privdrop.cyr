@@ -119,6 +119,57 @@ fn secure_pre_exec(uid, gid, keep_caps) {
     return drop_privileges(uid, gid);
 }
 
+# ================================================================
+# Agnostik integration
+# ================================================================
+
+# Apply privilege drop from agnostik security_context.
+# Extracts uid, gid, no_new_privs from the context.
+# Returns: Result
+fn privdrop_from_context(ctx) {
+    var uid = secctx_run_as_user(ctx);
+    var gid = secctx_run_as_group(ctx);
+
+    # Set no_new_privs if requested (required before seccomp/landlock)
+    if (secctx_no_new_privs(ctx) == 1) {
+        var nr = set_no_new_privs();
+        if (is_err_result(nr) == 1) { return nr; }
+    }
+
+    return drop_privileges(uid, gid);
+}
+
+# Drop capabilities using agnostik capability_set bounding set.
+# Keeps only caps listed in capset_bounding(caps); drops everything else.
+# Returns: Result (Ok(dropped_count) or Err(errno))
+fn drop_caps_from_set(caps) {
+    if (sys_geteuid() != 0) { return Err(PRIV_NOT_ROOT); }
+    var keep = capset_bounding(caps);
+    var keep_len = vec_len(keep);
+
+    # Build bitmask from the bounding set vec
+    var keep_mask = 0;
+    for (var ki = 0; ki < keep_len; ki = ki + 1) {
+        var cap = vec_get(keep, ki);
+        keep_mask = keep_mask | (1 << cap);
+    }
+
+    return drop_capabilities(keep_mask);
+}
+
+# Full security setup from agnostik security_context + capability_set.
+# Orchestrates: drop caps → no_new_privs → drop uid/gid.
+# Returns: Result
+fn secure_from_context(ctx, caps) {
+    # Drop capabilities first (while still root)
+    if (caps != 0) {
+        var cr = drop_caps_from_set(caps);
+        if (is_err_result(cr) == 1) { return cr; }
+    }
+
+    return privdrop_from_context(ctx);
+}
+
 # Print privilege error
 fn priv_error_print(code) {
     switch (code) {
