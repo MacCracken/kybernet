@@ -1,0 +1,96 @@
+# kybernet/notify.cyr — sd_notify socket for PID 1
+# Requires: agnosys/syscalls.cyr, string.cyr, tagged.cyr
+#
+# Creates a Unix domain datagram socket at /run/kybernet/notify,
+# registers with epoll as TOKEN_NOTIFY, and parses sd_notify messages.
+# Event-driven (not polled) — required for v0.60.0.
+
+# Socket syscall numbers (not in base syscalls.cyr)
+enum SockSysNr {
+    SYS_SOCKET = 41;
+    SYS_BIND = 49;
+    SYS_RECVFROM = 45;
+}
+
+enum SockConst {
+    AF_UNIX = 1;
+    SOCK_DGRAM_TYPE = 2;
+    SOCK_NONBLOCK_F = 2048;
+    SOCK_CLOEXEC_F = 524288;
+}
+
+var NOTIFY_PATH = "/run/kybernet/notify";
+
+# Notify message types
+enum NotifyType {
+    NOTIFY_UNKNOWN = 0;
+    NOTIFY_READY = 1;
+    NOTIFY_STOPPING = 2;
+    NOTIFY_WATCHDOG = 3;
+    NOTIFY_STATUS = 4;
+    NOTIFY_RELOADING = 5;
+}
+
+# Create and bind the notify socket.
+# Returns: Result(fd) — raw fd for epoll registration
+fn notify_socket_create() {
+    var flags = SOCK_DGRAM_TYPE | SOCK_NONBLOCK_F | SOCK_CLOEXEC_F;
+    var fd = syscall(SYS_SOCKET, AF_UNIX, flags, 0);
+    if (fd < 0) { return Err(0 - fd); }
+
+    # Ensure /run/kybernet exists
+    sys_mkdir("/run/kybernet", 0x1C0);
+
+    # Remove stale socket file
+    sys_unlink(NOTIFY_PATH);
+
+    # sockaddr_un: { sa_family: u16, sun_path: char[108] }
+    var sa = alloc(128);
+    memset(sa, 0, 128);
+    store16(sa, AF_UNIX);
+    var plen = strlen(NOTIFY_PATH);
+    memcpy(sa + 2, NOTIFY_PATH, plen);
+
+    var r = syscall(SYS_BIND, fd, sa, 2 + plen + 1);
+    if (r < 0) {
+        sys_close(fd);
+        return Err(0 - r);
+    }
+
+    return Ok(fd);
+}
+
+# Read a notify message from the socket.
+# Returns: Option(ptr to null-terminated message)
+fn notify_read(fd) {
+    var buf = alloc(512);
+    var n = syscall(SYS_RECVFROM, fd, buf, 511, 0, 0, 0);
+    if (n <= 0) { return None(); }
+    store8(buf + n, 0);
+    return Some(buf);
+}
+
+# Parse a notify message type.
+# Checks for READY=1, STOPPING=1, WATCHDOG=1, RELOADING=1, STATUS=
+fn notify_parse(msg) {
+    if (memeq(msg, "READY=1", 7) == 1) { return NOTIFY_READY; }
+    elif (memeq(msg, "STOPPING=1", 10) == 1) { return NOTIFY_STOPPING; }
+    elif (memeq(msg, "WATCHDOG=1", 10) == 1) { return NOTIFY_WATCHDOG; }
+    elif (memeq(msg, "RELOADING=1", 11) == 1) { return NOTIFY_RELOADING; }
+    elif (memeq(msg, "STATUS=", 7) == 1) { return NOTIFY_STATUS; }
+    else { return NOTIFY_UNKNOWN; }
+}
+
+# Extract STATUS= value from a notify message.
+# Returns pointer to the status string (within msg buffer), or 0.
+fn notify_status_value(msg) {
+    if (memeq(msg, "STATUS=", 7) == 1) {
+        return msg + 7;
+    }
+    return 0;
+}
+
+# Get the notify socket path (for NOTIFY_SOCKET env var)
+fn notify_socket_path() {
+    return NOTIFY_PATH;
+}

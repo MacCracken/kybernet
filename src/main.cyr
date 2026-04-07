@@ -20,8 +20,8 @@ include "lib/str.cyr"
 include "lib/fnptr.cyr"
 include "lib/tagged.cyr"
 include "lib/callback.cyr"
-# agnosys (sibling repo dep — build with -D LINUX or -D AGNOS)
-include "../agnosys/lib/syscalls.cyr"
+# agnosys (vendored in lib/)
+include "lib/agnosys/syscalls.cyr"
 
 # Kybernet modules
 include "src/lib/console.cyr"
@@ -31,6 +31,9 @@ include "src/lib/privdrop.cyr"
 include "src/lib/mount.cyr"
 include "src/lib/cgroup.cyr"
 include "src/lib/eventloop.cyr"
+include "src/lib/notify.cyr"
+include "src/lib/seccomp.cyr"
+include "src/lib/sandbox.cyr"
 
 fn kmsg(msg) {
     var fd = sys_open("/dev/kmsg", O_WRONLY, 0);
@@ -62,67 +65,75 @@ fn handle_signal(signum) {
     var cls = classify_signal(signum);
     if (cls == SIG_CLASS_CHILD) {
         reap_and_log();
-        return 0;
-    }
-    if (cls == SIG_CLASS_TERM) {
+    } elif (cls == SIG_CLASS_TERM) {
         klog("received SIGTERM");
         shutdown(RB_POWER_OFF);
-        return 0;
-    }
-    if (cls == SIG_CLASS_INT) {
+    } elif (cls == SIG_CLASS_INT) {
         klog("received SIGINT");
         shutdown(RB_AUTOBOOT);
-        return 0;
-    }
-    if (cls == SIG_CLASS_HUP) {
+    } elif (cls == SIG_CLASS_HUP) {
         klog("received SIGHUP — reload not implemented");
-        return 0;
-    }
-    if (cls == SIG_CLASS_PWR) {
+    } elif (cls == SIG_CLASS_PWR) {
         klog("received SIGPWR — power failure");
         shutdown(RB_POWER_OFF);
-        return 0;
     }
     return 0;
 }
 
 fn run() {
     klog("starting");
+    kmsg("phase 0: starting");
 
-    # Phase 1: Console
+    # Phase 1: Mount devtmpfs first (needed for /dev/console, /dev/kmsg)
+    mount_devtmpfs();
+    kmsg("phase 1: devtmpfs mounted");
+
+    # Phase 2: Console
     var con_r = setup_console();
     if (is_err_result(con_r) == 1) {
-        klog("console setup failed (continuing)");
+        kmsg("phase 2: console setup failed (continuing)");
+    } else {
+        kmsg("phase 2: console ready");
     }
 
-    # Phase 2: Mount devtmpfs first, then essential filesystems
-    mount_devtmpfs();
+    # Phase 3: Mount remaining essential filesystems
     var mount_r = mount_essential();
     if (is_ok(mount_r) == 1) {
-        var sb = str_builder_new();
-        str_builder_add_cstr(sb, "mounted ");
-        str_builder_add_int(sb, result_unwrap(mount_r));
-        str_builder_add_cstr(sb, " filesystems");
-        var msg = str_builder_build(sb);
-        klog(str_data(msg));
+        kmsg("phase 3: filesystems mounted");
+        klog("filesystems mounted");
     }
 
-    # Phase 3: Signals
+    # Phase 4: Signals
     var sfd_r = setup_signals();
     if (is_err_result(sfd_r) == 1) {
+        kmsg("phase 4: signal setup failed");
         klog("signal setup failed");
         return 1;
     }
     var sfd = result_unwrap(sfd_r);
+    kmsg("phase 4: signals ready");
 
-    # Phase 4: Event loop
+    # Phase 5: Event loop
     var epfd_r = eventloop_setup(sfd, 30, 10);
     if (is_err_result(epfd_r) == 1) {
+        kmsg("phase 5: eventloop setup failed");
         klog("eventloop setup failed");
         return 1;
     }
     var epfd = result_unwrap(epfd_r);
 
+    # Phase 5b: Notify socket (event-driven, not polled)
+    var nfd_r = notify_socket_create();
+    var nfd = 0 - 1;
+    if (is_ok(nfd_r) == 1) {
+        nfd = result_unwrap(nfd_r);
+        eventloop_add_notify(epfd, nfd);
+        klog("notify socket bound");
+    } else {
+        klog("notify socket failed (continuing)");
+    }
+
+    kmsg("phase 6: ready — entering event loop");
     klog("ready — entering event loop");
 
     # Phase 5: Event loop
@@ -130,8 +141,7 @@ fn run() {
     while (running == 1) {
         var events = epoll_wait_events(epfd, 8, 0 - 1);
         var elen = vec_len(events);
-        var ei = 0;
-        while (ei < elen) {
+        for (var ei = 0; ei < elen; ei = ei + 1) {
             var ev = vec_get(events, ei);
             var tok = event_token(ev);
             if (tok == TOKEN_SIGNAL) {
@@ -139,14 +149,29 @@ fn run() {
                 if (is_some(sig) == 1) {
                     handle_signal(unwrap(sig));
                 }
-            }
-            if (tok == TOKEN_HEALTH) {
+            } elif (tok == TOKEN_HEALTH) {
                 timerfd_drain(sfd);
-            }
-            if (tok == TOKEN_WATCHDOG) {
+            } elif (tok == TOKEN_WATCHDOG) {
                 timerfd_drain(sfd);
+            } elif (tok == TOKEN_NOTIFY) {
+                var nmsg = notify_read(nfd);
+                if (is_some(nmsg) == 1) {
+                    var msg = unwrap(nmsg);
+                    var ntype = notify_parse(msg);
+                    if (ntype == NOTIFY_READY) {
+                        klog("service ready");
+                    } elif (ntype == NOTIFY_STOPPING) {
+                        klog("service stopping");
+                    } elif (ntype == NOTIFY_WATCHDOG) {
+                        klog("service watchdog ping");
+                    } elif (ntype == NOTIFY_STATUS) {
+                        var status = notify_status_value(msg);
+                        if (status != 0) {
+                            klog(status);
+                        }
+                    }
+                }
             }
-            ei = ei + 1;
         }
     }
 

@@ -21,6 +21,9 @@ include "src/lib/privdrop.cyr"
 include "src/lib/mount.cyr"
 include "src/lib/cgroup.cyr"
 include "src/lib/eventloop.cyr"
+include "src/lib/notify.cyr"
+include "src/lib/seccomp.cyr"
+include "src/lib/sandbox.cyr"
 
 fn test_constants() {
     println("--- constants ---");
@@ -147,6 +150,107 @@ fn test_callbacks() {
     return 0;
 }
 
+fn test_notify_parse() {
+    println("--- notify ---");
+    assert_eq(notify_parse("READY=1"), NOTIFY_READY, "parse READY");
+    assert_eq(notify_parse("STOPPING=1"), NOTIFY_STOPPING, "parse STOPPING");
+    assert_eq(notify_parse("WATCHDOG=1"), NOTIFY_WATCHDOG, "parse WATCHDOG");
+    assert_eq(notify_parse("RELOADING=1"), NOTIFY_RELOADING, "parse RELOADING");
+    assert_eq(notify_parse("STATUS=running"), NOTIFY_STATUS, "parse STATUS");
+    assert_eq(notify_parse("UNKNOWN"), NOTIFY_UNKNOWN, "parse unknown");
+    var sv = notify_status_value("STATUS=all good");
+    assert(sv != 0, "status value ptr");
+    assert(memeq(sv, "all good", 8) == 1, "status value content");
+    var sv2 = notify_status_value("READY=1");
+    assert_eq(sv2, 0, "non-status returns 0");
+    return 0;
+}
+
+fn test_seccomp_builder() {
+    println("--- seccomp ---");
+    var b = seccomp_builder_new();
+    assert_eq(seccomp_count(b), 0, "empty builder");
+    seccomp_allow(b, 0);
+    seccomp_allow(b, 1);
+    seccomp_allow(b, 3);
+    assert_eq(seccomp_count(b), 3, "3 allowed");
+
+    # Build filter
+    var info_r = seccomp_build(b);
+    assert(is_ok(info_r) == 1, "build ok");
+    if (is_ok(info_r) == 1) {
+        var info = result_unwrap(info_r);
+        var fptr = seccomp_filter_ptr(info);
+        var flen = seccomp_filter_len(info);
+        # 3 allowed + 3 fixed instructions = 6 instructions * 8 bytes = 48
+        assert_eq(flen, 48, "filter size");
+        assert(fptr != 0, "filter ptr");
+
+        # Verify first instruction: BPF_LD_W_ABS
+        assert_eq(load16(fptr), BPF_LD_W_ABS, "insn0 LD");
+        # Verify last instruction: BPF_RET_K ALLOW
+        assert_eq(load16(fptr + flen - 8), BPF_RET_K, "last insn RET");
+        assert_eq(load32(fptr + flen - 4), SECCOMP_RET_ALLOW, "last insn ALLOW");
+    }
+
+    # Basic service builder has entries
+    var bs = seccomp_basic_service();
+    assert(seccomp_count(bs) > 20, "basic service syscalls");
+
+    # Empty builder fails
+    var empty = seccomp_builder_new();
+    var er = seccomp_build(empty);
+    assert(is_err_result(er) == 1, "empty build fails");
+    return 0;
+}
+
+fn test_sandbox_builder() {
+    println("--- sandbox ---");
+    var b = sandbox_builder_new();
+    assert_eq(sandbox_rule_count(b), 0, "empty sandbox");
+
+    sandbox_allow_read(b, "/etc");
+    sandbox_allow_read_write(b, "/tmp");
+    sandbox_allow_read_exec(b, "/usr");
+    assert_eq(sandbox_rule_count(b), 3, "3 rules");
+
+    # Basic service builder
+    var bs = sandbox_basic_service();
+    assert(sandbox_rule_count(bs) >= 5, "basic svc rules");
+    return 0;
+}
+
+fn test_caps() {
+    println("--- capabilities ---");
+    # Not root — drop_capabilities should fail with PRIV_NOT_ROOT
+    if (is_root() == 0) {
+        var r = drop_capabilities(0);
+        assert(is_err_result(r) == 1, "caps need root");
+        assert_eq(payload(r), PRIV_NOT_ROOT, "caps PRIV_NOT_ROOT");
+    }
+
+    # set_no_new_privs should work for any user
+    var nnp = set_no_new_privs();
+    assert(is_ok(nnp) == 1, "no_new_privs ok");
+
+    # secure_pre_exec should fail for non-root when uid/gid given
+    if (is_root() == 0) {
+        var r2 = secure_pre_exec(1000, 1000, 0);
+        assert(is_err_result(r2) == 1, "secure_pre_exec need root");
+    }
+    return 0;
+}
+
+fn test_notify_constants() {
+    println("--- notify constants ---");
+    assert_eq(TOKEN_NOTIFY, 5, "TOKEN_NOTIFY");
+    assert_eq(NOTIFY_READY, 1, "NOTIFY_READY");
+    assert_eq(NOTIFY_STOPPING, 2, "NOTIFY_STOPPING");
+    assert_eq(NOTIFY_WATCHDOG, 3, "NOTIFY_WATCHDOG");
+    assert(notify_socket_path() != 0, "socket path");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_constants();
@@ -158,6 +262,11 @@ fn main() {
     test_cgroup();
     test_privdrop();
     test_callbacks();
+    test_notify_parse();
+    test_notify_constants();
+    test_seccomp_builder();
+    test_sandbox_builder();
+    test_caps();
     return assert_summary();
 }
 var exit_code = main();

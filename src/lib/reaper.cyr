@@ -44,18 +44,16 @@ fn reaped_code(rp) { return load64(rp + 8); }
 fn reap_and_log() {
     var reaped = reap_zombies();
     var len = vec_len(reaped);
-    var ri = 0;
-    while (ri < len) {
+    var numbuf[24];
+    for (var ri = 0; ri < len; ri = ri + 1) {
         var rp = vec_get(reaped, ri);
-        var sb = str_builder_new();
-        str_builder_add_cstr(sb, "reaped pid=");
-        str_builder_add_int(sb, reaped_pid(rp));
-        str_builder_add_cstr(sb, " exit=");
-        str_builder_add_int(sb, reaped_code(rp));
-        var msg = str_builder_build(sb);
-        sys_write(STDERR_FD, str_data(msg), str_len(msg));
+        sys_write(STDERR_FD, "reaped pid=", 11);
+        var nlen = fmt_int_buf(reaped_pid(rp), &numbuf);
+        sys_write(STDERR_FD, &numbuf, nlen);
+        sys_write(STDERR_FD, " exit=", 6);
+        nlen = fmt_int_buf(reaped_code(rp), &numbuf);
+        sys_write(STDERR_FD, &numbuf, nlen);
         sys_write(STDERR_FD, "\n", 1);
-        ri = ri + 1;
     }
     return len;
 }
@@ -63,10 +61,8 @@ fn reap_and_log() {
 # Check if any reaped process had non-zero exit
 fn any_failures(reaped) {
     var len = vec_len(reaped);
-    var fi = 0;
-    while (fi < len) {
+    for (var fi = 0; fi < len; fi = fi + 1) {
         if (reaped_code(vec_get(reaped, fi)) != 0) { return 1; }
-        fi = fi + 1;
     }
     return 0;
 }

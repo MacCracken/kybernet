@@ -78,13 +78,11 @@ fn epoll_wait_events(epfd, maxevents, timeout_ms) {
         }
     }
     # Parse events into structured results
-    var ei = 0;
-    while (ei < n) {
+    for (var ei = 0; ei < n; ei = ei + 1) {
         var ev = alloc(16);
         store64(ev, load64(events_buf + ei * 12 + 4));
         store64(ev + 8, load32(events_buf + ei * 12));
         vec_push(results, ev);
-        ei = ei + 1;
     }
     return results;
 }
@@ -119,4 +117,10 @@ fn eventloop_setup(signal_fd, health_sec, watchdog_sec) {
     }
 
     return Ok(epfd);
+}
+
+# Register a notify socket fd with an existing epoll instance.
+# Returns: Result
+fn eventloop_add_notify(epfd, notify_fd) {
+    return epoll_add_read(epfd, notify_fd, TOKEN_NOTIFY);
 }

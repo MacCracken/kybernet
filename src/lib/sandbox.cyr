@@ -1,0 +1,186 @@
+# kybernet/sandbox.cyr — Landlock filesystem sandbox for service pre_exec
+# Requires: agnosys/syscalls.cyr, string.cyr, vec.cyr, tagged.cyr
+#
+# Applies Landlock filesystem restrictions in pre_exec.
+# Graceful fallback on kernels without Landlock (< 5.13).
+# Uses raw syscalls — no dependency on agnosys/security.cyr.
+
+# Landlock syscall numbers (x86_64, kernel 5.13+)
+enum LandlockSysNr {
+    SYS_LANDLOCK_CREATE_RULESET = 444;
+    SYS_LANDLOCK_ADD_RULE = 445;
+    SYS_LANDLOCK_RESTRICT_SELF = 446;
+}
+
+# Landlock access flags
+enum LandlockAccess {
+    LANDLOCK_ACCESS_FS_EXECUTE = 1;
+    LANDLOCK_ACCESS_FS_WRITE_FILE = 2;
+    LANDLOCK_ACCESS_FS_READ_FILE = 4;
+    LANDLOCK_ACCESS_FS_READ_DIR = 8;
+    LANDLOCK_ACCESS_FS_REMOVE_DIR = 16;
+    LANDLOCK_ACCESS_FS_REMOVE_FILE = 32;
+    LANDLOCK_ACCESS_FS_MAKE_CHAR = 64;
+    LANDLOCK_ACCESS_FS_MAKE_DIR = 128;
+    LANDLOCK_ACCESS_FS_MAKE_REG = 256;
+    LANDLOCK_ACCESS_FS_MAKE_SOCK = 512;
+    LANDLOCK_ACCESS_FS_MAKE_FIFO = 1024;
+    LANDLOCK_ACCESS_FS_MAKE_BLOCK = 2048;
+    LANDLOCK_ACCESS_FS_MAKE_SYM = 4096;
+    LANDLOCK_RULE_PATH_BENEATH = 1;
+}
+
+# O_PATH and O_CLOEXEC for opening path references
+enum PathFlag {
+    O_PATH_FLAG = 0x200000;
+    O_CLOEXEC_FLAG = 0x80000;
+}
+
+# Access level presets
+enum SandboxAccess {
+    SANDBOX_NO_ACCESS = 0;
+    SANDBOX_READ_ONLY = 1;
+    SANDBOX_READ_WRITE = 2;
+    SANDBOX_READ_EXECUTE = 3;
+}
+
+# Sandbox rule: { path_ptr, access_level }
+fn sandbox_rule_new(path, access) {
+    var r = alloc(16);
+    store64(r, path);
+    store64(r + 8, access);
+    return r;
+}
+
+fn sandbox_rule_path(r) { return load64(r); }
+fn sandbox_rule_access(r) { return load64(r + 8); }
+
+# Sandbox builder
+fn sandbox_builder_new() {
+    var b = alloc(16);
+    store64(b, vec_new());
+    store64(b + 8, 0);
+    return b;
+}
+
+fn sandbox_allow_read(builder, path) {
+    var v = load64(builder);
+    vec_push(v, sandbox_rule_new(path, SANDBOX_READ_ONLY));
+    var c = load64(builder + 8);
+    store64(builder + 8, c + 1);
+    return 0;
+}
+
+fn sandbox_allow_read_write(builder, path) {
+    var v = load64(builder);
+    vec_push(v, sandbox_rule_new(path, SANDBOX_READ_WRITE));
+    var c = load64(builder + 8);
+    store64(builder + 8, c + 1);
+    return 0;
+}
+
+fn sandbox_allow_read_exec(builder, path) {
+    var v = load64(builder);
+    vec_push(v, sandbox_rule_new(path, SANDBOX_READ_EXECUTE));
+    var c = load64(builder + 8);
+    store64(builder + 8, c + 1);
+    return 0;
+}
+
+fn sandbox_rule_count(builder) {
+    return load64(builder + 8);
+}
+
+# Convert access level to Landlock access flags
+fn _access_to_flags(access) {
+    if (access == SANDBOX_READ_ONLY) {
+        return LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR;
+    } elif (access == SANDBOX_READ_WRITE) {
+        return LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR
+             | LANDLOCK_ACCESS_FS_WRITE_FILE | LANDLOCK_ACCESS_FS_MAKE_REG;
+    } elif (access == SANDBOX_READ_EXECUTE) {
+        return LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR
+             | LANDLOCK_ACCESS_FS_EXECUTE;
+    } else {
+        return 0;
+    }
+}
+
+# Apply Landlock restrictions from builder.
+# Must be called after set_no_new_privs() (from privdrop.cyr).
+# Returns: Result (Ok(0)=applied, Ok(1)=landlock unavailable, Err(errno))
+fn sandbox_apply(builder) {
+    var v = load64(builder);
+    var count = load64(builder + 8);
+    if (count == 0) { return Ok(0); }
+
+    # Handled access: all filesystem operations we control
+    var handled = LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_WRITE_FILE
+                | LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR
+                | LANDLOCK_ACCESS_FS_REMOVE_DIR | LANDLOCK_ACCESS_FS_REMOVE_FILE
+                | LANDLOCK_ACCESS_FS_MAKE_CHAR | LANDLOCK_ACCESS_FS_MAKE_DIR
+                | LANDLOCK_ACCESS_FS_MAKE_REG | LANDLOCK_ACCESS_FS_MAKE_SOCK
+                | LANDLOCK_ACCESS_FS_MAKE_FIFO | LANDLOCK_ACCESS_FS_MAKE_BLOCK
+                | LANDLOCK_ACCESS_FS_MAKE_SYM;
+
+    # LandlockRulesetAttr: { handled_access_fs: u64 } = 8 bytes
+    var attr = alloc(8);
+    store64(attr, handled);
+
+    var ruleset_fd = syscall(SYS_LANDLOCK_CREATE_RULESET, attr, 8, 0);
+    if (ruleset_fd < 0) {
+        var errno = 0 - ruleset_fd;
+        # ENOSYS or EOPNOTSUPP = kernel doesn't support Landlock
+        if (errno == 38) { return Ok(1); }
+        if (errno == 95) { return Ok(1); }
+        return Err(errno);
+    }
+
+    for (var idx = 0; idx < count; idx = idx + 1) {
+        var rule = vec_get(v, idx);
+        var path = sandbox_rule_path(rule);
+        var access = sandbox_rule_access(rule);
+        var allowed = _access_to_flags(access);
+
+        if (allowed != 0) {
+            var path_fd = syscall(SYS_OPEN, path, O_PATH_FLAG | O_CLOEXEC_FLAG, 0);
+            if (path_fd < 0) {
+                sys_close(ruleset_fd);
+                return Err(0 - path_fd);
+            }
+
+            # LandlockPathBeneathAttr: { allowed_access: u64, parent_fd: i32 }
+            var beneath = alloc(16);
+            memset(beneath, 0, 16);
+            store64(beneath, allowed);
+            store32(beneath + 8, path_fd);
+
+            var ret = syscall(SYS_LANDLOCK_ADD_RULE, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, beneath, 0);
+            sys_close(path_fd);
+
+            if (ret < 0) {
+                sys_close(ruleset_fd);
+                return Err(0 - ret);
+            }
+        }
+    }
+
+    var ret = syscall(SYS_LANDLOCK_RESTRICT_SELF, ruleset_fd, 0);
+    sys_close(ruleset_fd);
+
+    if (ret < 0) { return Err(0 - ret); }
+    return Ok(0);
+}
+
+# Create a basic service sandbox.
+# Allows: read /usr, /lib, /etc; read-write /tmp, /var; exec /usr/bin, /usr/lib
+fn sandbox_basic_service() {
+    var b = sandbox_builder_new();
+    sandbox_allow_read_exec(b, "/usr");
+    sandbox_allow_read(b, "/lib");
+    sandbox_allow_read(b, "/etc");
+    sandbox_allow_read_write(b, "/tmp");
+    sandbox_allow_read_write(b, "/var");
+    sandbox_allow_read_write(b, "/run");
+    return b;
+}

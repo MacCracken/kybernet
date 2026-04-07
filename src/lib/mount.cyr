@@ -79,8 +79,7 @@ fn mount_essential() {
     _init_mount_table();
     var t = &_mount_table;
     var mounted = 0;
-    var mi = 0;
-    while (mi < _mount_count) {
+    for (var mi = 0; mi < _mount_count; mi = mi + 1) {
         var off = mi * 40;
         var src = load64(t + off);
         var tgt = load64(t + off + 8);
@@ -90,7 +89,6 @@ fn mount_essential() {
         var r = mount_if_needed(src, tgt, fst, flg, dat);
         if (is_err_result(r) == 1) { return r; }
         if (result_unwrap(r) == 0) { mounted = mounted + 1; }
-        mi = mi + 1;
     }
     return Ok(mounted);
 }

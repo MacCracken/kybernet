@@ -1,0 +1,173 @@
+# kybernet/seccomp.cyr — seccomp BPF for service pre_exec
+# Requires: agnosys/syscalls.cyr, tagged.cyr
+#
+# Builds and loads seccomp-BPF allowlist filters for child services.
+# Applied in pre_exec (after fork, before exec).
+# Uses raw prctl — no dependency on agnosys/security.cyr.
+
+# BPF instruction constants
+enum BpfConst {
+    BPF_LD_W_ABS = 0x20;
+    BPF_JMP_JEQ_K = 0x15;
+    BPF_RET_K = 0x06;
+    SECCOMP_RET_ALLOW = 0x7FFF0000;
+    SECCOMP_RET_KILL_PROCESS = 0x80000000;
+    SECCOMP_RET_LOG = 0x7FFC0000;
+    BPF_MAXINSNS = 4096;
+    SECCOMP_MODE_FILTER = 2;
+    PR_SET_SECCOMP_NR = 22;
+}
+
+# Seccomp filter builder: accumulates allowed syscall numbers
+struct SeccompBuilder { syscalls; count; }
+
+fn seccomp_builder_new() {
+    var b = alloc(16);
+    store64(b, vec_new());
+    store64(b + 8, 0);
+    return b;
+}
+
+fn seccomp_allow(builder, syscall_nr) {
+    var v = load64(builder);
+    vec_push(v, syscall_nr);
+    var c = load64(builder + 8);
+    store64(builder + 8, c + 1);
+    return 0;
+}
+
+fn seccomp_count(builder) {
+    return load64(builder + 8);
+}
+
+# Write a BPF sock_filter instruction (8 bytes) to buf at offset.
+# Layout: u16 code, u8 jt, u8 jf, u32 k (little-endian)
+fn _bpf_insn(buf, offset, code, jt, jf, k) {
+    store16(buf + offset, code);
+    store8(buf + offset + 2, jt);
+    store8(buf + offset + 3, jf);
+    store32(buf + offset + 4, k);
+    return 0;
+}
+
+# Build the BPF filter bytecode from the builder.
+# Returns: Result(info_ptr) where info = { filter_ptr, filter_len }
+fn seccomp_build(builder) {
+    var v = load64(builder);
+    var num = load64(builder + 8);
+    if (num == 0) { return Err(EINVAL); }
+    if (num + 3 > BPF_MAXINSNS) { return Err(EINVAL); }
+
+    # Total instructions: 1 (load arch/nr) + num (JEQs) + 1 (default kill) + 1 (allow)
+    var num_insns = num + 3;
+    var filter_size = num_insns * 8;
+    var filter = alloc(filter_size);
+    memset(filter, 0, filter_size);
+
+    # Instruction 0: Load syscall number (seccomp_data offset 0)
+    _bpf_insn(filter, 0, BPF_LD_W_ABS, 0, 0, 0);
+
+    # For each allowed syscall: JEQ → jump to ALLOW
+    var off = 8;
+    for (var i = 0; i < num; i = i + 1) {
+        var nr = vec_get(v, i);
+        var remaining = num - i - 1;
+        var jt = remaining + 1;
+        _bpf_insn(filter, off, BPF_JMP_JEQ_K, jt, 0, nr);
+        off = off + 8;
+    }
+
+    # Default: KILL_PROCESS
+    _bpf_insn(filter, off, BPF_RET_K, 0, 0, SECCOMP_RET_KILL_PROCESS);
+    off = off + 8;
+
+    # ALLOW return
+    _bpf_insn(filter, off, BPF_RET_K, 0, 0, SECCOMP_RET_ALLOW);
+
+    var info = alloc(16);
+    store64(info, filter);
+    store64(info + 8, filter_size);
+    return Ok(info);
+}
+
+fn seccomp_filter_ptr(info) { return load64(info); }
+fn seccomp_filter_len(info) { return load64(info + 8); }
+
+# Load a seccomp filter into the calling process.
+# Must be called after set_no_new_privs() (from privdrop.cyr).
+# filter_ptr: pointer to BPF bytecode, filter_len: total bytes.
+# Returns: Result
+fn seccomp_load(filter_ptr, filter_len) {
+    if (filter_len == 0) { return Err(EINVAL); }
+    if (filter_len % 8 != 0) { return Err(EINVAL); }
+    var num_insns = filter_len / 8;
+
+    # sock_fprog: { u16 len, [6 pad], u64 filter_ptr } = 16 bytes
+    var prog = alloc(16);
+    memset(prog, 0, 16);
+    store16(prog, num_insns);
+    store64(prog + 8, filter_ptr);
+
+    var r = syscall(SYS_PRCTL, PR_SET_SECCOMP_NR, SECCOMP_MODE_FILTER, prog, 0, 0);
+    if (r < 0) { return Err(0 - r); }
+    return Ok(0);
+}
+
+# Convenience: build and load a seccomp filter.
+# Must be called after set_no_new_privs().
+# Returns: Result
+fn seccomp_apply(builder) {
+    var info_r = seccomp_build(builder);
+    if (is_err_result(info_r) == 1) { return info_r; }
+    var info = result_unwrap(info_r);
+    return seccomp_load(seccomp_filter_ptr(info), seccomp_filter_len(info));
+}
+
+# Create a basic service seccomp filter.
+# Allows: read, write, close, fstat, mmap, mprotect, munmap, brk,
+#         rt_sigreturn, exit, exit_group, sigaltstack, arch_prctl,
+#         gettid, futex, set_tid_address, set_robust_list,
+#         getrandom, clock_gettime, rseq, openat, ioctl, pipe2,
+#         dup, dup2, fcntl, lseek, epoll_create1, epoll_ctl,
+#         epoll_wait, socket, bind, listen, accept, sendto, recvfrom
+fn seccomp_basic_service() {
+    var b = seccomp_builder_new();
+    seccomp_allow(b, 0);    # read
+    seccomp_allow(b, 1);    # write
+    seccomp_allow(b, 3);    # close
+    seccomp_allow(b, 5);    # fstat
+    seccomp_allow(b, 8);    # lseek
+    seccomp_allow(b, 9);    # mmap
+    seccomp_allow(b, 10);   # mprotect
+    seccomp_allow(b, 11);   # munmap
+    seccomp_allow(b, 12);   # brk
+    seccomp_allow(b, 15);   # rt_sigreturn
+    seccomp_allow(b, 16);   # ioctl
+    seccomp_allow(b, 32);   # dup
+    seccomp_allow(b, 33);   # dup2
+    seccomp_allow(b, 41);   # socket
+    seccomp_allow(b, 42);   # connect
+    seccomp_allow(b, 43);   # accept
+    seccomp_allow(b, 44);   # sendto
+    seccomp_allow(b, 45);   # recvfrom
+    seccomp_allow(b, 49);   # bind
+    seccomp_allow(b, 50);   # listen
+    seccomp_allow(b, 60);   # exit
+    seccomp_allow(b, 72);   # fcntl
+    seccomp_allow(b, 131);  # sigaltstack
+    seccomp_allow(b, 158);  # arch_prctl
+    seccomp_allow(b, 186);  # gettid
+    seccomp_allow(b, 202);  # futex
+    seccomp_allow(b, 218);  # set_tid_address
+    seccomp_allow(b, 228);  # clock_gettime
+    seccomp_allow(b, 231);  # exit_group
+    seccomp_allow(b, 257);  # openat
+    seccomp_allow(b, 273);  # set_robust_list
+    seccomp_allow(b, 291);  # epoll_create1
+    seccomp_allow(b, 232);  # epoll_wait
+    seccomp_allow(b, 233);  # epoll_ctl
+    seccomp_allow(b, 293);  # pipe2
+    seccomp_allow(b, 318);  # getrandom
+    seccomp_allow(b, 334);  # rseq
+    return b;
+}

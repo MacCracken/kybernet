@@ -1,0 +1,507 @@
+# kybernet_bench.cyr — benchmark suite for kybernet modules
+# Measures per-operation costs for PID 1 hot paths.
+#
+# Build: sh scripts/bench.sh
+# Run:   ./build/kybernet_bench
+
+# Cyrius stdlib (vendored in lib/)
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/io.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/fnptr.cyr"
+include "lib/tagged.cyr"
+include "lib/callback.cyr"
+include "lib/bench.cyr"
+include "lib/agnosys/syscalls.cyr"
+
+# Kybernet modules
+include "src/lib/console.cyr"
+include "src/lib/signals.cyr"
+include "src/lib/reaper.cyr"
+include "src/lib/privdrop.cyr"
+include "src/lib/mount.cyr"
+include "src/lib/cgroup.cyr"
+include "src/lib/eventloop.cyr"
+include "src/lib/notify.cyr"
+include "src/lib/seccomp.cyr"
+include "src/lib/sandbox.cyr"
+
+# ================================================================
+# Inline report (matches agnosys bench_compare format)
+# ================================================================
+
+fn report(name, total_ns, iterations) {
+    var per_op = total_ns / iterations;
+    syscall(1, 1, "  ", 2);
+    syscall(1, 1, name, strlen(name));
+    syscall(1, 1, ": ", 2);
+    print_num(per_op);
+    syscall(1, 1, " ns/op (", 8);
+    print_num(iterations);
+    syscall(1, 1, " iters, ", 8);
+    print_num(total_ns / 1000000);
+    syscall(1, 1, " ms total)\n", 11);
+    return 0;
+}
+
+# ================================================================
+# Syscall baselines (parity with agnosys bench_compare)
+# ================================================================
+
+fn bench_getpid() {
+    var iters = 1000000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        sys_getpid();
+        k = k + 1;
+    }
+    report("getpid", now_ns() - start, iters);
+    return 0;
+}
+
+fn bench_getuid() {
+    var iters = 1000000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        sys_getuid();
+        k = k + 1;
+    }
+    report("getuid", now_ns() - start, iters);
+    return 0;
+}
+
+# ================================================================
+# Signal handling (hot path — every SIGCHLD)
+# ================================================================
+
+fn bench_classify_signal() {
+    var iters = 1000000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        classify_signal(SIGCHLD);
+        k = k + 1;
+    }
+    report("classify_signal", now_ns() - start, iters);
+    return 0;
+}
+
+fn bench_is_handled_signal() {
+    var iters = 1000000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        is_handled_signal(SIGCHLD);
+        k = k + 1;
+    }
+    report("is_handled_signal", now_ns() - start, iters);
+    return 0;
+}
+
+fn bench_sigset_ops() {
+    var iters = 1000000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        var set = sigset_new();
+        sigset_add(set, SIGCHLD);
+        sigset_add(set, SIGTERM);
+        sigset_has(set, SIGCHLD);
+        k = k + 1;
+    }
+    report("sigset_new+add+has", now_ns() - start, iters);
+    return 0;
+}
+
+# ================================================================
+# Cgroup path building (hot path — every service start/stop)
+# ================================================================
+
+fn bench_cgroup_path() {
+    var iters = 100000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        var p = cgroup_path("myservice");
+        k = k + 1;
+    }
+    report("cgroup_path", now_ns() - start, iters);
+    return 0;
+}
+
+fn bench_cgroup_file() {
+    var iters = 100000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        var f = cgroup_file("myservice", "cgroup.procs");
+        k = k + 1;
+    }
+    report("cgroup_file", now_ns() - start, iters);
+    return 0;
+}
+
+# ================================================================
+# Mount table init + is_mounted check
+# ================================================================
+
+fn bench_is_mounted() {
+    var iters = 10000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        is_mounted("/proc");
+        k = k + 1;
+    }
+    report("is_mounted(/proc)", now_ns() - start, iters);
+    return 0;
+}
+
+# ================================================================
+# Epoll event struct creation
+# ================================================================
+
+fn bench_epoll_event_new() {
+    var iters = 1000000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        epoll_event_new(EPOLLIN, 42);
+        k = k + 1;
+    }
+    report("epoll_event_new", now_ns() - start, iters);
+    return 0;
+}
+
+fn bench_timerspec_new() {
+    var iters = 1000000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        timerspec_new(10, 1);
+        k = k + 1;
+    }
+    report("timerspec_new", now_ns() - start, iters);
+    return 0;
+}
+
+# ================================================================
+# Notify parse (hot path — every sd_notify message)
+# ================================================================
+
+fn bench_notify_parse() {
+    var iters = 1000000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        notify_parse("READY=1");
+        k = k + 1;
+    }
+    report("notify_parse(READY)", now_ns() - start, iters);
+    return 0;
+}
+
+fn bench_notify_parse_status() {
+    var iters = 1000000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        notify_parse("STATUS=running ok");
+        notify_status_value("STATUS=running ok");
+        k = k + 1;
+    }
+    report("notify_parse+value", now_ns() - start, iters);
+    return 0;
+}
+
+# ================================================================
+# Seccomp filter building (cold path — once per service start)
+# ================================================================
+
+fn bench_seccomp_build_basic() {
+    var iters = 5000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        var b = seccomp_basic_service();
+        var r = seccomp_build(b);
+        k = k + 1;
+    }
+    report("seccomp_basic_service+build", now_ns() - start, iters);
+    return 0;
+}
+
+fn bench_seccomp_build_small() {
+    var iters = 50000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        var b = seccomp_builder_new();
+        seccomp_allow(b, 0);
+        seccomp_allow(b, 1);
+        seccomp_allow(b, 3);
+        seccomp_allow(b, 60);
+        seccomp_allow(b, 231);
+        var r = seccomp_build(b);
+        k = k + 1;
+    }
+    report("seccomp_build(5 syscalls)", now_ns() - start, iters);
+    return 0;
+}
+
+# ================================================================
+# Sandbox rule building (cold path — once per service start)
+# ================================================================
+
+fn bench_sandbox_build() {
+    var iters = 50000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        var b = sandbox_basic_service();
+        k = k + 1;
+    }
+    report("sandbox_basic_service", now_ns() - start, iters);
+    return 0;
+}
+
+# ================================================================
+# Privilege checking (hot path — service pre_exec)
+# ================================================================
+
+fn bench_is_root() {
+    var iters = 1000000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        is_root();
+        k = k + 1;
+    }
+    report("is_root", now_ns() - start, iters);
+    return 0;
+}
+
+# ================================================================
+# Str builder (used everywhere for path construction)
+# ================================================================
+
+fn bench_str_builder() {
+    var iters = 100000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "/sys/fs/cgroup/");
+        str_builder_add_cstr(sb, "kybernet.slice/");
+        str_builder_add_cstr(sb, "myservice");
+        str_builder_build(sb);
+        k = k + 1;
+    }
+    report("str_builder(3 segments)", now_ns() - start, iters);
+    return 0;
+}
+
+fn bench_str_builder_int() {
+    var iters = 100000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "reaped pid=");
+        str_builder_add_int(sb, 12345);
+        str_builder_add_cstr(sb, " exit=");
+        str_builder_add_int(sb, 0);
+        str_builder_build(sb);
+        k = k + 1;
+    }
+    report("str_builder(cstr+int mix)", now_ns() - start, iters);
+    return 0;
+}
+
+# ================================================================
+# Result/Option creation (micro — used on every operation)
+# ================================================================
+
+fn bench_result_ok() {
+    var iters = 1000000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        var r = Ok(42);
+        is_ok(r);
+        k = k + 1;
+    }
+    report("Ok+is_ok", now_ns() - start, iters);
+    return 0;
+}
+
+fn bench_result_err() {
+    var iters = 1000000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        var r = Err(22);
+        is_err_result(r);
+        k = k + 1;
+    }
+    report("Err+is_err_result", now_ns() - start, iters);
+    return 0;
+}
+
+fn bench_option() {
+    var iters = 1000000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        var o = Some(99);
+        is_some(o);
+        unwrap(o);
+        k = k + 1;
+    }
+    report("Some+is_some+unwrap", now_ns() - start, iters);
+    return 0;
+}
+
+# ================================================================
+# Reap + wait macros (hot path — every SIGCHLD)
+# ================================================================
+
+fn bench_wait_macros() {
+    var iters = 1000000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        WIFEXITED(0);
+        WEXITSTATUS(256);
+        WIFSIGNALED(9);
+        WTERMSIG(9);
+        k = k + 1;
+    }
+    report("W* macros (4 calls)", now_ns() - start, iters);
+    return 0;
+}
+
+# ================================================================
+# Vec operations (used in reaper, event loop)
+# ================================================================
+
+fn bench_vec_push_get() {
+    var iters = 100000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        var v = vec_new();
+        vec_push(v, 1);
+        vec_push(v, 2);
+        vec_push(v, 3);
+        vec_get(v, 0);
+        vec_get(v, 2);
+        vec_len(v);
+        k = k + 1;
+    }
+    report("vec(push*3+get*2+len)", now_ns() - start, iters);
+    return 0;
+}
+
+# ================================================================
+# Main
+# ================================================================
+
+fn main() {
+    alloc_init();
+
+    println("===================================================");
+    println("  kybernet benchmark — Cyrius");
+    println("===================================================");
+    println("");
+
+    # --- Syscall baselines ---
+    println("Syscall baselines:");
+    bench_getpid();
+    bench_getuid();
+    bench_is_root();
+    println("");
+
+    # --- Signal handling ---
+    println("Signal handling:");
+    bench_classify_signal();
+    bench_is_handled_signal();
+    bench_sigset_ops();
+    println("");
+
+    # --- Event loop ---
+    println("Event loop:");
+    bench_epoll_event_new();
+    bench_timerspec_new();
+    bench_wait_macros();
+    println("");
+
+    # --- Notify ---
+    println("Notify socket:");
+    bench_notify_parse();
+    bench_notify_parse_status();
+    println("");
+
+    # --- Cgroup ---
+    println("Cgroup management:");
+    alloc_reset();
+    alloc_init();
+    bench_cgroup_path();
+    alloc_reset();
+    alloc_init();
+    bench_cgroup_file();
+    println("");
+
+    # --- Mount ---
+    println("Mount operations:");
+    bench_is_mounted();
+    println("");
+
+    # --- Security (cold path) ---
+    println("Security (pre_exec):");
+    alloc_reset();
+    alloc_init();
+    bench_seccomp_build_small();
+    alloc_reset();
+    alloc_init();
+    bench_seccomp_build_basic();
+    alloc_reset();
+    alloc_init();
+    bench_sandbox_build();
+    println("");
+
+    # --- String building ---
+    println("String operations:");
+    alloc_reset();
+    alloc_init();
+    bench_str_builder();
+    alloc_reset();
+    alloc_init();
+    bench_str_builder_int();
+    println("");
+
+    # --- Result/Option ---
+    println("Tagged types:");
+    bench_result_ok();
+    bench_result_err();
+    bench_option();
+    println("");
+
+    # --- Collections ---
+    println("Collections:");
+    alloc_reset();
+    alloc_init();
+    bench_vec_push_get();
+    println("");
+
+    println("done");
+    return 0;
+}
+
+var r = main();
+syscall(60, r);
