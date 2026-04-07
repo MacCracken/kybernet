@@ -66,12 +66,14 @@ enum SignalClass {
 }
 
 fn classify_signal(signum) {
-    if (signum == SIGCHLD) { return SIG_CLASS_CHILD; }
-    elif (signum == SIGTERM) { return SIG_CLASS_TERM; }
-    elif (signum == SIGINT) { return SIG_CLASS_INT; }
-    elif (signum == SIGHUP) { return SIG_CLASS_HUP; }
-    elif (signum == SIGPWR) { return SIG_CLASS_PWR; }
-    else { return SIG_CLASS_NONE; }
+    switch (signum) {
+        case 17: return SIG_CLASS_CHILD;
+        case 15: return SIG_CLASS_TERM;
+        case 2: return SIG_CLASS_INT;
+        case 1: return SIG_CLASS_HUP;
+        case 30: return SIG_CLASS_PWR;
+        default: return SIG_CLASS_NONE;
+    }
 }
 
 # Check if a signal is in our handled set

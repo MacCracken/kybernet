@@ -93,16 +93,13 @@ fn sandbox_rule_count(builder) {
 
 # Convert access level to Landlock access flags
 fn _access_to_flags(access) {
-    if (access == SANDBOX_READ_ONLY) {
-        return LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR;
-    } elif (access == SANDBOX_READ_WRITE) {
-        return LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR
-             | LANDLOCK_ACCESS_FS_WRITE_FILE | LANDLOCK_ACCESS_FS_MAKE_REG;
-    } elif (access == SANDBOX_READ_EXECUTE) {
-        return LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR
-             | LANDLOCK_ACCESS_FS_EXECUTE;
-    } else {
-        return 0;
+    switch (access) {
+        case 1: return LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR;
+        case 2: return LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR
+                     | LANDLOCK_ACCESS_FS_WRITE_FILE | LANDLOCK_ACCESS_FS_MAKE_REG;
+        case 3: return LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR
+                     | LANDLOCK_ACCESS_FS_EXECUTE;
+        default: return 0;
     }
 }
 

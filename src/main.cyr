@@ -63,19 +63,13 @@ fn shutdown(cmd) {
 
 fn handle_signal(signum) {
     var cls = classify_signal(signum);
-    if (cls == SIG_CLASS_CHILD) {
-        reap_and_log();
-    } elif (cls == SIG_CLASS_TERM) {
-        klog("received SIGTERM");
-        shutdown(RB_POWER_OFF);
-    } elif (cls == SIG_CLASS_INT) {
-        klog("received SIGINT");
-        shutdown(RB_AUTOBOOT);
-    } elif (cls == SIG_CLASS_HUP) {
-        klog("received SIGHUP — reload not implemented");
-    } elif (cls == SIG_CLASS_PWR) {
-        klog("received SIGPWR — power failure");
-        shutdown(RB_POWER_OFF);
+    switch (cls) {
+        case 1: reap_and_log();
+        case 2: klog("received SIGTERM"); shutdown(RB_POWER_OFF);
+        case 3: klog("received SIGINT"); shutdown(RB_AUTOBOOT);
+        case 4: klog("received SIGHUP — reload not implemented");
+        case 5: klog("received SIGPWR — power failure"); shutdown(RB_POWER_OFF);
+        default: return 0;
     }
     return 0;
 }

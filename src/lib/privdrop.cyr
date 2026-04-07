@@ -121,10 +121,13 @@ fn secure_pre_exec(uid, gid, keep_caps) {
 
 # Print privilege error
 fn priv_error_print(code) {
-    if (code == PRIV_NOT_ROOT) { syscall(1, 2, "not running as root\n", 20); }
-    elif (code == PRIV_SETGROUPS_FAIL) { syscall(1, 2, "setgroups failed\n", 17); }
-    elif (code == PRIV_SETGID_FAIL) { syscall(1, 2, "setgid failed\n", 14); }
-    elif (code == PRIV_SETUID_FAIL) { syscall(1, 2, "setuid failed\n", 14); }
-    elif (code == PRIV_VERIFY_FAIL) { syscall(1, 2, "privilege drop verification failed\n", 35); }
+    switch (code) {
+        case 1: syscall(1, 2, "not running as root\n", 20);
+        case 2: syscall(1, 2, "setgroups failed\n", 17);
+        case 3: syscall(1, 2, "setgid failed\n", 14);
+        case 4: syscall(1, 2, "setuid failed\n", 14);
+        case 5: syscall(1, 2, "privilege drop verification failed\n", 35);
+        default: return 0;
+    }
     return 0;
 }
