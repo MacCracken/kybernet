@@ -138,14 +138,14 @@ fn test_callbacks() {
     return 0;
 }
 
-fn test_notify_parse() {
+fn test_knotify_classify() {
     println("--- notify ---");
-    assert_eq(notify_parse("READY=1"), NOTIFY_READY, "parse READY");
-    assert_eq(notify_parse("STOPPING=1"), NOTIFY_STOPPING, "parse STOPPING");
-    assert_eq(notify_parse("WATCHDOG=1"), NOTIFY_WATCHDOG, "parse WATCHDOG");
-    assert_eq(notify_parse("RELOADING=1"), NOTIFY_RELOADING, "parse RELOADING");
-    assert_eq(notify_parse("STATUS=running"), NOTIFY_STATUS, "parse STATUS");
-    assert_eq(notify_parse("UNKNOWN"), NOTIFY_UNKNOWN, "parse unknown");
+    assert_eq(knotify_classify("READY=1"), NOTIFY_READY, "parse READY");
+    assert_eq(knotify_classify("STOPPING=1"), NOTIFY_STOPPING, "parse STOPPING");
+    assert_eq(knotify_classify("WATCHDOG=1"), NOTIFY_WATCHDOG, "parse WATCHDOG");
+    assert_eq(knotify_classify("RELOADING=1"), NOTIFY_RELOADING, "parse RELOADING");
+    assert_eq(knotify_classify("STATUS=running"), NOTIFY_STATUS, "parse STATUS");
+    assert_eq(knotify_classify("UNKNOWN"), NOTIFY_UNKNOWN, "parse unknown");
     var sv = notify_status_value("STATUS=all good");
     assert(sv != 0, "status value ptr");
     assert(memeq(sv, "all good", 8) == 1, "status value content");
@@ -364,7 +364,7 @@ fn main() {
     test_cgroup();
     test_privdrop();
     test_callbacks();
-    test_notify_parse();
+    test_knotify_classify();
     test_notify_constants();
     test_seccomp_builder();
     test_sandbox_builder();

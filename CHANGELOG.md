@@ -7,6 +7,89 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pr
 
 ---
 
+## [0.90.0] — 2026-04-07
+
+### Added
+
+#### Security Modules
+- **seccomp.cyr** — seccomp BPF filter builder and loader
+  - Builder pattern: `seccomp_builder_new()` → `seccomp_allow(nr)` → `seccomp_build()` → `seccomp_load()`
+  - Generates raw BPF bytecode with JEQ instructions, default KILL_PROCESS
+  - `seccomp_basic_service()` preset with 37 safe syscalls
+  - Agnostik integration: `seccomp_from_profile()`, `seccomp_apply_profile()`
+- **sandbox.cyr** — Landlock filesystem sandboxing (new, not in Rust version)
+  - Builder pattern: `sandbox_builder_new()` → `sandbox_allow_read/write/exec(path)` → `sandbox_apply()`
+  - Graceful fallback on kernels < 5.13 (ENOSYS/EOPNOTSUPP → Ok(1))
+  - `sandbox_basic_service()` preset: /usr (exec), /lib (read), /etc (read), /tmp+/var+/run (read-write)
+  - Agnostik integration: `sandbox_from_ruleset()`, `sandbox_from_config()`
+- **privdrop.cyr** — capability dropping and no_new_privs
+  - `drop_capabilities(keep_set)` via PR_CAPBSET_DROP prctl
+  - `set_no_new_privs()` (required before seccomp/landlock)
+  - `secure_pre_exec(uid, gid, keep_caps)` orchestrating full security setup
+  - Agnostik integration: `privdrop_from_context()`, `drop_caps_from_set()`, `secure_from_context()`
+- **notify.cyr** — sd_notify socket for service readiness
+  - Unix datagram socket at /run/kybernet/notify
+  - Parses READY=1, STOPPING=1, WATCHDOG=1, RELOADING=1, STATUS=
+  - Integrated with epoll event loop via TOKEN_NOTIFY
+
+#### Agnostik Integration
+- Consume agnostik security types: `security_context`, `capability_set`, `seccomp_profile`, `landlock_ruleset`, `sandbox_config`, `cgroup_limits`, `resource_limits`, `agent_config`
+- **privdrop.cyr** — `secure_from_context(ctx, caps)` accepts agnostik security context
+- **seccomp.cyr** — `seccomp_apply_profile(profile)` accepts agnostik seccomp profile
+- **sandbox.cyr** — `sandbox_from_ruleset(ruleset)` accepts agnostik landlock ruleset
+- **cgroup.cyr** — `cgroup_apply_limits()`, `cgroup_apply_resource_limits()`, `cgroup_setup_agent()` accept agnostik limits and agent config
+- 34 new tests covering all agnostik type construction, access, and integration bridges
+
+#### Dependency Management
+- **cyrb.toml** — TOML-based dependency resolution via Cyrius 1.9.1
+  - `[deps] stdlib = [...]` for stdlib modules
+  - `[deps.agnosys] git + tag + modules` for pinned git dependencies
+  - `[deps.agnostik] git + tag + modules` for pinned git dependencies
+  - `cyrb build` auto-prepends resolved includes before source
+- Removed vendored `lib/agnosys/` — resolved from git tag at build time
+- Removed manual `include` directives for stdlib and agnosys from all source files
+
+#### Boot & Event Loop
+- kmsg logging at each boot phase for QEMU serial console visibility
+- Notify socket integrated with epoll event loop (TOKEN_NOTIFY)
+- Event loop handles READY, STOPPING, WATCHDOG, STATUS notify messages
+
+#### Benchmarks & Testing
+- **src/bench.cyr** — 22 microbenchmarks across 8 categories
+- **scripts/bench.sh** — build and run benchmarks with history tracking
+- **scripts/bench-compare.sh** — side-by-side Cyrius vs Rust comparison table
+- **benches/rust_compare.rs** — standalone Rust benchmark (raw syscalls, no libc)
+- QEMU boot tests ported from rust-old: boot-test, boot-crash-test, boot-shutdown-test
+- 98 integration tests (was 33)
+
+### Changed
+- **Cyrius 1.9.1** language features throughout:
+  - `switch/case` with dense jump table optimization (classify_signal, handle_signal, priv_error_print, _access_to_flags)
+  - `for` loops with step expressions replacing `while` + manual counter
+  - `elif/else` chains replacing nested `if` blocks
+  - `&&` and `||` operators replacing nested conditionals
+  - `break/continue` in loops replacing flag variables
+- Binary size: 93,800 bytes (was 47,888 at 0.9.0, increase from agnostik types)
+- Rust comparison: 71x smaller binary, 2x faster boot, 1.06x syscall parity
+
+### Dependencies
+- agnosys 0.90.0 (git tag, modules: lib/syscalls_linux.cyr)
+- agnostik 0.95.0 (git tag, modules: src/security.cyr, src/agent.cyr, src/error.cyr)
+- Cyrius stdlib: string, fmt, alloc, io, vec, str, fnptr, tagged, callback, assert, bench
+
+### Not Yet Ported from Rust
+- Service lifecycle management (wave-based startup, restart with backoff)
+- Health check enforcement and watchdog timeout handling
+- Configuration loading from JSON / SIGHUP reload
+- Edge boot (dm-verity, LUKS, PCR binding)
+- Emergency shell with authentication
+- Coordinated shutdown (service stop ordering)
+- Tmpfile directive execution
+
+These features depend on argonaut (service manager) which is being ported to Cyrius separately.
+
+---
+
 ## [0.9.0] — 2026-04-05
 
 ### Changed

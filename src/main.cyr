@@ -2,13 +2,14 @@
 # Written in Cyrius. Manages system boot, services, and shutdown.
 #
 # Boot sequence:
-#   1. Setup console (redirect stdio)
+#   1. Mount devtmpfs + console setup
 #   2. Mount essential filesystems
 #   3. Block signals + create signalfd
-#   4. Setup epoll event loop
-#   5. Start services (future)
-#   6. Event loop: dispatch signals, timers, health checks
-#   7. Shutdown on SIGTERM/SIGINT
+#   4. Setup epoll event loop + notify socket
+#   5. Initialize argonaut (config, boot stages, services)
+#   6. Run boot stages + start services (wave-based)
+#   7. Event loop: signals, health, watchdog, notify, restarts
+#   8. Shutdown on SIGTERM/SIGINT (coordinated via argonaut)
 
 # Kybernet modules (deps resolved via cyrb.toml)
 include "src/lib/console.cyr"
@@ -21,6 +22,20 @@ include "src/lib/eventloop.cyr"
 include "src/lib/notify.cyr"
 include "src/lib/seccomp.cyr"
 include "src/lib/sandbox.cyr"
+
+# ================================================================
+# Globals
+# ================================================================
+
+var g_init = 0;
+var g_health_tracker = 0;
+var g_epfd = 0;
+var g_nfd = 0;
+var g_sfd = 0;
+
+# ================================================================
+# Logging
+# ================================================================
 
 fn kmsg(msg) {
     var fd = sys_open("/dev/kmsg", O_WRONLY, 0);
@@ -38,28 +53,253 @@ fn klog(msg) {
     return 0;
 }
 
-fn shutdown(cmd) {
+fn klog2(prefix, msg) {
+    sys_write(STDERR_FD, "kybernet: ", 10);
+    sys_write(STDERR_FD, prefix, strlen(prefix));
+    sys_write(STDERR_FD, msg, strlen(msg));
+    sys_write(STDERR_FD, "\n", 1);
+    return 0;
+}
+
+# ================================================================
+# Shutdown (coordinated via argonaut)
+# ================================================================
+
+fn do_shutdown(shutdown_type) {
+    if (g_init != 0) {
+        var plan = init_plan_shutdown(g_init, shutdown_type);
+        if (plan != 0) {
+            klog("stopping services...");
+            init_stop_all(g_init, 5000);
+        }
+    }
+
     klog("syncing filesystems...");
     sys_sync();
+
     klog("shutdown");
-    sys_reboot(cmd);
+    if (shutdown_type == SHUTDOWN_REBOOT) {
+        sys_reboot(RB_AUTOBOOT);
+    } else {
+        sys_reboot(RB_POWER_OFF);
+    }
     # If reboot fails, pause forever
     sys_pause();
     return 0;
 }
 
+# ================================================================
+# Signal handling
+# ================================================================
+
 fn handle_signal(signum) {
     var cls = classify_signal(signum);
     switch (cls) {
-        case 1: reap_and_log();
-        case 2: klog("received SIGTERM"); shutdown(RB_POWER_OFF);
-        case 3: klog("received SIGINT"); shutdown(RB_AUTOBOOT);
-        case 4: klog("received SIGHUP — reload not implemented");
-        case 5: klog("received SIGPWR — power failure"); shutdown(RB_POWER_OFF);
+        case 1: handle_sigchld();
+        case 2: klog("received SIGTERM"); do_shutdown(SHUTDOWN_POWEROFF);
+        case 3: klog("received SIGINT"); do_shutdown(SHUTDOWN_REBOOT);
+        case 4: handle_sighup();
+        case 5: klog("received SIGPWR — power failure"); do_shutdown(SHUTDOWN_POWEROFF);
         default: return 0;
     }
     return 0;
 }
+
+fn handle_sigchld() {
+    if (g_init == 0) {
+        reap_and_log();
+        return 0;
+    }
+
+    # Reap tracked services first
+    var reaped = init_reap_services(g_init);
+    var rlen = vec_len(reaped);
+    for (var ri = 0; ri < rlen; ri = ri + 1) {
+        var entry = vec_get(reaped, ri);
+        # entry is (name, exit_code, crash_action)
+        var name = load64(entry);
+        var exit_code = load64(entry + 8);
+        var action = load64(entry + 16);
+
+        klog2("service exited: ", name);
+
+        if (action != 0) {
+            var action_type = load64(action);
+            if (action_type == CRASH_RESTART) {
+                var delay = load64(action + 8);
+                klog2("  scheduling restart: ", name);
+                # Restart after delay (simplified — immediate for now)
+                init_restart_service(g_init, name, 5000);
+            } elif (action_type == CRASH_GIVE_UP) {
+                klog2("  giving up on: ", name);
+            }
+        }
+    }
+
+    # Reap orphaned zombies
+    reap_zombies();
+    return 0;
+}
+
+fn handle_sighup() {
+    klog("received SIGHUP — reload not yet implemented");
+    # Future: reload config, register new services
+    # var cfg = argonaut_config_default();
+    # Re-register services from new config
+    return 0;
+}
+
+# ================================================================
+# Boot stages
+# ================================================================
+
+fn run_boot_stages() {
+    if (g_init == 0) { return 0; }
+
+    # Walk boot sequence, execute each step
+    var step = init_current_stage(g_init);
+    while (step != 0) {
+        var stage = load64(step);
+        var desc = load64(step + 8);
+
+        klog2("boot: ", desc);
+        kmsg(desc);
+
+        # Execute the stage
+        var ok = execute_boot_stage(stage);
+        if (ok == 1) {
+            init_mark_step_complete(g_init, stage);
+        } else {
+            var required = load64(step + 16);
+            if (required == 1) {
+                klog2("FATAL: required boot stage failed: ", desc);
+                init_mark_step_failed(g_init, stage, "stage execution failed");
+                return 0 - 1;
+            }
+            klog2("WARNING: optional boot stage failed: ", desc);
+            init_mark_step_failed(g_init, stage, "stage execution failed");
+        }
+
+        step = init_current_stage(g_init);
+    }
+
+    return 0;
+}
+
+fn execute_boot_stage(stage) {
+    switch (stage) {
+        case 0: return 1;
+        case 1: return 1;
+        case 2: return 1;
+        case 3: return 1;
+        case 4: return 1;
+        case 5: return 1;
+        case 6: return 1;
+        case 7: return 1;
+        case 8: return 1;
+        case 9: return 1;
+        case 10: return 1;
+        default: return 1;
+    }
+}
+
+# ================================================================
+# Service startup
+# ================================================================
+
+fn start_services() {
+    if (g_init == 0) { return 0; }
+
+    var config = load64(g_init);
+    var svc_defs = config_services(config);
+    var waves = resolve_service_waves(svc_defs);
+    if (waves == 0) {
+        klog("ERROR: circular dependency in services");
+        return 0 - 1;
+    }
+
+    var nwaves = vec_len(waves);
+    for (var wi = 0; wi < nwaves; wi = wi + 1) {
+        var wave = vec_get(waves, wi);
+        var wlen = vec_len(wave);
+
+        klog2("starting wave ", "...");
+
+        for (var si = 0; si < wlen; si = si + 1) {
+            var name = vec_get(wave, si);
+            klog2("  starting: ", name);
+
+            var pid = init_start_service(g_init, name);
+            if (pid > 0) {
+                klog2("  started: ", name);
+                # Create cgroup and move process
+                create_service_cgroup(name);
+                move_to_cgroup(name, pid);
+            } else {
+                klog2("  FAILED to start: ", name);
+            }
+        }
+    }
+
+    return 0;
+}
+
+# ================================================================
+# Event loop handlers
+# ================================================================
+
+fn handle_health_tick() {
+    if (g_init == 0) { return 0; }
+
+    var results = init_poll_health(g_init, g_health_tracker);
+    var rlen = vec_len(results);
+    for (var ri = 0; ri < rlen; ri = ri + 1) {
+        var result = vec_get(results, ri);
+        var passed = load64(result + 16);
+        if (passed == 0) {
+            var svc_name = load64(result);
+            klog2("health check failed: ", svc_name);
+        }
+    }
+    return 0;
+}
+
+fn handle_watchdog_tick() {
+    if (g_init == 0) { return 0; }
+
+    var killed = init_enforce_watchdog(g_init);
+    var klen = vec_len(killed);
+    for (var ki = 0; ki < klen; ki = ki + 1) {
+        var name = vec_get(killed, ki);
+        klog2("watchdog killed: ", name);
+    }
+    return 0;
+}
+
+fn handle_notify_msg() {
+    var nmsg = notify_read(g_nfd);
+    if (is_some(nmsg) == 0) { return 0; }
+
+    var raw = unwrap(nmsg);
+    var ntype = knotify_classify(raw);
+
+    switch (ntype) {
+        case 1: klog("service ready");
+        case 2: klog("service stopping");
+        case 3: klog("service watchdog ping");
+        case 4: {
+            var status = notify_status_value(raw);
+            if (status != 0) { klog(status); }
+        }
+        case 5: klog("service reloading");
+        default: return 0;
+    }
+    return 0;
+}
+
+# ================================================================
+# Main boot + event loop
+# ================================================================
 
 fn run() {
     klog("starting");
@@ -91,67 +331,74 @@ fn run() {
         klog("signal setup failed");
         return 1;
     }
-    var sfd = result_unwrap(sfd_r);
+    g_sfd = result_unwrap(sfd_r);
     kmsg("phase 4: signals ready");
 
     # Phase 5: Event loop
-    var epfd_r = eventloop_setup(sfd, 30, 10);
+    var epfd_r = eventloop_setup(g_sfd, 30, 10);
     if (is_err_result(epfd_r) == 1) {
         kmsg("phase 5: eventloop setup failed");
         klog("eventloop setup failed");
         return 1;
     }
-    var epfd = result_unwrap(epfd_r);
+    g_epfd = result_unwrap(epfd_r);
 
-    # Phase 5b: Notify socket (event-driven, not polled)
+    # Phase 5b: Notify socket
     var nfd_r = notify_socket_create();
-    var nfd = 0 - 1;
+    g_nfd = 0 - 1;
     if (is_ok(nfd_r) == 1) {
-        nfd = result_unwrap(nfd_r);
-        eventloop_add_notify(epfd, nfd);
+        g_nfd = result_unwrap(nfd_r);
+        eventloop_add_notify(g_epfd, g_nfd);
         klog("notify socket bound");
     } else {
         klog("notify socket failed (continuing)");
     }
 
-    kmsg("phase 6: ready — entering event loop");
+    # Phase 6: Initialize argonaut
+    var config = argonaut_config_default();
+    g_init = argonaut_init_new(config);
+    g_health_tracker = health_tracker_new();
+    klog("argonaut initialized");
+    kmsg("phase 6: argonaut ready");
+
+    # Phase 7: Run boot stages
+    var boot_r = run_boot_stages();
+    if (boot_r < 0) {
+        klog("boot stages failed");
+        if (init_should_drop_to_emergency(g_init) == 1) {
+            klog("dropping to emergency shell");
+            # Future: emergency shell with auth
+        }
+        return 1;
+    }
+
+    # Phase 8: Start services
+    start_services();
+    kmsg("phase 8: services started");
+    klog("services started");
+
+    kmsg("phase 9: ready — entering event loop");
     klog("ready — entering event loop");
 
-    # Phase 5: Event loop
+    # Phase 9: Event loop
     var running = 1;
     while (running == 1) {
-        var events = epoll_wait_events(epfd, 8, 0 - 1);
+        var events = epoll_wait_events(g_epfd, 8, 0 - 1);
         var elen = vec_len(events);
         for (var ei = 0; ei < elen; ei = ei + 1) {
             var ev = vec_get(events, ei);
             var tok = event_token(ev);
-            if (tok == TOKEN_SIGNAL) {
-                var sig = read_signal(sfd);
-                if (is_some(sig) == 1) {
-                    handle_signal(unwrap(sig));
-                }
-            } elif (tok == TOKEN_HEALTH) {
-                timerfd_drain(sfd);
-            } elif (tok == TOKEN_WATCHDOG) {
-                timerfd_drain(sfd);
-            } elif (tok == TOKEN_NOTIFY) {
-                var nmsg = notify_read(nfd);
-                if (is_some(nmsg) == 1) {
-                    var msg = unwrap(nmsg);
-                    var ntype = notify_parse(msg);
-                    if (ntype == NOTIFY_READY) {
-                        klog("service ready");
-                    } elif (ntype == NOTIFY_STOPPING) {
-                        klog("service stopping");
-                    } elif (ntype == NOTIFY_WATCHDOG) {
-                        klog("service watchdog ping");
-                    } elif (ntype == NOTIFY_STATUS) {
-                        var status = notify_status_value(msg);
-                        if (status != 0) {
-                            klog(status);
-                        }
+            switch (tok) {
+                case 1: {
+                    var sig = read_signal(g_sfd);
+                    if (is_some(sig) == 1) {
+                        handle_signal(unwrap(sig));
                     }
                 }
+                case 2: handle_health_tick();
+                case 3: handle_watchdog_tick();
+                case 5: handle_notify_msg();
+                default: return 0;
             }
         }
     }

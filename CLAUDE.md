@@ -6,8 +6,8 @@
 
 - **Type**: Cyrius binary (PID 1 init)
 - **License**: GPL-3.0-only
-- **Version**: 0.9.0
-- **Language**: Cyrius (self-hosting, zero external dependencies)
+- **Version**: 0.90.0
+- **Language**: Cyrius 1.9.1+ (self-hosting)
 
 ## Goal
 
@@ -16,53 +16,60 @@ The helmsman that steers the Argo. Manages system boot, essential mounts, signal
 ## Build
 
 ```sh
-sh scripts/build.sh        # Build (requires ../cyrius/build/cc2)
-sh scripts/test.sh         # Run 33 tests
+cyrb build src/main.cyr build/kybernet   # Build via cyrb (resolves deps from cyrb.toml)
+cyrb test src/test.cyr                   # Run 98 tests
+cyrb bench src/bench.cyr                 # Run benchmarks
 ```
 
 ## Project Structure
 
 ```
 kybernet/
+├── cyrb.toml              # Project manifest + dependency resolution
 ├── VERSION, CLAUDE.md, README.md, CHANGELOG.md, LICENSE
 ├── src/
-│   ├── main.cyr          # Boot sequence + event loop
-│   ├── test.cyr           # Integration tests (33 assertions)
+│   ├── main.cyr           # Boot sequence + event loop
+│   ├── test.cyr            # Integration tests (98 assertions)
+│   ├── bench.cyr           # Microbenchmarks (22 benchmarks)
 │   └── lib/
-│       ├── console.cyr    # Stdio redirect
-│       ├── signals.cyr    # Signal blocking + signalfd
-│       ├── reaper.cyr     # Zombie reaping
-│       ├── privdrop.cyr   # Privilege dropping
-│       ├── mount.cyr      # Essential filesystem mounts
-│       ├── cgroup.cyr     # Cgroup v2 management
-│       └── eventloop.cyr  # Epoll + timerfd
+│       ├── console.cyr     # Stdio redirect
+│       ├── signals.cyr     # Signal blocking + signalfd
+│       ├── reaper.cyr      # Zombie reaping
+│       ├── privdrop.cyr    # Privilege + capability dropping
+│       ├── mount.cyr       # Essential filesystem mounts
+│       ├── cgroup.cyr      # Cgroup v2 management + limits
+│       ├── eventloop.cyr   # Epoll + timerfd
+│       ├── notify.cyr      # sd_notify socket
+│       ├── seccomp.cyr     # Seccomp BPF filter builder
+│       └── sandbox.cyr     # Landlock filesystem sandbox
 ├── scripts/
-│   ├── build.sh           # Build script
-│   └── test.sh            # Test runner
-├── rust-old/              # Previous Rust implementation (reference)
-└── build/                 # Generated binaries (gitignored)
+│   ├── build.sh            # Build script (legacy, use cyrb build)
+│   └── test.sh             # Test runner (legacy, use cyrb test)
+├── rust-old/               # Previous Rust implementation (reference)
+└── build/                  # Generated binaries (gitignored)
 ```
 
-## Dependencies (vendored in lib/)
+## Dependencies (resolved via cyrb.toml)
 
-Cyrius stdlib is vendored in `lib/` — no external path dependencies at compile time.
-Only the compiler binary (`cc2`) is needed from the cyrius repo.
+Dependencies are resolved by `cyrb build` from `cyrb.toml`. No vendored copies.
 
-- string, fmt, alloc, io, vec, str, fnptr — core stdlib
-- tagged — Option/Result types
-- callback — vec_map, vec_filter, fork_with_pre_exec
-- agnosys — Linux syscall bindings
-- assert — test framework (test.cyr only)
+**Stdlib** (from ~/.cyrius/lib/):
+- string, fmt, alloc, io, vec, str, fnptr, tagged, callback, assert, bench
+
+**External** (git tags, cached in ~/.cyrius/deps/):
+- agnosys 0.90.0 — Linux syscall bindings (modules: lib/syscalls_linux.cyr)
+- agnostik 0.95.0 — Shared AGNOS types (modules: src/security.cyr, src/agent.cyr, src/error.cyr)
 
 ## Development Process
 
 ```
 1. Make changes to src/lib/*.cyr or src/main.cyr
-2. Build: sh scripts/build.sh
-3. Test: sh scripts/test.sh (33 tests must pass)
+2. Build: cyrb build src/main.cyr build/kybernet
+3. Test: cyrb test src/test.cyr (98 tests must pass)
 4. All functions return Result or Option where failure is possible
 5. Use str_builder for path construction
 6. Use klog() for stderr logging
+7. Use agnostik types for security config (security_context, capability_set, etc.)
 ```
 
 ## DO NOT

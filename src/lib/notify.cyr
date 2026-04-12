@@ -72,7 +72,7 @@ fn notify_read(fd) {
 
 # Parse a notify message type.
 # Checks for READY=1, STOPPING=1, WATCHDOG=1, RELOADING=1, STATUS=
-fn notify_parse(msg) {
+fn knotify_classify(msg) {
     if (memeq(msg, "READY=1", 7) == 1) { return NOTIFY_READY; }
     elif (memeq(msg, "STOPPING=1", 10) == 1) { return NOTIFY_STOPPING; }
     elif (memeq(msg, "WATCHDOG=1", 10) == 1) { return NOTIFY_WATCHDOG; }
