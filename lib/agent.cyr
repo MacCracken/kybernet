@@ -1,1 +1,517 @@
-/home/macro/Repos/agnostik/src/agent.cyr
+enum AgentType {
+    AGENT_TYPE_SYSTEM;
+    AGENT_TYPE_USER;
+    AGENT_TYPE_SERVICE;
+}
+enum AgentStatus {
+    AGENT_PENDING;
+    AGENT_STARTING;
+    AGENT_RUNNING;
+    AGENT_PAUSED;
+    AGENT_STOPPING;
+    AGENT_STOPPED;
+    AGENT_RESTARTING;
+    AGENT_TERMINATED;
+    AGENT_FAILED;
+}
+enum RestartPolicy {
+    RESTART_NEVER;
+    RESTART_ALWAYS;
+    RESTART_ON_FAILURE;
+}
+enum ProbeType {
+    PROBE_LIVENESS_READINESS;
+    PROBE_LIVENESS;
+    PROBE_READINESS;
+    PROBE_STARTUP;
+}
+enum StopReason {
+    STOP_USER_REQUESTED;
+    STOP_RESOURCE_EXHAUSTED;
+    STOP_ERROR;
+    STOP_TIMEOUT;
+    STOP_SYSTEM_SHUTDOWN;
+}
+fn stop_reason_new(kind, message) {
+    return tagged_new(kind, message);
+}
+fn stop_reason_kind(sr) { return tag(sr); }
+fn stop_reason_message(sr) { return payload(sr); }
+enum CircuitBreakerState {
+    CB_CLOSED;
+    CB_OPEN;
+    CB_HALF_OPEN;
+}
+#derive(Serialize)
+struct ResourceLimits { max_memory; max_cpu_time; max_fds; max_procs; max_disk; net_bw; }
+fn ResourceLimits_to_json(ptr, sb) {
+    str_builder_add_cstr(sb, "{\"max_memory\": ");
+        str_builder_add_int(sb, load64(ptr));
+        str_builder_add_cstr(sb, ", \"max_cpu_time\": ");
+        str_builder_add_int(sb, load64(ptr + 8));
+        str_builder_add_cstr(sb, ", \"max_fds\": ");
+        str_builder_add_int(sb, load64(ptr + 16));
+        str_builder_add_cstr(sb, ", \"max_procs\": ");
+        str_builder_add_int(sb, load64(ptr + 24));
+        str_builder_add_cstr(sb, ", \"max_disk\": ");
+        str_builder_add_int(sb, load64(ptr + 32));
+        str_builder_add_cstr(sb, ", \"net_bw\": ");
+        str_builder_add_int(sb, load64(ptr + 40));
+        str_builder_add_cstr(sb, "}");
+    return 0;
+}
+fn ResourceLimits_from_json(src) {
+    var r = alloc(48);
+    store64(r, _json_int(src, str_from("max_memory")));
+    store64(r + 8, _json_int(src, str_from("max_cpu_time")));
+    store64(r + 16, _json_int(src, str_from("max_fds")));
+    store64(r + 24, _json_int(src, str_from("max_procs")));
+    store64(r + 32, _json_int(src, str_from("max_disk")));
+    store64(r + 40, _json_int(src, str_from("net_bw")));
+    return r;
+}
+fn resource_limits_new() {
+    var r = alloc(48);
+    store64(r, 268435456);     # 256 MB default
+    store64(r + 8, 3600);      # 1 hour default
+    store64(r + 16, 256);      # 256 fds
+    store64(r + 24, 64);       # 64 processes
+    store64(r + 32, 0);
+    store64(r + 40, 0);
+    return r;
+}
+fn rlim_max_memory(r)           { return load64(r); }
+fn rlim_max_cpu_time(r)         { return load64(r + 8); }
+fn rlim_max_fds(r)              { return load64(r + 16); }
+fn rlim_max_procs(r)            { return load64(r + 24); }
+fn rlim_max_disk(r)             { return load64(r + 32); }
+fn rlim_net_bandwidth(r)        { return load64(r + 40); }
+fn rlim_set_max_memory(r, v)    { store64(r, v); return 0; }
+fn rlim_set_max_cpu(r, v)       { store64(r + 8, v); return 0; }
+fn rlim_set_max_fds(r, v)       { store64(r + 16, v); return 0; }
+fn rlim_set_max_procs(r, v)     { store64(r + 24, v); return 0; }
+fn rlim_set_max_disk(r, v)      { store64(r + 32, v); return 0; }
+fn rlim_set_net_bw(r, v)        { store64(r + 40, v); return 0; }
+#derive(Serialize)
+struct ResourceUsage { mem_used; cpu_used; fds_used; procs_used; }
+fn ResourceUsage_to_json(ptr, sb) {
+    str_builder_add_cstr(sb, "{\"mem_used\": ");
+        str_builder_add_int(sb, load64(ptr));
+        str_builder_add_cstr(sb, ", \"cpu_used\": ");
+        str_builder_add_int(sb, load64(ptr + 8));
+        str_builder_add_cstr(sb, ", \"fds_used\": ");
+        str_builder_add_int(sb, load64(ptr + 16));
+        str_builder_add_cstr(sb, ", \"procs_used\": ");
+        str_builder_add_int(sb, load64(ptr + 24));
+        str_builder_add_cstr(sb, "}");
+    return 0;
+}
+fn ResourceUsage_from_json(src) {
+    var u = alloc(32);
+    store64(u, _json_int(src, str_from("mem_used")));
+    store64(u + 8, _json_int(src, str_from("cpu_used")));
+    store64(u + 16, _json_int(src, str_from("fds_used")));
+    store64(u + 24, _json_int(src, str_from("procs_used")));
+    return u;
+}
+fn resource_usage_new() {
+    var u = alloc(32);
+    store64(u, 0);
+    store64(u + 8, 0);
+    store64(u + 16, 0);
+    store64(u + 24, 0);
+    return u;
+}
+fn rusage_memory(u)  { return load64(u); }
+fn rusage_cpu(u)     { return load64(u + 8); }
+fn rusage_fds(u)     { return load64(u + 16); }
+fn rusage_procs(u)   { return load64(u + 24); }
+fn health_check_new() {
+    var h = alloc(40);
+    store64(h, PROBE_LIVENESS_READINESS);
+    store64(h + 8, 30);    # 30s interval
+    store64(h + 16, 5);    # 5s timeout
+    store64(h + 24, 3);    # 3 retries
+    store64(h + 32, 0);    # no initial delay
+    return h;
+}
+fn hc_probe_type(h)      { return load64(h); }
+fn hc_interval(h)        { return load64(h + 8); }
+fn hc_timeout(h)         { return load64(h + 16); }
+fn hc_retries(h)         { return load64(h + 24); }
+fn hc_initial_delay(h)   { return load64(h + 32); }
+fn lifecycle_hook_new(cmd_vec, timeout) {
+    var h = alloc(16);
+    store64(h, cmd_vec);
+    store64(h + 8, timeout);
+    return h;
+}
+fn lhook_command(h)  { return load64(h); }
+fn lhook_timeout(h)  { return load64(h + 8); }
+fn lifecycle_hooks_new() {
+    var h = alloc(32);
+    store64(h, 0);
+    store64(h + 8, 0);
+    store64(h + 16, 0);
+    store64(h + 24, 0);
+    return h;
+}
+fn lhooks_pre_start(h)  { return load64(h); }
+fn lhooks_post_start(h) { return load64(h + 8); }
+fn lhooks_pre_stop(h)   { return load64(h + 16); }
+fn lhooks_post_stop(h)  { return load64(h + 24); }
+fn lhooks_set_pre_start(h, v)  { store64(h, v); return 0; }
+fn lhooks_set_post_start(h, v) { store64(h + 8, v); return 0; }
+fn lhooks_set_pre_stop(h, v)   { store64(h + 16, v); return 0; }
+fn lhooks_set_post_stop(h, v)  { store64(h + 24, v); return 0; }
+fn agent_config_new(name) {
+    var c = alloc(104);
+    store64(c, name);
+    store64(c + 8, AGENT_TYPE_USER);
+    store64(c + 16, resource_limits_new());
+    store64(c + 24, 0);   # sandbox set later
+    store64(c + 32, 0);
+    store64(c + 40, 0);
+    store64(c + 48, RESTART_NEVER);
+    store64(c + 56, 3);
+    store64(c + 64, 0);
+    store64(c + 72, 0);
+    store64(c + 80, 0);
+    store64(c + 88, 0);
+    store64(c + 96, 0);
+    return c;
+}
+fn aconf_name(c)             { return load64(c); }
+fn aconf_type(c)             { return load64(c + 8); }
+fn aconf_limits(c)           { return load64(c + 16); }
+fn aconf_sandbox(c)          { return load64(c + 24); }
+fn aconf_permissions(c)      { return _lazy_vec(c + 32); }
+fn aconf_restart_policy(c)   { return load64(c + 48); }
+fn aconf_max_restarts(c)     { return load64(c + 56); }
+fn aconf_health_check(c)     { return load64(c + 64); }
+fn aconf_metadata(c)         { return load64(c + 40); }
+fn aconf_startup_timeout(c)  { return load64(c + 72); }
+fn aconf_shutdown_timeout(c) { return load64(c + 80); }
+fn aconf_lifecycle_hooks(c)  { return load64(c + 88); }
+fn aconf_restart_backoff(c)  { return load64(c + 96); }
+fn aconf_set_type(c, v)             { store64(c + 8, v); return 0; }
+fn aconf_set_sandbox(c, v)          { store64(c + 24, v); return 0; }
+fn aconf_set_restart_policy(c, v)   { store64(c + 48, v); return 0; }
+fn aconf_set_max_restarts(c, v)     { store64(c + 56, v); return 0; }
+fn aconf_set_health_check(c, v)     { store64(c + 64, v); return 0; }
+fn aconf_set_lifecycle_hooks(c, v)  { store64(c + 88, v); return 0; }
+fn agent_rate_limit_new() {
+    var r = alloc(24);
+    store64(r, 0);
+    store64(r + 8, 0);
+    store64(r + 16, 0);
+    return r;
+}
+fn arl_tokens_per_hour(r) { return load64(r); }
+fn arl_requests_per_min(r) { return load64(r + 8); }
+fn arl_concurrent(r)       { return load64(r + 16); }
+fn agent_event_new(id, event_type, payload) {
+    var e = alloc(24);
+    store64(e, id);
+    store64(e + 8, event_type);
+    store64(e + 16, payload);
+    return e;
+}
+fn aevent_agent_id(e)   { return load64(e); }
+fn aevent_type(e)       { return load64(e + 8); }
+fn aevent_payload(e)    { return load64(e + 16); }
+#derive(Serialize)
+struct AgentInfo { id; name; agent_type; status; }
+fn AgentInfo_to_json(ptr, sb) {
+    str_builder_add_cstr(sb, "{\"id\": \"");
+        str_builder_add(sb, agent_id_to_str(load64(ptr)));
+        str_builder_add_cstr(sb, "\", \"name\": ");
+        var name = load64(ptr + 8);
+        if (name != 0) {
+            str_builder_add_cstr(sb, "\"");
+            str_builder_add(sb, name);
+            str_builder_add_cstr(sb, "\"");
+        } else {
+            str_builder_add_cstr(sb, "null");
+        }
+        str_builder_add_cstr(sb, ", \"agent_type\": \"");
+        str_builder_add_cstr(sb, agent_type_name(load64(ptr + 16)));
+        str_builder_add_cstr(sb, "\", \"status\": \"");
+        str_builder_add_cstr(sb, agent_status_name(load64(ptr + 24)));
+        str_builder_add_cstr(sb, "\"}");
+    return 0;
+}
+fn AgentInfo_from_json(src) {
+    var info = alloc(32);
+    var id_str = _json_str(src, str_from("id"));
+    if (id_str != 0) {
+        var parsed = agent_id_from_str(id_str);
+        if (is_ok(parsed) == 1) { store64(info, payload(parsed)); }
+    }
+    store64(info + 8, _json_str(src, str_from("name")));
+    store64(info + 16, _json_int(src, str_from("agent_type_id")));
+    store64(info + 24, _json_int(src, str_from("status_id")));
+    return info;
+}
+fn agent_info_new(id, name, atype, status) {
+    var info = alloc(32);
+    store64(info, id);
+    store64(info + 8, name);
+    store64(info + 16, atype);
+    store64(info + 24, status);
+    return info;
+}
+fn ainfo_id(i)     { return load64(i); }
+fn ainfo_name(i)   { return load64(i + 8); }
+fn ainfo_type(i)   { return load64(i + 16); }
+fn ainfo_status(i) { return load64(i + 24); }
+#derive(Serialize)
+struct AgentStats { total_requests; total_tokens; uptime_seconds; }
+fn AgentStats_to_json(ptr, sb) {
+    str_builder_add_cstr(sb, "{\"total_requests\": ");
+        str_builder_add_int(sb, load64(ptr));
+        str_builder_add_cstr(sb, ", \"total_tokens\": ");
+        str_builder_add_int(sb, load64(ptr + 8));
+        str_builder_add_cstr(sb, ", \"uptime_seconds\": ");
+        str_builder_add_int(sb, load64(ptr + 16));
+        str_builder_add_cstr(sb, "}");
+    return 0;
+}
+fn AgentStats_from_json(src) {
+    var s = alloc(24);
+    store64(s, _json_int(src, str_from("total_requests")));
+    store64(s + 8, _json_int(src, str_from("total_tokens")));
+    store64(s + 16, _json_int(src, str_from("uptime_seconds")));
+    return s;
+}
+fn agent_stats_new() {
+    var s = alloc(24);
+    store64(s, 0);
+    store64(s + 8, 0);
+    store64(s + 16, 0);
+    return s;
+}
+fn astats_requests(s)  { return load64(s); }
+fn astats_tokens(s)    { return load64(s + 8); }
+fn astats_uptime(s)    { return load64(s + 16); }
+fn agent_manifest_new(name) {
+    var m = alloc(80);
+    store64(m, name);
+    store64(m + 8, str_from(""));
+    store64(m + 16, str_from(""));
+    store64(m + 24, version_default());
+    store64(m + 32, str_from(""));
+    store64(m + 40, vec_new());
+    store64(m + 48, resource_limits_new());
+    store64(m + 56, vec_new());
+    store64(m + 64, vec_new());
+    store64(m + 72, map_new());
+    return m;
+}
+fn amanifest_name(m)        { return load64(m); }
+fn amanifest_description(m) { return load64(m + 8); }
+fn amanifest_author(m)      { return load64(m + 16); }
+fn amanifest_version(m)     { return load64(m + 24); }
+fn amanifest_homepage(m)    { return load64(m + 32); }
+fn amanifest_permissions(m) { return load64(m + 40); }
+fn amanifest_limits(m)      { return load64(m + 48); }
+fn task_id_new()      { return agent_id_new(); }
+fn task_id_to_str(t)  { return agent_id_to_str(t); }
+fn execution_id_new()      { return agent_id_new(); }
+fn execution_id_to_str(e)  { return agent_id_to_str(e); }
+fn agent_status_name(s) {
+    if (s == AGENT_PENDING)          { return "Pending"; }
+    elif (s == AGENT_STARTING)       { return "Starting"; }
+    elif (s == AGENT_RUNNING)        { return "Running"; }
+    elif (s == AGENT_PAUSED)         { return "Paused"; }
+    elif (s == AGENT_STOPPING)       { return "Stopping"; }
+    elif (s == AGENT_STOPPED)        { return "Stopped"; }
+    elif (s == AGENT_RESTARTING)     { return "Restarting"; }
+    elif (s == AGENT_TERMINATED)     { return "Terminated"; }
+    elif (s == AGENT_FAILED)         { return "Failed"; }
+    return "Unknown";
+}
+fn agent_type_name(t) {
+    if (t == AGENT_TYPE_SYSTEM)      { return "System"; }
+    elif (t == AGENT_TYPE_USER)      { return "User"; }
+    elif (t == AGENT_TYPE_SERVICE)   { return "Service"; }
+    return "Unknown";
+}
+enum LabelOperator { LABEL_IN; LABEL_NOT_IN; LABEL_EXISTS; LABEL_DOES_NOT_EXIST; }
+fn agent_message_new(sender, receiver, payload_str) {
+    var m = alloc(56);
+    store64(m, agent_id_new());
+    store64(m + 8, sender);
+    store64(m + 16, receiver);
+    store64(m + 24, 0);
+    store64(m + 32, 0);
+    store64(m + 40, payload_str);
+    store64(m + 48, now_ns());
+    return m;
+}
+fn amsg_id(m)             { return load64(m); }
+fn amsg_sender(m)         { return load64(m + 8); }
+fn amsg_receiver(m)       { return load64(m + 16); }
+fn amsg_correlation_id(m) { return load64(m + 24); }
+fn amsg_reply_to(m)       { return load64(m + 32); }
+fn amsg_payload(m)        { return load64(m + 40); }
+fn amsg_timestamp(m)      { return load64(m + 48); }
+fn amsg_set_correlation_id(m, v) { store64(m + 24, v); return 0; }
+fn amsg_set_reply_to(m, v)      { store64(m + 32, v); return 0; }
+fn agent_dependency_new(required_agent, min_ver, required) {
+    var d = alloc(24);
+    store64(d, required_agent);
+    store64(d + 8, min_ver);
+    store64(d + 16, required);
+    return d;
+}
+fn adep_required_agent(d) { return load64(d); }
+fn adep_min_version(d)    { return load64(d + 8); }
+fn adep_required(d)       { return load64(d + 16); }
+fn resource_request_new(agent_id, limits) {
+    var r = alloc(24);
+    store64(r, agent_id);
+    store64(r + 8, limits);
+    store64(r + 16, 0);
+    return r;
+}
+fn rreq_agent_id(r)      { return load64(r); }
+fn rreq_limits(r)        { return load64(r + 8); }
+fn rreq_justification(r) { return load64(r + 16); }
+fn rreq_set_justification(r, v) { store64(r + 16, v); return 0; }
+fn resource_grant_new(agent_id, limits, approved) {
+    var g = alloc(32);
+    store64(g, agent_id);
+    store64(g + 8, limits);
+    store64(g + 16, approved);
+    store64(g + 24, 0);
+    return g;
+}
+fn rgrant_agent_id(g) { return load64(g); }
+fn rgrant_limits(g)   { return load64(g + 8); }
+fn rgrant_approved(g) { return load64(g + 16); }
+fn rgrant_reason(g)   { return load64(g + 24); }
+fn rgrant_set_reason(g, v) { store64(g + 24, v); return 0; }
+fn retry_policy_new() {
+    var p = alloc(40);
+    store64(p, 3);
+    store64(p + 8, 1000);
+    store64(p + 16, 2000);
+    store64(p + 24, 30000);
+    store64(p + 32, 1);
+    return p;
+}
+fn rpol_max_retries(p)     { return load64(p); }
+fn rpol_initial_delay(p)   { return load64(p + 8); }
+fn rpol_backoff_mult(p)    { return load64(p + 16); }
+fn rpol_max_delay(p)       { return load64(p + 24); }
+fn rpol_jitter(p)          { return load64(p + 32); }
+fn restart_backoff_new() {
+    var b = alloc(32);
+    store64(b, 1000);
+    store64(b + 8, 2000);
+    store64(b + 16, 60000);
+    store64(b + 24, 1);
+    return b;
+}
+fn rback_initial_delay(b) { return load64(b); }
+fn rback_multiplier(b)    { return load64(b + 8); }
+fn rback_max_delay(b)     { return load64(b + 16); }
+fn rback_jitter(b)        { return load64(b + 24); }
+fn agent_pool_new(pool_name, config) {
+    var p = alloc(40);
+    store64(p, pool_name);
+    store64(p + 8, config);
+    store64(p + 16, 1);
+    store64(p + 24, 1);
+    store64(p + 32, 10);
+    return p;
+}
+fn apool_name(p)         { return load64(p); }
+fn apool_config(p)       { return load64(p + 8); }
+fn apool_replicas(p)     { return load64(p + 16); }
+fn apool_min_replicas(p) { return load64(p + 24); }
+fn apool_max_replicas(p) { return load64(p + 32); }
+fn apool_set_replicas(p, v)     { store64(p + 16, v); return 0; }
+fn apool_set_min_replicas(p, v) { store64(p + 24, v); return 0; }
+fn apool_set_max_replicas(p, v) { store64(p + 32, v); return 0; }
+fn agent_capabilities_new() {
+    var c = alloc(32);
+    store64(c, 0);
+    store64(c + 8, 0);
+    store64(c + 16, 0);
+    store64(c + 24, 0);
+    return c;
+}
+fn acap_skills(c)      { return _lazy_vec(c); }
+fn acap_input_types(c) { return _lazy_vec(c + 8); }
+fn acap_output_types(c){ return _lazy_vec(c + 16); }
+fn acap_max_tasks(c)   { return load64(c + 24); }
+fn acap_set_max_tasks(c, v) { store64(c + 24, v); return 0; }
+fn scheduling_constraints_new() {
+    var s = alloc(48);
+    var i = 0;
+    while (i < 48) { store64(s + i, 0); i = i + 8; }
+    return s;
+}
+fn sched_node_affinity(s)      { return _lazy_vec(s); }
+fn sched_node_anti_affinity(s) { return _lazy_vec(s + 8); }
+fn sched_pod_affinity(s)       { return _lazy_vec(s + 16); }
+fn sched_pod_anti_affinity(s)  { return _lazy_vec(s + 24); }
+fn sched_priority(s)           { return load64(s + 32); }
+fn sched_preemptible(s)        { return load64(s + 40); }
+fn sched_set_priority(s, v)    { store64(s + 32, v); return 0; }
+fn label_selector_new(key, operator) {
+    var l = alloc(24);
+    store64(l, key);
+    store64(l + 8, operator);
+    store64(l + 16, 0);
+    return l;
+}
+fn lsel_key(l)      { return load64(l); }
+fn lsel_operator(l) { return load64(l + 8); }
+fn lsel_values(l)   { return _lazy_vec(l + 16); }
+fn topic_new(tname) {
+    var t = alloc(24);
+    store64(t, tname);
+    store64(t + 8, str_from(""));
+    store64(t + 16, 0);
+    return t;
+}
+fn topic_name(t)        { return load64(t); }
+fn topic_description(t) { return load64(t + 8); }
+fn topic_ttl(t)         { return load64(t + 16); }
+fn topic_set_description(t, v) { store64(t + 8, v); return 0; }
+fn topic_set_ttl(t, v)         { store64(t + 16, v); return 0; }
+fn subscription_new(agent_id, topic_name) {
+    var s = alloc(24);
+    store64(s, agent_id);
+    store64(s + 8, topic_name);
+    store64(s + 16, 0);
+    return s;
+}
+fn sub_agent_id(s) { return load64(s); }
+fn sub_topic(s)    { return load64(s + 8); }
+fn sub_filter(s)   { return load64(s + 16); }
+fn sub_set_filter(s, v) { store64(s + 16, v); return 0; }
+fn topic_message_new(topic_name, publisher) {
+    var m = alloc(56);
+    store64(m, agent_id_new());
+    store64(m + 8, topic_name);
+    store64(m + 16, publisher);
+    store64(m + 24, str_from("{}"));
+    store64(m + 32, now_ns());
+    store64(m + 40, 0);
+    store64(m + 48, 0);
+    return m;
+}
+fn tmsg_id(m)        { return load64(m); }
+fn tmsg_topic(m)     { return load64(m + 8); }
+fn tmsg_publisher(m) { return load64(m + 16); }
+fn tmsg_payload(m)   { return load64(m + 24); }
+fn tmsg_timestamp(m) { return load64(m + 32); }
+fn tmsg_priority(m)  { return load64(m + 40); }
+fn tmsg_ttl(m)       { return load64(m + 48); }
+fn tmsg_set_payload(m, v)  { store64(m + 24, v); return 0; }
+fn tmsg_set_priority(m, v) { store64(m + 40, v); return 0; }
+fn tmsg_set_ttl(m, v)      { store64(m + 48, v); return 0; }

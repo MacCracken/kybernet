@@ -8,7 +8,7 @@ permissions:
   contents: write
 
 env:
-  CYRIUS_VERSION: "3.8.0"
+  CYRIUS_VERSION: "3.9.2"
 
 jobs:
   # ── CI Gate (must pass before release) ──
@@ -49,12 +49,6 @@ jobs:
           cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/lib/" 2>/dev/null || true
           chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
           echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
-
-      - name: Clone dependencies
-        run: |
-          git clone --depth 1 --branch 0.97.2 https://github.com/MacCracken/agnosys.git ../agnosys
-          git clone --depth 1 --branch 0.97.1 https://github.com/MacCracken/agnostik.git ../agnostik
-          git clone --depth 1 --branch 1.1.0 https://github.com/MacCracken/argonaut.git ../argonaut
 
       - name: Build x86_64 binary
         run: |

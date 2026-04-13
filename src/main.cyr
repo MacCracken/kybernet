@@ -12,57 +12,7 @@
 #   8. Event loop: signals, health, watchdog, notify, restarts
 #   9. Shutdown on SIGTERM/SIGINT (coordinated via argonaut)
 
-# Stdlib
-include "lib/string.cyr"
-include "lib/fmt.cyr"
-include "lib/alloc.cyr"
-include "lib/freelist.cyr"
-include "lib/io.cyr"
-include "lib/vec.cyr"
-include "lib/str.cyr"
-include "lib/fnptr.cyr"
-include "lib/tagged.cyr"
-include "lib/callback.cyr"
-include "lib/hashmap.cyr"
-include "lib/json.cyr"
-include "lib/syscalls.cyr"
-include "lib/process.cyr"
-include "lib/mmap.cyr"
-include "lib/sakshi.cyr"
-include "lib/sakshi_full.cyr"
-include "lib/chrono.cyr"
-include "lib/bigint.cyr"
-include "lib/sigil.cyr"
-include "lib/bench.cyr"
-include "lib/assert.cyr"
-
-# Agnosys
-include "lib/syscalls_linux.cyr"
-
-# Agnostik
-include "lib/agnostik_types.cyr"
-include "lib/security.cyr"
-include "lib/error.cyr"
-include "lib/agent.cyr"
-
-# Argonaut (libro)
-include "lib/libro_error.cyr"
-include "lib/libro_export.cyr"
-include "lib/types.cyr"
-include "lib/entry.cyr"
-include "lib/hasher.cyr"
-include "lib/chain.cyr"
-include "lib/query.cyr"
-include "lib/verify.cyr"
-include "lib/retention.cyr"
-include "lib/audit.cyr"
-include "lib/services.cyr"
-include "lib/health.cyr"
-include "lib/process_mgmt.cyr"
-include "lib/boot.cyr"
-include "lib/init.cyr"
-
-# Kybernet modules
+# Kybernet modules (stdlib + deps resolved via cyrius.toml)
 include "src/lib/console.cyr"
 include "src/lib/signals.cyr"
 include "src/lib/reaper.cyr"
@@ -160,10 +110,10 @@ fn slog(level, msg) {
     if (g_log_fd <= 0) { return 0; }
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"level\":\"");
-    str_builder_add_cstr(sb, level);
-    str_builder_add_cstr(sb, "\",\"msg\":\"");
-    str_builder_add_cstr(sb, msg);
-    str_builder_add_cstr(sb, "\"}\n");
+        str_builder_add_cstr(sb, level);
+        str_builder_add_cstr(sb, "\",\"msg\":\"");
+        str_builder_add_cstr(sb, msg);
+        str_builder_add_cstr(sb, "\"}\n");
     var line = str_builder_build(sb);
     sys_write(g_log_fd, str_data(line), str_len(line));
     return 0;

@@ -1,6 +1,6 @@
 # tagged.cyr — tagged unions (enums with data)
 # Usage: include "lib/tagged.cyr"
-# Requires: alloc.cyr
+# Requires: alloc.cyr, fmt.cyr (for option_print/result_print)
 #
 # A tagged union is a heap-allocated pair: { tag: i64, value: i64 }
 # The tag identifies which variant, the value carries the payload.
@@ -42,18 +42,22 @@ fn is_tag(t, expected) {
 
 enum OptionTag { NONE = 0; SOME = 1; }
 
+# Create a None option value
 fn None() {
     return tagged_new(NONE, 0);
 }
 
+# Wrap a value in Some
 fn Some(value) {
     return tagged_new(SOME, value);
 }
 
+# Return 1 if option is None
 fn is_none(opt) {
     return is_tag(opt, NONE);
 }
 
+# Return 1 if option is Some
 fn is_some(opt) {
     return is_tag(opt, SOME);
 }
@@ -73,31 +77,28 @@ fn unwrap_or(opt, fallback) {
     return payload(opt);
 }
 
-# Map: apply fn to value if Some, return None if None
-# (requires function pointer + fncall1 from fnptr.cyr)
-# fn option_map(opt, fp) {
-#     if (is_none(opt) == 1) { return opt; }
-#     return Some(fncall1(fp, payload(opt)));
-# }
-
 # ================================================================
 # Result type: Ok(value) | Err(code)
 # ================================================================
 
 enum ResultTag { OK = 0; ERR = 1; }
 
+# Create an Ok result with the given value
 fn Ok(value) {
     return tagged_new(OK, value);
 }
 
+# Create an Err result with the given error code
 fn Err(code) {
     return tagged_new(ERR, code);
 }
 
+# Return 1 if result is Ok
 fn is_ok(res) {
     return is_tag(res, OK);
 }
 
+# Return 1 if result is Err
 fn is_err_result(res) {
     return is_tag(res, ERR);
 }
@@ -133,18 +134,22 @@ fn err_code_of(res) {
 
 enum EitherTag { LEFT = 0; RIGHT = 1; }
 
+# Create a Left either value
 fn Left(value) {
     return tagged_new(LEFT, value);
 }
 
+# Create a Right either value
 fn Right(value) {
     return tagged_new(RIGHT, value);
 }
 
+# Return 1 if either is Left
 fn is_left(e) {
     return is_tag(e, LEFT);
 }
 
+# Return 1 if either is Right
 fn is_right(e) {
     return is_tag(e, RIGHT);
 }
@@ -153,6 +158,7 @@ fn is_right(e) {
 # Print helpers
 # ================================================================
 
+# Print an Option value as "None" or "Some(n)"
 fn option_print(opt) {
     if (is_none(opt) == 1) {
         syscall(1, 1, "None", 4);
@@ -164,6 +170,7 @@ fn option_print(opt) {
     return 0;
 }
 
+# Print a Result value as "Ok(n)" or "Err(n)"
 fn result_print(res) {
     if (is_ok(res) == 1) {
         syscall(1, 1, "Ok(", 3);

@@ -172,3 +172,45 @@ fn fmt_printf(format, args) {
     syscall(1, 1, &buf, len);
     return len;
 }
+
+# Format f64 to buffer as "integer.fraction" with given decimal places.
+# Returns number of bytes written.
+fn fmt_float_buf(val, buf, decimals) {
+    var neg = 0;
+    # Check sign bit
+    if ((val >> 63) & 1 == 1) {
+        neg = 1;
+        val = f64_abs(val);
+    }
+    var whole = f64_to(f64_floor(val));
+    var pos = 0;
+    if (neg == 1) { store8(buf, 45); pos = 1; }
+    pos = pos + fmt_int_buf(whole, buf + pos);
+    store8(buf + pos, 46); pos = pos + 1;
+    # Fractional part: multiply by 10^decimals, round, format as int
+    var scale = f64_from(1);
+    var di = 0;
+    while (di < decimals) { scale = f64_mul(scale, f64_from(10)); di = di + 1; }
+    var frac = f64_to(f64_round(f64_mul(f64_sub(val, f64_from(whole)), scale)));
+    if (frac < 0) { frac = 0 - frac; }
+    # Zero-pad fractional part
+    var flen = fmt_int_buf(frac, buf + pos);
+    var pad = decimals - flen;
+    if (pad > 0) {
+        # Shift digits right and insert zeros
+        var si = flen - 1;
+        while (si >= 0) { store8(buf + pos + pad + si, load8(buf + pos + si)); si = si - 1; }
+        si = 0;
+        while (si < pad) { store8(buf + pos + si, 48); si = si + 1; }
+        flen = decimals;
+    }
+    return pos + flen;
+}
+
+# Print f64 to stdout with given decimal places
+fn fmt_float(val, decimals) {
+    var buf[32];
+    var len = fmt_float_buf(val, &buf, decimals);
+    syscall(1, 1, &buf, len);
+    return 0;
+}
