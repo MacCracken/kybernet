@@ -26,8 +26,14 @@ path = "../agnostik"
 tag = "0.97.1"
 modules = ["src/types.cyr", "src/security.cyr", "src/agent.cyr", "src/error.cyr"]
 
+[deps.libro]
+git = "https://github.com/MacCracken/libro"
+path = "../libro"
+tag = "1.0.3"
+modules = ["src/error.cyr", "src/hasher.cyr", "src/entry.cyr", "src/verify.cyr", "src/query.cyr", "src/retention.cyr", "src/chain.cyr", "src/export.cyr"]
+
 [deps.argonaut]
 git = "https://github.com/MacCracken/argonaut"
 path = "../argonaut"
-tag = "1.1.0"
-modules = ["lib/libro/error.cyr", "lib/libro/entry.cyr", "lib/libro/hasher.cyr", "lib/libro/chain.cyr", "lib/libro/query.cyr", "lib/libro/verify.cyr", "lib/libro/retention.cyr", "lib/libro/export.cyr", "src/types.cyr", "src/audit.cyr", "src/services.cyr", "src/health.cyr", "src/process_mgmt.cyr", "src/boot.cyr", "src/init.cyr"]
+tag = "1.2.0"
+modules = ["src/types.cyr", "src/audit.cyr", "src/services.cyr", "src/health.cyr", "src/process_mgmt.cyr", "src/boot.cyr", "src/init.cyr"]
