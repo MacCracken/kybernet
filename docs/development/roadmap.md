@@ -75,19 +75,22 @@
 - [ ] Service lifecycle fully exercised (wave startup, crash recovery, shutdown ordering)
 - [ ] Health check enforcement and watchdog timeout handling tested end-to-end
 - [ ] Config loading from JSON / SIGHUP reload
-- [ ] Edge boot (dm-verity, LUKS, PCR binding)
 - [ ] Emergency shell with authentication
-- [ ] Real hardware boot (RPi4, NUC)
-- [ ] QEMU boot: minimal < 3s, desktop < 3s
-- [ ] Structured log output
 - [ ] Service restart with exponential backoff (timerfd-based PendingRestart queue)
 - [ ] Tmpfile directive execution
+- [ ] Structured log output
+
+## v1.0.1 — Boot & Hardware
+
+- [ ] Edge boot (dm-verity, LUKS, PCR binding)
+- [ ] Real hardware boot (RPi4, NUC)
+- [ ] QEMU boot: minimal < 3s, desktop < 3s
+- [ ] QEMU boot time profiling and optimization
 
 ## v1.1.0 — Optimization
 
 - [ ] Cgroup path precomputation — cgroup_file() at 911ns per call, precompute common paths per service
 - [ ] Binary size optimization (currently 481KB — mostly from transitive deps; dead-code elimination pending cc3 4.0)
-- [ ] QEMU boot time profiling and optimization
 - [ ] Integration tests with real argonaut configs
 - [ ] Control socket for agnoshi runtime commands
 - [ ] Structured log output to /var/log/kybernet.log

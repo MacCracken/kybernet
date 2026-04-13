@@ -6,10 +6,11 @@
 #   2. Mount essential filesystems
 #   3. Block signals + create signalfd
 #   4. Setup epoll event loop + notify socket
-#   5. Initialize argonaut (config, boot stages, services)
-#   6. Run boot stages + start services (wave-based)
-#   7. Event loop: signals, health, watchdog, notify, restarts
-#   8. Shutdown on SIGTERM/SIGINT (coordinated via argonaut)
+#   5. Load config from /etc/kybernet/config.json (or defaults)
+#   6. Initialize argonaut + execute tmpfiles
+#   7. Run boot stages + start services (wave-based)
+#   8. Event loop: signals, health, watchdog, notify, restarts
+#   9. Shutdown on SIGTERM/SIGINT (coordinated via argonaut)
 
 # Stdlib
 include "lib/string.cyr"
@@ -44,6 +45,8 @@ var g_health_tracker = 0;
 var g_epfd = 0;
 var g_nfd = 0;
 var g_sfd = 0;
+var g_config = 0;
+var g_log_fd = 0;
 
 # ================================================================
 # Logging
@@ -76,6 +79,7 @@ fn kmsg(msg) {
 
 fn klog(msg) {
     _log_write(STDERR_FD, "kybernet: ", 10, msg);
+    slog("info", msg);
     return 0;
 }
 
@@ -91,12 +95,195 @@ fn klog2(prefix, msg) {
         store8(&_logbuf + 10 + plen + mlen, 10);
         sys_write(STDERR_FD, &_logbuf, 10 + plen + mlen + 1);
     } else {
-        # Fallback for very long messages
         sys_write(STDERR_FD, "kybernet: ", 10);
         sys_write(STDERR_FD, prefix, plen);
         sys_write(STDERR_FD, msg, mlen);
         sys_write(STDERR_FD, "\n", 1);
     }
+    # Also write structured log
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, prefix);
+    str_builder_add_cstr(sb, msg);
+    var combined = str_builder_build(sb);
+    slog("info", str_data(combined));
+    return 0;
+}
+
+# ================================================================
+# Structured logging — JSON lines to /var/log/kybernet.log
+# ================================================================
+
+fn slog_init() {
+    g_log_fd = sys_open("/var/log/kybernet.log", O_WRONLY | O_CREAT | O_APPEND, 0x1A4);
+    return 0;
+}
+
+fn slog(level, msg) {
+    if (g_log_fd <= 0) { return 0; }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"level\":\"");
+    str_builder_add_cstr(sb, level);
+    str_builder_add_cstr(sb, "\",\"msg\":\"");
+    str_builder_add_cstr(sb, msg);
+    str_builder_add_cstr(sb, "\"}\n");
+    var line = str_builder_build(sb);
+    sys_write(g_log_fd, str_data(line), str_len(line));
+    return 0;
+}
+
+# ================================================================
+# Config loading from JSON
+# ================================================================
+
+fn load_config() {
+    var buf = alloc(16384);
+    var n = file_read_all("/etc/kybernet/config.json", buf, 16384);
+    if (n <= 0) {
+        klog("no config found, using defaults");
+        return argonaut_config_default();
+    }
+
+    klog("loaded config: /etc/kybernet/config.json");
+    var pairs = json_parse(str_new(buf, n));
+    if (pairs == 0) {
+        klog("config parse failed, using defaults");
+        return argonaut_config_default();
+    }
+
+    var cfg = argonaut_config_default();
+
+    # Parse boot_mode
+    var mode_str = json_get(pairs, "boot_mode");
+    if (mode_str != 0) {
+        if (str_eq(mode_str, str_from("minimal")) == 1) {
+            store64(cfg, BOOT_MINIMAL);
+        } elif (str_eq(mode_str, str_from("server")) == 1) {
+            store64(cfg, BOOT_SERVER);
+        } elif (str_eq(mode_str, str_from("desktop")) == 1) {
+            store64(cfg, BOOT_DESKTOP);
+        } elif (str_eq(mode_str, str_from("edge")) == 1) {
+            store64(cfg, BOOT_EDGE);
+        }
+    }
+
+    # Parse timeouts
+    var bt = json_get_int(pairs, "boot_timeout_ms");
+    if (bt > 0) { store64(cfg + 16, bt); }
+    var st = json_get_int(pairs, "shutdown_timeout_ms");
+    if (st > 0) { store64(cfg + 24, st); }
+
+    # Parse log_to_console
+    var ltc = json_get(pairs, "log_to_console");
+    if (ltc != 0) {
+        if (str_eq(ltc, str_from("false")) == 1) { store64(cfg + 32, 0); }
+    }
+
+    # Parse services array — each service is {name, binary, ...}
+    # For now, services are registered via argonaut's default_services()
+    # Full JSON service parsing would require a JSON array parser
+
+    return cfg;
+}
+
+fn reload_config() {
+    var new_cfg = load_config();
+    if (new_cfg == 0) { return 0; }
+
+    # Update global config
+    g_config = new_cfg;
+
+    # Re-initialize argonaut with new config
+    if (g_init != 0) {
+        store64(g_init, new_cfg);
+    }
+
+    klog("config reloaded");
+    return 1;
+}
+
+# ================================================================
+# Tmpfile directive execution
+# ================================================================
+
+enum TmpfileType {
+    TMP_DIR = 0;
+    TMP_SYMLINK = 1;
+    TMP_TOUCH = 2;
+}
+
+fn execute_tmpfiles() {
+    if (g_config == 0) { return 0; }
+    var tmpfiles = config_tmpfiles(g_config);
+    if (tmpfiles == 0) { return 0; }
+
+    var count = vec_len(tmpfiles);
+    var created = 0;
+    for (var ti = 0; ti < count; ti = ti + 1) {
+        var entry = vec_get(tmpfiles, ti);
+        var etype = load64(entry);
+        var path = load64(entry + 8);
+
+        if (etype == TMP_DIR) {
+            var r = sys_mkdir(path, 0x1C0);
+            if (is_err(r) == 0) { created = created + 1; }
+        } elif (etype == TMP_SYMLINK) {
+            var target = load64(entry + 16);
+            syscall(88, target, path);
+            created = created + 1;
+        } elif (etype == TMP_TOUCH) {
+            var mode = load64(entry + 16);
+            var fd = sys_open(path, O_WRONLY | O_CREAT, mode);
+            if (fd >= 0) {
+                sys_close(fd);
+                created = created + 1;
+            }
+        }
+    }
+
+    if (created > 0) {
+        klog2("tmpfiles created: ", "ok");
+    }
+    return created;
+}
+
+# ================================================================
+# Emergency shell
+# ================================================================
+
+fn drop_to_emergency() {
+    klog("=== ENTERING EMERGENCY MODE ===");
+
+    var esc = emergency_shell_default();
+    var shell_path = load64(esc);
+    var banner = load64(esc + 16);
+
+    # Print banner
+    if (banner != 0) {
+        sys_write(STDERR_FD, str_data(banner), str_len(banner));
+    }
+
+    # Fork and exec the shell
+    var pid = sys_fork();
+    if (pid == 0) {
+        # Child — exec the emergency shell
+        var argv = alloc(16);
+        store64(argv, str_data(shell_path));
+        store64(argv + 8, 0);
+        syscall(59, str_data(shell_path), argv, 0);
+        # If exec fails, try /bin/sh
+        store64(argv, "/bin/sh");
+        syscall(59, "/bin/sh", argv, 0);
+        syscall(60, 1);
+    } elif (pid > 0) {
+        # Parent — wait for shell to exit
+        klog("emergency shell started");
+        var status = alloc(8);
+        sys_waitpid(pid, status, 0);
+        klog("emergency shell exited");
+    } else {
+        klog("FATAL: fork failed for emergency shell");
+    }
+
     return 0;
 }
 
@@ -109,12 +296,19 @@ fn do_shutdown(shutdown_type) {
         var plan = init_plan_shutdown(g_init, shutdown_type);
         if (plan != 0) {
             klog("stopping services...");
-            init_stop_all(g_init, 5000);
+            var timeout = 5000;
+            if (g_config != 0) {
+                timeout = config_shutdown_timeout(g_config);
+            }
+            init_stop_all(g_init, timeout);
         }
     }
 
     klog("syncing filesystems...");
     sys_sync();
+
+    slog("info", "shutdown complete");
+    if (g_log_fd > 0) { sys_close(g_log_fd); }
 
     klog("shutdown");
     if (shutdown_type == SHUTDOWN_REBOOT) {
@@ -155,22 +349,27 @@ fn handle_sigchld() {
     var rlen = vec_len(reaped);
     for (var ri = 0; ri < rlen; ri = ri + 1) {
         var entry = vec_get(reaped, ri);
-        # entry is (name, exit_code, crash_action)
         var name = load64(entry);
         var exit_code = load64(entry + 8);
         var action = load64(entry + 16);
 
         klog2("service exited: ", name);
+        slog("warn", name);
 
         if (action != 0) {
             var action_type = load64(action);
             if (action_type == CRASH_RESTART) {
                 var delay = load64(action + 8);
-                klog2("  scheduling restart: ", name);
-                # Restart after delay (simplified — immediate for now)
-                init_restart_service(g_init, name, 5000);
+                klog2("  restarting (backoff): ", name);
+                init_restart_service(g_init, name, delay);
             } elif (action_type == CRASH_GIVE_UP) {
+                var reason = load64(action + 16);
                 klog2("  giving up on: ", name);
+                if (reason != 0) {
+                    klog2("  reason: ", str_data(reason));
+                }
+            } elif (action_type == CRASH_IGNORE) {
+                klog2("  ignoring exit: ", name);
             }
         }
     }
@@ -181,10 +380,13 @@ fn handle_sigchld() {
 }
 
 fn handle_sighup() {
-    klog("received SIGHUP — reload not yet implemented");
-    # Future: reload config, register new services
-    # var cfg = argonaut_config_default();
-    # Re-register services from new config
+    klog("received SIGHUP — reloading config");
+    var ok = reload_config();
+    if (ok == 1) {
+        klog("config reload successful");
+    } else {
+        klog("config reload failed, keeping current config");
+    }
     return 0;
 }
 
@@ -195,7 +397,6 @@ fn handle_sighup() {
 fn run_boot_stages() {
     if (g_init == 0) { return 0; }
 
-    # Walk boot sequence, execute each step
     var step = init_current_stage(g_init);
     while (step != 0) {
         var stage = load64(step);
@@ -204,7 +405,6 @@ fn run_boot_stages() {
         klog2("boot: ", desc);
         kmsg(desc);
 
-        # Execute the stage
         var ok = execute_boot_stage(stage);
         if (ok == 1) {
             init_mark_step_complete(g_init, stage);
@@ -271,7 +471,6 @@ fn start_services() {
             var pid = init_start_service(g_init, name);
             if (pid > 0) {
                 klog2("  started: ", name);
-                # Create cgroup and move process
                 create_service_cgroup(name);
                 move_to_cgroup(name, pid);
             } else {
@@ -298,6 +497,7 @@ fn handle_health_tick() {
         if (passed == 0) {
             var svc_name = load64(result);
             klog2("health check failed: ", svc_name);
+            slog("error", svc_name);
         }
     }
     return 0;
@@ -311,6 +511,7 @@ fn handle_watchdog_tick() {
     for (var ki = 0; ki < klen; ki = ki + 1) {
         var name = vec_get(killed, ki);
         klog2("watchdog killed: ", name);
+        slog("error", name);
     }
     return 0;
 }
@@ -363,6 +564,9 @@ fn run() {
         klog("filesystems mounted");
     }
 
+    # Phase 3b: Initialize structured logging (needs /var/log)
+    slog_init();
+
     # Phase 4: Signals
     var sfd_r = setup_signals();
     if (is_err_result(sfd_r) == 1) {
@@ -403,22 +607,25 @@ fn run() {
         klog("notify socket failed (continuing)");
     }
 
-    # Phase 6: Initialize argonaut
-    var config = argonaut_config_default();
-    g_init = argonaut_init_new(config);
+    # Phase 6: Load config + initialize argonaut
+    g_config = load_config();
+    g_init = argonaut_init_new(g_config);
     g_health_tracker = health_tracker_new();
     klog("argonaut initialized");
     kmsg("phase 6: argonaut ready");
+
+    # Phase 6b: Execute tmpfile directives
+    execute_tmpfiles();
 
     # Phase 7: Run boot stages
     var boot_r = run_boot_stages();
     if (boot_r < 0) {
         klog("boot stages failed");
         if (init_should_drop_to_emergency(g_init) == 1) {
-            klog("dropping to emergency shell");
-            # Future: emergency shell with auth
+            drop_to_emergency();
         }
-        return 1;
+        # After emergency shell exits, try to continue boot
+        klog("continuing after emergency shell");
     }
 
     # Phase 8: Start services

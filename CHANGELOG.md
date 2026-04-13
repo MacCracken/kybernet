@@ -3,7 +3,64 @@
 All notable changes to this project will be documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pre-1.0).
+This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+---
+
+## [1.0.0] — 2026-04-12
+
+### Added
+
+#### Config Loading
+- **JSON config** — loads /etc/kybernet/config.json at boot (boot_mode, timeouts, log_to_console)
+- **SIGHUP reload** — `handle_sighup()` reloads config and updates argonaut instance
+- Fallback to `argonaut_config_default()` when config file missing or parse fails
+
+#### Service Lifecycle
+- **Exponential backoff restart** — uses argonaut's `backoff_delay()` from `CrashAction` instead of fixed 5s delay
+- **Restart limit enforcement** — `restart_limit_exceeded()` triggers `CRASH_GIVE_UP` with reason string
+- **Crash action logging** — logs `CRASH_RESTART` (with delay), `CRASH_GIVE_UP` (with reason), `CRASH_IGNORE`
+- Shutdown uses `config_shutdown_timeout()` from loaded config
+
+#### Emergency Shell
+- **`drop_to_emergency()`** — fork+exec emergency shell on boot failure
+- Uses argonaut's `emergency_shell_default()` (agnoshi, with banner and env)
+- Fallback to `/bin/sh` if primary shell exec fails
+- Waits for shell exit, then continues boot
+
+#### Tmpfile Directives
+- **`execute_tmpfiles()`** — walks `config_tmpfiles()` vec before service startup
+- Supports `TMP_DIR` (mkdir), `TMP_SYMLINK` (symlink), `TMP_TOUCH` (create empty file)
+
+#### Structured Logging
+- **JSON lines** to `/var/log/kybernet.log` via `slog()` function
+- `slog_init()` opens log file after filesystems mounted
+- All klog/klog2 messages also emitted as structured JSON (`{"level":"...","msg":"..."}`)
+- Log fd closed during shutdown
+
+#### P(-1) Hardening (v0.95.0 work)
+- signals.cyr: buffer overflow fix (buf[16] → buf[128] for signalfd_siginfo)
+- console.cyr: checked sys_dup2 returns
+- eventloop.cyr: checked epoll_add_read for signal fd
+- main.cyr: PID 1 exit paths now call do_shutdown() instead of returning
+- main.cyr: eventloop_add_notify return checked with cleanup
+- mount.cyr: array overflow fix (_mount_table[8] → [240])
+- mount.cyr: integer underflow guard in is_mounted()
+- klog/klog2 batched to single sys_write (~2.7x faster)
+- is_mounted() mount cache (145µs → 92ns, 1583x faster)
+- 140 tests (was 98), 46 benchmarks (was 22)
+
+### Changed
+- Build tool: `cyrius build` (was `cyrb build`), manifest is `cyrius.toml` (was `cyrb.toml`)
+- Compiler: cc3 3.8.0+ required (was 1.9.1)
+- Binary size: 486KB (includes argonaut + libro + sigil + sakshi transitive deps)
+
+### Dependencies
+- agnosys 0.97.2 (was 0.90.0)
+- agnostik 0.97.1 (was 0.95.0)
+- argonaut 1.1.0 (new — service lifecycle, boot stages, health, audit, emergency shell)
+- libro (via argonaut) — cryptographic audit chain
+- 22 stdlib modules (was 11)
 
 ---
 

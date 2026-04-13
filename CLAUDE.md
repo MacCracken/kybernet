@@ -6,7 +6,7 @@
 
 - **Type**: Cyrius binary (PID 1 init)
 - **License**: GPL-3.0-only
-- **Version**: 0.90.0
+- **Version**: 1.0.0
 - **Language**: Cyrius 3.8.0+ (via `~/.cyrius/bin/cc3`)
 
 ## Goal
