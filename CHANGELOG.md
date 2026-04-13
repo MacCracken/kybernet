@@ -51,16 +51,19 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - 140 tests (was 98), 46 benchmarks (was 22)
 
 ### Changed
-- Build tool: `cyrius build` (was `cyrb build`), manifest is `cyrius.toml` (was `cyrb.toml`)
-- Compiler: cc3 3.8.0+ required (was 1.9.1)
-- Binary size: 486KB (includes argonaut + libro + sigil + sakshi transitive deps)
+- Build tool: `cyrius build` with auto-include from `cyrius.toml` (was `cyrb build`)
+- Source files contain only project includes — stdlib + deps auto-prepended by build tool
+- Compiler: cc3 3.9.6+ required (was 1.9.1)
+- Binary size: 447KB (includes argonaut + libro + sigil + sakshi transitive deps)
+- CI: `cyrius deps` + `cyrius build` with fallback rebuild if tool binary is stale
 
 ### Dependencies
-- agnosys 0.97.2 (was 0.90.0)
-- agnostik 0.97.1 (was 0.95.0)
-- argonaut 1.1.0 (new — service lifecycle, boot stages, health, audit, emergency shell)
-- libro (via argonaut) — cryptographic audit chain
-- 22 stdlib modules (was 11)
+- Declared in `cyrius.toml` `[deps]` section, resolved via `cyrius deps`
+- Namespaced: `lib/{depname}_{basename}` (e.g. `agnostik_types.cyr`)
+- agnosys 0.97.2 — `lib/syscalls_linux.cyr`
+- agnostik 0.97.1 — types, security, agent, error
+- argonaut 1.1.0 — libro (error, entry, hasher, chain, query, verify, retention, export), types, audit, services, health, process_mgmt, boot, init
+- 22 stdlib modules (string, fmt, alloc, io, vec, str, fnptr, tagged, callback, hashmap, json, freelist, process, sakshi, sakshi_full, sigil, syscalls, mmap, bigint, chrono, bench, assert)
 
 ---
 
