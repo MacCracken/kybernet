@@ -30,4 +30,4 @@ modules = ["src/types.cyr", "src/security.cyr", "src/agent.cyr", "src/error.cyr"
 git = "https://github.com/MacCracken/argonaut"
 path = "../argonaut"
 tag = "1.1.0"
-modules = ["lib/error.cyr", "lib/entry.cyr", "lib/hasher.cyr", "lib/chain.cyr", "lib/query.cyr", "lib/verify.cyr", "lib/retention.cyr", "lib/export.cyr", "src/types.cyr", "src/audit.cyr", "src/services.cyr", "src/health.cyr", "src/process_mgmt.cyr", "src/boot.cyr", "src/init.cyr"]
+modules = ["lib/libro/error.cyr", "lib/libro/entry.cyr", "lib/libro/hasher.cyr", "lib/libro/chain.cyr", "lib/libro/query.cyr", "lib/libro/verify.cyr", "lib/libro/retention.cyr", "lib/libro/export.cyr", "src/types.cyr", "src/audit.cyr", "src/services.cyr", "src/health.cyr", "src/process_mgmt.cyr", "src/boot.cyr", "src/init.cyr"]
