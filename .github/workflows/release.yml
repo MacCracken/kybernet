@@ -8,7 +8,7 @@ permissions:
   contents: write
 
 env:
-  CYRIUS_VERSION: "3.9.5"
+  CYRIUS_TOOLCHAIN: ".cyrius-toolchain"
 
 jobs:
   # ── CI Gate (must pass before release) ──
@@ -41,6 +41,8 @@ jobs:
 
       - name: Install Cyrius toolchain
         run: |
+          CYRIUS_VERSION="${CYRIUS_VERSION:-$(cat .cyrius-toolchain | tr -d '[:space:]')}"
+          echo "Installing Cyrius $CYRIUS_VERSION"
           curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
           tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
           CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
