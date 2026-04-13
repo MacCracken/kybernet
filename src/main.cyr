@@ -49,6 +49,22 @@ var g_sfd = 0;
 # Logging
 # ================================================================
 
+# Log buffer — single sys_write per message instead of 3-4
+var _logbuf[256];
+
+fn _log_write(fd, prefix, plen, msg) {
+    var mlen = strlen(msg);
+    var total = plen + mlen + 1;
+    if (total > 255) { total = 255; }
+    memcpy(&_logbuf, prefix, plen);
+    var copylen = mlen;
+    if (plen + mlen > 254) { copylen = 254 - plen; }
+    memcpy(&_logbuf + plen, msg, copylen);
+    store8(&_logbuf + plen + copylen, 10);
+    sys_write(fd, &_logbuf, plen + copylen + 1);
+    return 0;
+}
+
 fn kmsg(msg) {
     var fd = sys_open("/dev/kmsg", O_WRONLY, 0);
     if (fd >= 0) {
@@ -59,17 +75,28 @@ fn kmsg(msg) {
 }
 
 fn klog(msg) {
-    sys_write(STDERR_FD, "kybernet: ", 10);
-    sys_write(STDERR_FD, msg, strlen(msg));
-    sys_write(STDERR_FD, "\n", 1);
+    _log_write(STDERR_FD, "kybernet: ", 10, msg);
     return 0;
 }
 
 fn klog2(prefix, msg) {
-    sys_write(STDERR_FD, "kybernet: ", 10);
-    sys_write(STDERR_FD, prefix, strlen(prefix));
-    sys_write(STDERR_FD, msg, strlen(msg));
-    sys_write(STDERR_FD, "\n", 1);
+    # Build "kybernet: <prefix><msg>\n" in one buffer
+    var plen = strlen(prefix);
+    var mlen = strlen(msg);
+    var total = 10 + plen + mlen + 1;
+    if (total <= 255) {
+        memcpy(&_logbuf, "kybernet: ", 10);
+        memcpy(&_logbuf + 10, prefix, plen);
+        memcpy(&_logbuf + 10 + plen, msg, mlen);
+        store8(&_logbuf + 10 + plen + mlen, 10);
+        sys_write(STDERR_FD, &_logbuf, 10 + plen + mlen + 1);
+    } else {
+        # Fallback for very long messages
+        sys_write(STDERR_FD, "kybernet: ", 10);
+        sys_write(STDERR_FD, prefix, plen);
+        sys_write(STDERR_FD, msg, mlen);
+        sys_write(STDERR_FD, "\n", 1);
+    }
     return 0;
 }
 

@@ -508,6 +508,391 @@ fn bench_hashmap() {
 }
 
 # ================================================================
+# Epoll wait cycle (hot path — every event loop iteration)
+# ================================================================
+
+fn bench_epoll_wait_immediate() {
+    # Create epoll with a timer, then wait with timeout=0 (immediate return)
+    var epfd_r = epoll_new();
+    var epfd = result_unwrap(epfd_r);
+    var tfd_r = timer_new(999);
+    var tfd = result_unwrap(tfd_r);
+    epoll_add_read(epfd, tfd, TOKEN_HEALTH);
+
+    var iters = 100000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        epoll_wait_events(epfd, 8, 0);
+        k = k + 1;
+    }
+    report("epoll_wait(timeout=0)", now_ns() - start, iters);
+    sys_close(tfd);
+    owned_fd_close(epfd);
+    return 0;
+}
+
+fn bench_event_accessors() {
+    var iters = 1000000;
+    var ev = alloc(16);
+    store64(ev, 42);
+    store64(ev + 8, EPOLLIN);
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        event_token(ev);
+        event_flags(ev);
+        k = k + 1;
+    }
+    report("event_token+flags", now_ns() - start, iters);
+    return 0;
+}
+
+# ================================================================
+# Logging cost (hot path — every event)
+# Simulates klog: 3x sys_write to stderr per message
+# ================================================================
+
+fn bench_klog_sim() {
+    # Write to /dev/null to measure syscall cost without actual stderr
+    var fd = sys_open("/dev/null", O_WRONLY, 0);
+    if (fd < 0) { return 0; }
+    var iters = 100000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        sys_write(fd, "kybernet: ", 10);
+        sys_write(fd, "bench message", 13);
+        sys_write(fd, "\n", 1);
+        k = k + 1;
+    }
+    report("klog_sim(3 writes)", now_ns() - start, iters);
+    sys_close(fd);
+    return 0;
+}
+
+fn bench_klog2_sim() {
+    var fd = sys_open("/dev/null", O_WRONLY, 0);
+    if (fd < 0) { return 0; }
+    var iters = 100000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        sys_write(fd, "kybernet: ", 10);
+        sys_write(fd, "service exited: ", 16);
+        sys_write(fd, "daimon", 6);
+        sys_write(fd, "\n", 1);
+        k = k + 1;
+    }
+    report("klog2_sim(4 writes)", now_ns() - start, iters);
+    sys_close(fd);
+    return 0;
+}
+
+# ================================================================
+# Timer creation (cold path — once per timer type)
+# ================================================================
+
+fn bench_timer_new() {
+    var iters = 10000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        var r = timer_new(30);
+        if (is_ok(r) == 1) { sys_close(result_unwrap(r)); }
+        k = k + 1;
+    }
+    report("timer_new+close", now_ns() - start, iters);
+    return 0;
+}
+
+# ================================================================
+# Seccomp agnostik bridge (cold path — per service)
+# ================================================================
+
+fn bench_seccomp_from_profile() {
+    var iters = 10000;
+    var prof = seccomp_profile_new(SECCOMP_KILL_PROCESS);
+    var rules = scprof_syscalls(prof);
+    var rule = seccomp_rule_new(SECCOMP_ALLOW);
+    var names = scrule_names(rule);
+    vec_push(names, 0);
+    vec_push(names, 1);
+    vec_push(names, 3);
+    vec_push(names, 60);
+    vec_push(names, 231);
+    vec_push(rules, rule);
+
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        seccomp_from_profile(prof);
+        k = k + 1;
+    }
+    report("seccomp_from_profile", now_ns() - start, iters);
+    return 0;
+}
+
+# ================================================================
+# Sandbox agnostik bridge (cold path — per service)
+# ================================================================
+
+fn bench_sandbox_rule_new() {
+    var iters = 100000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        var b = sandbox_builder_new();
+        sandbox_allow_read(b, "/etc");
+        sandbox_allow_read_write(b, "/tmp");
+        sandbox_allow_read_exec(b, "/usr/bin");
+        sandbox_rule_count(b);
+        k = k + 1;
+    }
+    report("sandbox(new+3 rules+count)", now_ns() - start, iters);
+    return 0;
+}
+
+fn bench_sandbox_from_ruleset() {
+    var iters = 10000;
+    var llrs = landlock_ruleset_new();
+    var fs = llrs_fs_rules(llrs);
+    var r1 = landlock_fs_rule_new("/etc");
+    var a1 = llfsr_allowed_access(r1);
+    vec_push(a1, LL_READ_FILE);
+    vec_push(a1, LL_READ_DIR);
+    vec_push(fs, r1);
+    var r2 = landlock_fs_rule_new("/tmp");
+    var a2 = llfsr_allowed_access(r2);
+    vec_push(a2, LL_READ_FILE);
+    vec_push(a2, LL_WRITE_FILE);
+    vec_push(fs, r2);
+
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        sandbox_from_ruleset(llrs);
+        k = k + 1;
+    }
+    report("sandbox_from_ruleset(2 rules)", now_ns() - start, iters);
+    return 0;
+}
+
+# ================================================================
+# Privilege operations (cold path — per service pre_exec)
+# ================================================================
+
+fn bench_set_no_new_privs() {
+    var iters = 100000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        set_no_new_privs();
+        k = k + 1;
+    }
+    report("set_no_new_privs", now_ns() - start, iters);
+    return 0;
+}
+
+fn bench_drop_caps_nonroot() {
+    # Non-root path: should return error quickly
+    if (is_root() == 1) { return 0; }
+    var iters = 500000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        drop_capabilities(0);
+        k = k + 1;
+    }
+    report("drop_caps(non-root err)", now_ns() - start, iters);
+    return 0;
+}
+
+fn bench_secure_pre_exec_nonroot() {
+    if (is_root() == 1) { return 0; }
+    var iters = 100000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        secure_pre_exec(1000, 1000, 0);
+        k = k + 1;
+    }
+    report("secure_pre_exec(non-root)", now_ns() - start, iters);
+    return 0;
+}
+
+# ================================================================
+# Notify socket lifecycle
+# ================================================================
+
+fn bench_notify_status_value() {
+    var iters = 1000000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        notify_status_value("STATUS=running");
+        notify_status_value("READY=1");
+        k = k + 1;
+    }
+    report("notify_status_value(2)", now_ns() - start, iters);
+    return 0;
+}
+
+# ================================================================
+# Alloc patterns (memory pressure simulation)
+# ================================================================
+
+fn bench_alloc_burst() {
+    var iters = 100000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        alloc(16);
+        alloc(64);
+        alloc(128);
+        alloc(8);
+        k = k + 1;
+    }
+    report("alloc(4 sizes burst)", now_ns() - start, iters);
+    return 0;
+}
+
+fn bench_alloc_reset_cycle() {
+    var iters = 10000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        alloc(64);
+        alloc(128);
+        alloc(256);
+        alloc_reset();
+        alloc_init();
+        k = k + 1;
+    }
+    report("alloc(3)+reset+init", now_ns() - start, iters);
+    return 0;
+}
+
+# ================================================================
+# Agnostik type construction (cold path — config load)
+# ================================================================
+
+fn bench_security_context() {
+    var iters = 50000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        var ctx = security_context_new("bench-svc");
+        secctx_run_as_user(ctx);
+        secctx_run_as_group(ctx);
+        secctx_no_new_privs(ctx);
+        secctx_sandbox(ctx);
+        k = k + 1;
+    }
+    report("security_context(new+4 get)", now_ns() - start, iters);
+    return 0;
+}
+
+fn bench_agent_config() {
+    var iters = 10000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        var ac = agent_config_new("bench-agent");
+        aconf_type(ac);
+        aconf_restart_policy(ac);
+        aconf_limits(ac);
+        var sbox = sandbox_config_new();
+        sandbox_set_net_access(sbox, NET_LOCALHOST_ONLY);
+        aconf_set_sandbox(ac, sbox);
+        aconf_sandbox(ac);
+        k = k + 1;
+    }
+    report("agent_config(new+get+set)", now_ns() - start, iters);
+    return 0;
+}
+
+fn bench_cgroup_limits() {
+    var iters = 100000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        var cg = cgroup_limits_new();
+        cglim_set_memory_max(cg, 268435456);
+        cglim_set_pids_max(cg, 64);
+        cglim_memory_max(cg);
+        cglim_pids_max(cg);
+        k = k + 1;
+    }
+    report("cgroup_limits(new+2set+2get)", now_ns() - start, iters);
+    return 0;
+}
+
+fn bench_resource_limits() {
+    var iters = 100000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        var rl = resource_limits_new();
+        rlim_max_memory(rl);
+        rlim_max_fds(rl);
+        rlim_max_procs(rl);
+        k = k + 1;
+    }
+    report("resource_limits(new+3get)", now_ns() - start, iters);
+    return 0;
+}
+
+fn bench_capability_set() {
+    var iters = 50000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        var caps = capability_set_new();
+        var bounding = capset_bounding(caps);
+        vec_push(bounding, CAP_NET_BIND_SERVICE);
+        vec_push(bounding, CAP_SYS_CHROOT);
+        vec_push(bounding, CAP_SETUID);
+        vec_len(bounding);
+        k = k + 1;
+    }
+    report("capability_set(new+3push)", now_ns() - start, iters);
+    return 0;
+}
+
+# ================================================================
+# Memcpy + memset (used in notify, sandbox)
+# ================================================================
+
+fn bench_memcpy() {
+    var src = alloc(128);
+    var dst = alloc(128);
+    memset(src, 65, 128);
+    var iters = 1000000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        memcpy(dst, src, 128);
+        k = k + 1;
+    }
+    report("memcpy(128 bytes)", now_ns() - start, iters);
+    return 0;
+}
+
+fn bench_memset() {
+    var buf = alloc(128);
+    var iters = 1000000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        memset(buf, 0, 128);
+        k = k + 1;
+    }
+    report("memset(128 bytes)", now_ns() - start, iters);
+    return 0;
+}
+
+# ================================================================
 # Main
 # ================================================================
 
@@ -610,10 +995,16 @@ fn main() {
     bench_owned_fd();
     println("");
 
-    # --- Memeq (used in notify classify) ---
+    # --- Memory ops ---
     println("Memory ops:");
     bench_memeq();
     bench_strlen();
+    alloc_reset();
+    alloc_init();
+    bench_memcpy();
+    alloc_reset();
+    alloc_init();
+    bench_memset();
     println("");
 
     # --- Epoll lifecycle ---
@@ -621,13 +1012,80 @@ fn main() {
     alloc_reset();
     alloc_init();
     bench_epoll_lifecycle();
+    alloc_reset();
+    alloc_init();
+    bench_epoll_wait_immediate();
+    alloc_reset();
+    alloc_init();
+    bench_event_accessors();
+    alloc_reset();
+    alloc_init();
+    bench_timer_new();
     println("");
 
-    # --- Hashmap (used in service tracking) ---
+    # --- Logging ---
+    println("Logging:");
+    bench_klog_sim();
+    bench_klog2_sim();
+    println("");
+
+    # --- Notify extended ---
+    println("Notify extended:");
+    bench_notify_status_value();
+    println("");
+
+    # --- Security bridges ---
+    println("Security bridges:");
+    alloc_reset();
+    alloc_init();
+    bench_seccomp_from_profile();
+    alloc_reset();
+    alloc_init();
+    bench_sandbox_rule_new();
+    alloc_reset();
+    alloc_init();
+    bench_sandbox_from_ruleset();
+    println("");
+
+    # --- Privilege ops ---
+    println("Privilege ops:");
+    bench_set_no_new_privs();
+    bench_drop_caps_nonroot();
+    bench_secure_pre_exec_nonroot();
+    println("");
+
+    # --- Hashmap ---
     println("Hashmap:");
     alloc_reset();
     alloc_init();
     bench_hashmap();
+    println("");
+
+    # --- Alloc patterns ---
+    println("Alloc patterns:");
+    alloc_reset();
+    alloc_init();
+    bench_alloc_burst();
+    bench_alloc_reset_cycle();
+    println("");
+
+    # --- Agnostik types ---
+    println("Agnostik types:");
+    alloc_reset();
+    alloc_init();
+    bench_security_context();
+    alloc_reset();
+    alloc_init();
+    bench_agent_config();
+    alloc_reset();
+    alloc_init();
+    bench_cgroup_limits();
+    alloc_reset();
+    alloc_init();
+    bench_resource_limits();
+    alloc_reset();
+    alloc_init();
+    bench_capability_set();
     println("");
 
     println("done");

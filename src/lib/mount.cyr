@@ -6,10 +6,29 @@
 
 struct MountEntry { source; target; fstype; flags; data; }
 
-# Check if a path is already mounted by reading /proc/self/mounts
+# Mount cache — avoids re-reading /proc/self/mounts on every is_mounted() call
+var _mount_cache = 0;
+var _mount_cache_len = 0;
+
+fn _mount_cache_load() {
+    if (_mount_cache != 0) { return 0; }
+    _mount_cache = alloc(8192);
+    _mount_cache_len = file_read_all("/proc/self/mounts", _mount_cache, 8192);
+    if (_mount_cache_len < 0) { _mount_cache_len = 0; }
+    return 0;
+}
+
+fn _mount_cache_invalidate() {
+    _mount_cache = 0;
+    _mount_cache_len = 0;
+    return 0;
+}
+
+# Check if a path is already mounted
 fn is_mounted(target) {
-    var buf = alloc(8192);
-    var n = file_read_all("/proc/self/mounts", buf, 8192);
+    _mount_cache_load();
+    var buf = _mount_cache;
+    var n = _mount_cache_len;
     if (n <= 0) { return 0; }
     var tlen = strlen(target);
     if (tlen >= n) { return 0; }
@@ -30,6 +49,7 @@ fn mount_if_needed(source, target, fstype, flags, data) {
     sys_mkdir(target, 0x1C0);
     var r = sys_mount(source, target, fstype, flags, data);
     if (is_err(r) == 1) { return Err(err_code(r)); }
+    _mount_cache_invalidate();
     return Ok(0);
 }
 

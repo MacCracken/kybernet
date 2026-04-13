@@ -25,5 +25,5 @@ modules = ["src/types.cyr", "src/security.cyr", "src/agent.cyr", "src/error.cyr"
 
 [deps.argonaut]
 path = "../argonaut"
-tag = "1.0.1"
+tag = "1.1.0"
 modules = ["lib/libro/error.cyr", "lib/libro/entry.cyr", "lib/libro/hasher.cyr", "lib/libro/chain.cyr", "lib/libro/query.cyr", "lib/libro/verify.cyr", "lib/libro/retention.cyr", "src/types.cyr", "src/audit.cyr", "src/services.cyr", "src/health.cyr", "src/process_mgmt.cyr", "src/boot.cyr", "src/init.cyr"]

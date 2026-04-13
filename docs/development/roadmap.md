@@ -52,16 +52,23 @@
 - [x] 98 integration tests, 22 benchmarks
 - [x] Builds on cc3 3.8.0 (474KB, ~900ms, 1 warning)
 
-## v0.95.0 — Production Hardening (next)
+## v0.95.0 — Production Hardening (done)
 
-- [ ] P(-1) scaffold hardening audit (current session)
-- [ ] QEMU boot tests with Cyrius binary
-- [ ] Graceful degradation on mount failures
-- [ ] Close all fds before exec (CLOEXEC audit)
-- [ ] Verify all error paths return, never fall through
-- [ ] Audit kmsg/klog for all boot failure paths
-- [ ] Integration tests with real argonaut configs
-- [ ] Binary size optimization (currently 474KB — mostly from transitive deps)
+- [x] P(-1) scaffold hardening audit — 5 CRITICAL, 3 HIGH fixes
+- [x] signals.cyr buffer overflow (buf[16] → buf[128])
+- [x] console.cyr unchecked sys_dup2 — now returns Err on failure
+- [x] eventloop.cyr unchecked epoll_add_read for signal fd — now propagates error
+- [x] main.cyr PID 1 exit paths — now call do_shutdown() instead of returning
+- [x] main.cyr eventloop_add_notify return checked, cleans up on failure
+- [x] mount.cyr array overflow (_mount_table[8] → [240])
+- [x] mount.cyr integer underflow guard in is_mounted()
+- [x] klog/klog2 batched to single sys_write (3 writes → 1, ~2.7x faster)
+- [x] is_mounted() mount cache (145µs → 92ns, 1583x faster)
+- [x] Tests: 98 → 140 (42 new across 10 test functions)
+- [x] Benchmarks: 22 → 46 (24 new across all modules)
+- [x] Updated all docs: README, CLAUDE.md, architecture, roadmap, CONTRIBUTING
+- [x] argonaut 1.1.0, agnosys 0.97.2, agnostik 0.97.1 deps
+- [x] Builds on cc3 3.8.0 (481KB, ~970ms, 1 warning)
 
 ## v1.0.0 — Release
 
@@ -73,15 +80,16 @@
 - [ ] Real hardware boot (RPi4, NUC)
 - [ ] QEMU boot: minimal < 3s, desktop < 3s
 - [ ] Structured log output
+- [ ] Service restart with exponential backoff (timerfd-based PendingRestart queue)
+- [ ] Tmpfile directive execution
 
-## Not Yet Ported from Rust
+## v1.1.0 — Optimization
 
-These features existed in the Rust version and need reimplementation:
-
-- Service restart with exponential backoff (timerfd-based PendingRestart queue)
-- Tmpfile directive execution
-- Emergency shell with authentication
-- Edge boot (dm-verity, LUKS, PCR binding)
-- Configuration loading from JSON / SIGHUP reload
-
-Most depend on argonaut APIs that are now available via the 1.0.1 integration.
+- [ ] Cgroup path precomputation — cgroup_file() at 911ns per call, precompute common paths per service
+- [ ] Binary size optimization (currently 481KB — mostly from transitive deps; dead-code elimination pending cc3 4.0)
+- [ ] QEMU boot time profiling and optimization
+- [ ] Integration tests with real argonaut configs
+- [ ] Control socket for agnoshi runtime commands
+- [ ] Structured log output to /var/log/kybernet.log
+- [ ] Close all fds before exec (CLOEXEC audit)
+- [ ] Graceful degradation on mount failures
