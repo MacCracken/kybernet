@@ -181,28 +181,28 @@ fn bench_timerspec_new() {
 # Notify parse (hot path — every sd_notify message)
 # ================================================================
 
-fn bench_notify_parse() {
+fn bench_knotify_classify() {
     var iters = 1000000;
     var start = now_ns();
     var k = 0;
     while (k < iters) {
-        notify_parse("READY=1");
+        knotify_classify("READY=1");
         k = k + 1;
     }
-    report("notify_parse(READY)", now_ns() - start, iters);
+    report("knotify_classify(READY)", now_ns() - start, iters);
     return 0;
 }
 
-fn bench_notify_parse_status() {
+fn bench_knotify_classify_status() {
     var iters = 1000000;
     var start = now_ns();
     var k = 0;
     while (k < iters) {
-        notify_parse("STATUS=running ok");
+        knotify_classify("STATUS=running ok");
         notify_status_value("STATUS=running ok");
         k = k + 1;
     }
-    report("notify_parse+value", now_ns() - start, iters);
+    report("knotify_classify+value", now_ns() - start, iters);
     return 0;
 }
 
@@ -396,6 +396,118 @@ fn bench_vec_push_get() {
 }
 
 # ================================================================
+# Mount table init
+# ================================================================
+
+fn bench_mount_table_init() {
+    var iters = 100000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        _mount_count = 0;
+        _init_mount_table();
+        k = k + 1;
+    }
+    report("mount_table_init", now_ns() - start, iters);
+    return 0;
+}
+
+# ================================================================
+# OwnedFd create + close
+# ================================================================
+
+fn bench_owned_fd() {
+    var iters = 500000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        var ofd = owned_fd_new(42);
+        owned_fd_raw(ofd);
+        store64(ofd, 0 - 1);
+        k = k + 1;
+    }
+    report("owned_fd_new+raw", now_ns() - start, iters);
+    return 0;
+}
+
+# ================================================================
+# Memory comparison (hot path in notify parse)
+# ================================================================
+
+fn bench_memeq() {
+    var iters = 1000000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        memeq("READY=1", "READY=1", 7);
+        memeq("STATUS=running", "STOPPING=1", 10);
+        k = k + 1;
+    }
+    report("memeq (2 calls)", now_ns() - start, iters);
+    return 0;
+}
+
+fn bench_strlen() {
+    var iters = 1000000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        strlen("/sys/fs/cgroup/kybernet.slice/myservice/cgroup.procs");
+        k = k + 1;
+    }
+    report("strlen(52 chars)", now_ns() - start, iters);
+    return 0;
+}
+
+# ================================================================
+# Epoll lifecycle (create + add + close)
+# ================================================================
+
+fn bench_epoll_lifecycle() {
+    var iters = 10000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        var epfd_r = epoll_new();
+        if (is_ok(epfd_r) == 1) {
+            var epfd = result_unwrap(epfd_r);
+            var tfd_r = timer_new(1);
+            if (is_ok(tfd_r) == 1) {
+                epoll_add_read(epfd, result_unwrap(tfd_r), TOKEN_HEALTH);
+                sys_close(result_unwrap(tfd_r));
+            }
+            owned_fd_close(epfd);
+        }
+        k = k + 1;
+    }
+    report("epoll(new+add+close)", now_ns() - start, iters);
+    return 0;
+}
+
+# ================================================================
+# Hashmap (used for service name → pid tracking)
+# ================================================================
+
+fn bench_hashmap() {
+    var iters = 10000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        var m = map_new();
+        map_set(m, "daimon", 1234);
+        map_set(m, "redis", 1235);
+        map_set(m, "postgres", 1236);
+        map_get(m, "daimon");
+        map_get(m, "redis");
+        map_has(m, "postgres");
+        map_has(m, "missing");
+        k = k + 1;
+    }
+    report("hashmap(3 set+4 get/has)", now_ns() - start, iters);
+    return 0;
+}
+
+# ================================================================
 # Main
 # ================================================================
 
@@ -430,8 +542,8 @@ fn main() {
 
     # --- Notify ---
     println("Notify socket:");
-    bench_notify_parse();
-    bench_notify_parse_status();
+    bench_knotify_classify();
+    bench_knotify_classify_status();
     println("");
 
     # --- Cgroup ---
@@ -484,6 +596,38 @@ fn main() {
     alloc_reset();
     alloc_init();
     bench_vec_push_get();
+    println("");
+
+    # --- Mount ---
+    println("Mount table:");
+    bench_mount_table_init();
+    println("");
+
+    # --- OwnedFd ---
+    println("OwnedFd:");
+    alloc_reset();
+    alloc_init();
+    bench_owned_fd();
+    println("");
+
+    # --- Memeq (used in notify classify) ---
+    println("Memory ops:");
+    bench_memeq();
+    bench_strlen();
+    println("");
+
+    # --- Epoll lifecycle ---
+    println("Epoll lifecycle:");
+    alloc_reset();
+    alloc_init();
+    bench_epoll_lifecycle();
+    println("");
+
+    # --- Hashmap (used in service tracking) ---
+    println("Hashmap:");
+    alloc_reset();
+    alloc_init();
+    bench_hashmap();
     println("");
 
     println("done");

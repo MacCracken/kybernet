@@ -354,6 +354,213 @@ fn test_notify_constants() {
     return 0;
 }
 
+fn test_mount_table() {
+    println("--- mount table ---");
+    # Verify mount table init doesn't crash (P(-1) fix: was buffer overflow)
+    _init_mount_table();
+    assert_eq(_mount_count, 6, "6 mount entries");
+
+    # Verify is_mounted with /proc (should be mounted on test host)
+    var r = is_mounted("/proc");
+    assert_eq(r, 1, "proc is mounted");
+
+    # Verify is_mounted with nonexistent path
+    var r2 = is_mounted("/nonexistent_kybernet_test_mount");
+    assert_eq(r2, 0, "nonexistent not mounted");
+
+    # Verify is_mounted with empty target (P(-1) fix: underflow guard)
+    var r3 = is_mounted("");
+    assert_eq(r3, 0, "empty target not mounted");
+
+    # Verify mount_if_needed returns Ok(1) for already-mounted
+    var mr = mount_if_needed("proc", "/proc", "proc", 0, 0);
+    assert(is_ok(mr) == 1, "mount_if_needed /proc ok");
+    assert_eq(result_unwrap(mr), 1, "already mounted returns 1");
+    return 0;
+}
+
+fn test_owned_fd() {
+    println("--- owned_fd ---");
+    # Create and close an OwnedFd
+    var fd = sys_open("/dev/null", O_RDONLY, 0);
+    assert(fd >= 0, "open /dev/null");
+    var ofd = owned_fd_new(fd);
+    assert_eq(owned_fd_raw(ofd), fd, "raw fd matches");
+    owned_fd_close(ofd);
+    assert_eq(owned_fd_raw(ofd), 0 - 1, "closed fd is -1");
+
+    # Double-close should be safe (fd already -1)
+    owned_fd_close(ofd);
+    assert_eq(owned_fd_raw(ofd), 0 - 1, "double close safe");
+    return 0;
+}
+
+fn test_eventloop_lifecycle() {
+    println("--- eventloop lifecycle ---");
+    # Full lifecycle: create epoll, add timer, close
+    var epfd_r = epoll_new();
+    assert(is_ok(epfd_r) == 1, "epoll create");
+    var epfd = result_unwrap(epfd_r);
+
+    # Add a timer
+    var tfd_r = timer_new(1);
+    assert(is_ok(tfd_r) == 1, "timer create");
+    var tfd = result_unwrap(tfd_r);
+
+    var add_r = epoll_add_read(epfd, tfd, TOKEN_HEALTH);
+    assert(is_ok(add_r) == 1, "epoll add timer");
+
+    # Add a second timer
+    var tfd2_r = timer_new(5);
+    assert(is_ok(tfd2_r) == 1, "timer2 create");
+    var tfd2 = result_unwrap(tfd2_r);
+
+    var add_r2 = epoll_add_read(epfd, tfd2, TOKEN_WATCHDOG);
+    assert(is_ok(add_r2) == 1, "epoll add timer2");
+
+    # Clean up
+    sys_close(tfd);
+    sys_close(tfd2);
+    owned_fd_close(epfd);
+    return 0;
+}
+
+fn test_eventloop_setup_full() {
+    println("--- eventloop setup ---");
+    # Test the full eventloop_setup function
+    # Need a pollable fd — use a pipe read end
+    var pipefd = alloc(16);
+    var pr = sys_pipe(pipefd);
+    assert(pr == 0, "pipe create");
+
+    var read_fd = load32(pipefd);
+    var write_fd = load32(pipefd + 4);
+
+    var r = eventloop_setup(read_fd, 30, 10);
+    assert(is_ok(r) == 1, "eventloop_setup ok");
+    if (is_ok(r) == 1) {
+        var epfd = result_unwrap(r);
+        owned_fd_close(epfd);
+    }
+    sys_close(read_fd);
+    sys_close(write_fd);
+    return 0;
+}
+
+fn test_reaper_macros() {
+    println("--- reaper ---");
+    # Test wait status macros with various values
+    # Normal exit with code 0
+    assert_eq(WIFEXITED(0), 1, "exit(0) exited");
+    assert_eq(WEXITSTATUS(0), 0, "exit(0) code 0");
+
+    # Normal exit with code 42 (42 << 8 = 10752)
+    assert_eq(WIFEXITED(10752), 1, "exit(42) exited");
+    assert_eq(WEXITSTATUS(10752), 42, "exit(42) code");
+
+    # Killed by signal 9 (SIGKILL)
+    assert_eq(WIFSIGNALED(9), 1, "sig9 signaled");
+    assert_eq(WTERMSIG(9), 9, "sig9 term sig");
+    assert_eq(WIFEXITED(9), 0, "sig9 not exited");
+
+    # Killed by signal 15 (SIGTERM)
+    assert_eq(WIFSIGNALED(15), 1, "sig15 signaled");
+    assert_eq(WTERMSIG(15), 15, "sig15 term sig");
+    return 0;
+}
+
+fn test_signal_buffer() {
+    println("--- signal buffer ---");
+    # Verify the read_signal buffer is large enough (P(-1) fix)
+    # We can't easily test signalfd reads without root,
+    # but we can verify None is returned on invalid fd
+    var r = read_signal(0 - 1);
+    assert(is_none(r) == 1, "read_signal(-1) is None");
+    return 0;
+}
+
+fn test_cgroup_extended() {
+    println("--- cgroup extended ---");
+    # Test various service names
+    var p1 = cgroup_path("a");
+    assert(str_ends_with(p1, "a") == 1, "single char svc");
+
+    var p2 = cgroup_path("my-long-service-name");
+    assert(str_contains(p2, "kybernet.slice") == 1, "long name has slice");
+    assert(str_ends_with(p2, "my-long-service-name") == 1, "long name ends");
+
+    # Test cgroup_file with different files
+    var f1 = cgroup_file("svc", "memory.max");
+    assert(str_ends_with(f1, "memory.max") == 1, "memory.max file");
+
+    var f2 = cgroup_file("svc", "pids.max");
+    assert(str_ends_with(f2, "pids.max") == 1, "pids.max file");
+    return 0;
+}
+
+fn test_notify_edge_cases() {
+    println("--- notify edge ---");
+    # Empty message
+    assert_eq(knotify_classify(""), NOTIFY_UNKNOWN, "empty msg");
+
+    # Partial matches
+    assert_eq(knotify_classify("READY"), NOTIFY_UNKNOWN, "READY without =1");
+    assert_eq(knotify_classify("READY=0"), NOTIFY_UNKNOWN, "READY=0 not ready");
+    assert_eq(knotify_classify("STATUS="), NOTIFY_STATUS, "STATUS= empty value");
+
+    # Status value extraction
+    var sv = notify_status_value("STATUS=");
+    assert(sv != 0, "empty status has ptr");
+    assert_eq(load8(sv), 0, "empty status is null-terminated");
+    return 0;
+}
+
+fn test_seccomp_agnostik_bridge() {
+    println("--- seccomp bridge ---");
+    # Test seccomp_from_profile with multiple rules
+    var prof = seccomp_profile_new(SECCOMP_KILL_PROCESS);
+    var rules = scprof_syscalls(prof);
+
+    # Rule 1: allow read/write/close
+    var r1 = seccomp_rule_new(SECCOMP_ALLOW);
+    var n1 = scrule_names(r1);
+    vec_push(n1, SYS_READ);
+    vec_push(n1, SYS_WRITE);
+    vec_push(n1, SYS_CLOSE);
+    vec_push(rules, r1);
+
+    # Rule 2: allow exit
+    var r2 = seccomp_rule_new(SECCOMP_ALLOW);
+    var n2 = scrule_names(r2);
+    vec_push(n2, 60);
+    vec_push(rules, r2);
+
+    var b = seccomp_from_profile(prof);
+    assert_eq(seccomp_count(b), 4, "bridge merged 4 syscalls");
+
+    var info_r = seccomp_build(b);
+    assert(is_ok(info_r) == 1, "bridge build ok");
+    return 0;
+}
+
+fn test_sandbox_rules() {
+    println("--- sandbox rules ---");
+    var b = sandbox_builder_new();
+
+    # Add various rule types
+    sandbox_allow_read(b, "/etc");
+    sandbox_allow_read(b, "/usr/lib");
+    sandbox_allow_read_write(b, "/tmp");
+    sandbox_allow_read_write(b, "/var/run");
+    sandbox_allow_read_exec(b, "/usr/bin");
+    assert_eq(sandbox_rule_count(b), 5, "5 diverse rules");
+
+    # Basic service preset should have standard paths
+    var bs = sandbox_basic_service();
+    assert(sandbox_rule_count(bs) >= 5, "basic has >= 5 rules");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_constants();
@@ -372,6 +579,16 @@ fn main() {
     test_caps();
     test_agnostik_security();
     test_agnostik_agent();
+    test_mount_table();
+    test_owned_fd();
+    test_eventloop_lifecycle();
+    test_eventloop_setup_full();
+    test_reaper_macros();
+    test_signal_buffer();
+    test_cgroup_extended();
+    test_notify_edge_cases();
+    test_seccomp_agnostik_bridge();
+    test_sandbox_rules();
     return assert_summary();
 }
 var exit_code = main();
