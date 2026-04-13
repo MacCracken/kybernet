@@ -1,0 +1,105 @@
+# retention.cyr — retention policies for audit chain lifecycle
+# Determines which entries to archive vs retain.
+
+# ================================================================
+# RetentionPolicy types
+# ================================================================
+
+enum RetentionType {
+    RETAIN_COUNT = 0;
+    RETAIN_DURATION = 1;
+    RETAIN_AFTER = 2;
+}
+
+# Layout (16 bytes):
+#   +0  type     i64  RETAIN_* constant
+#   +8  value    i64  count, duration_secs, or epoch_secs
+
+fn retention_keep_count(n) {
+    var r = fl_alloc(16);
+    store64(r, RETAIN_COUNT);
+    store64(r + 8, n);
+    return r;
+}
+
+fn retention_keep_duration(secs) {
+    var r = fl_alloc(16);
+    store64(r, RETAIN_DURATION);
+    store64(r + 8, secs);
+    return r;
+}
+
+fn retention_keep_after(epoch_secs) {
+    var r = fl_alloc(16);
+    store64(r, RETAIN_AFTER);
+    store64(r + 8, epoch_secs);
+    return r;
+}
+
+fn retention_type(r) { return load64(r); }
+fn retention_value(r) { return load64(r + 8); }
+
+# ================================================================
+# Compliance presets
+# ================================================================
+
+fn retention_pci_dss() {
+    return retention_keep_duration(365 * 86400);
+}
+
+fn retention_hipaa() {
+    return retention_keep_duration(6 * 365 * 86400);
+}
+
+fn retention_sox() {
+    return retention_keep_duration(7 * 365 * 86400);
+}
+
+fn retention_gdpr(purpose_duration_secs) {
+    return retention_keep_duration(purpose_duration_secs);
+}
+
+# ================================================================
+# split_index — returns the index where archives begin
+# ================================================================
+# Entries [0..split) are archived, [split..len) are retained.
+# Returns 0 if nothing should be archived.
+
+fn retention_split_index(r, entries) {
+    var rtype = load64(r);
+    var rval = load64(r + 8);
+    var n = vec_len(entries);
+
+    if (rtype == RETAIN_COUNT) {
+        if (n <= rval) { return 0; }
+        return n - rval;
+    }
+
+    if (rtype == RETAIN_DURATION) {
+        var now = get_epoch_secs();
+        var cutoff = now - rval;
+        return _retention_first_after(entries, cutoff);
+    }
+
+    if (rtype == RETAIN_AFTER) {
+        return _retention_first_after(entries, rval);
+    }
+
+    return 0;
+}
+
+# Find first entry with timestamp > cutoff
+# Returns index, or vec_len(entries) if none found
+fn _retention_first_after(entries, cutoff_secs) {
+    var n = vec_len(entries);
+    var i = 0;
+    while (i < n) {
+        var e = vec_get(entries, i);
+        var ts = _query_parse_ts(entry_timestamp(e));
+        if (ts > cutoff_secs) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return n;
+}

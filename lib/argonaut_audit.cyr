@@ -1,0 +1,195 @@
+# audit.cyr — Audit logging for service lifecycle events
+# Backed by libro 1.0.2 cryptographic audit chain (SHA-256 hash-linked).
+# Replaces the FNV-1a shim that was used pre-libro.
+#
+# This module provides argonaut-specific wrappers around libro:
+#   - ServiceEventType enum + severity mapping
+#   - audit_log_*() API that delegates to libro's chain_*() API
+#   - Backward-compatible accessors for existing consumers
+
+# =========================================================================
+# Service event types — argonaut-specific, maps to libro severity
+# =========================================================================
+
+enum ServiceEventType {
+    EVT_STARTING;
+    EVT_STARTED;
+    EVT_STOPPING;
+    EVT_STOPPED_OK;
+    EVT_STOPPED_FAIL;
+    EVT_RESTARTING;
+    EVT_HEALTH_PASSED;
+    EVT_HEALTH_FAILED;
+    EVT_READY_PASSED;
+    EVT_READY_FAILED;
+    EVT_DEP_MET;
+    EVT_DEP_WAITING;
+    EVT_TIMEOUT_KILLED;
+    EVT_CRASH_DETECTED;
+    EVT_ENABLED;
+    EVT_DISABLED;
+}
+
+fn event_type_str(t) {
+    if (t == EVT_STARTING)       { return "Starting"; }
+    if (t == EVT_STARTED)        { return "Started"; }
+    if (t == EVT_STOPPING)       { return "Stopping"; }
+    if (t == EVT_STOPPED_OK)     { return "Stopped(0)"; }
+    if (t == EVT_STOPPED_FAIL)   { return "Stopped(fail)"; }
+    if (t == EVT_RESTARTING)     { return "Restarting"; }
+    if (t == EVT_HEALTH_PASSED)  { return "HealthCheckPassed"; }
+    if (t == EVT_HEALTH_FAILED)  { return "HealthCheckFailed"; }
+    if (t == EVT_READY_PASSED)   { return "ReadyCheckPassed"; }
+    if (t == EVT_READY_FAILED)   { return "ReadyCheckFailed"; }
+    if (t == EVT_DEP_MET)        { return "DependencyMet"; }
+    if (t == EVT_DEP_WAITING)    { return "DependencyWaiting"; }
+    if (t == EVT_TIMEOUT_KILLED) { return "TimeoutKilled"; }
+    if (t == EVT_CRASH_DETECTED) { return "CrashDetected"; }
+    if (t == EVT_ENABLED)        { return "Enabled"; }
+    if (t == EVT_DISABLED)       { return "Disabled"; }
+    return "Unknown";
+}
+
+# =========================================================================
+# Severity mapping — ServiceEventType to libro SEV_* constants
+# =========================================================================
+
+fn audit_event_severity(event_type) {
+    # Info: Starting, Started, HealthPassed, ReadyPassed, DepMet,
+    #       Enabled, Disabled, Stopped(0)
+    if (event_type == EVT_STARTING)      { return SEV_INFO; }
+    if (event_type == EVT_STARTED)       { return SEV_INFO; }
+    if (event_type == EVT_HEALTH_PASSED) { return SEV_INFO; }
+    if (event_type == EVT_READY_PASSED)  { return SEV_INFO; }
+    if (event_type == EVT_DEP_MET)       { return SEV_INFO; }
+    if (event_type == EVT_ENABLED)       { return SEV_INFO; }
+    if (event_type == EVT_DISABLED)      { return SEV_INFO; }
+    if (event_type == EVT_STOPPED_OK)    { return SEV_INFO; }
+
+    # Warning: Stopping, Restarting, DepWaiting, HealthFailed, ReadyFailed
+    if (event_type == EVT_STOPPING)      { return SEV_WARNING; }
+    if (event_type == EVT_RESTARTING)    { return SEV_WARNING; }
+    if (event_type == EVT_DEP_WAITING)   { return SEV_WARNING; }
+    if (event_type == EVT_HEALTH_FAILED) { return SEV_WARNING; }
+    if (event_type == EVT_READY_FAILED)  { return SEV_WARNING; }
+
+    # Error: TimeoutKilled, CrashDetected, Stopped(non-zero)
+    if (event_type == EVT_TIMEOUT_KILLED) { return SEV_ERROR; }
+    if (event_type == EVT_CRASH_DETECTED) { return SEV_ERROR; }
+    if (event_type == EVT_STOPPED_FAIL)   { return SEV_ERROR; }
+
+    # Default: Warning for unknown/future variants
+    return SEV_WARNING;
+}
+
+# =========================================================================
+# AuditLog — wraps libro's AuditChain for argonaut consumers
+# =========================================================================
+# The AuditLog is just a libro AuditChain pointer. All audit_log_*()
+# functions delegate directly to chain_*() functions.
+
+fn audit_log_new() {
+    return chain_new();
+}
+
+fn audit_log_entries(log) {
+    return chain_entries(log);
+}
+
+fn audit_log_record(log, service, event_type) {
+    var severity = audit_event_severity(event_type);
+    var source = str_from("argonaut");
+    var action = str_from(event_type_str(event_type));
+    var details = str_from(service);
+    return chain_append(log, severity, source, action, details);
+}
+
+fn audit_log_len(log) {
+    return chain_len(log);
+}
+
+fn audit_log_is_empty(log) {
+    return chain_is_empty(log);
+}
+
+# Verify chain integrity — returns 1 on success, 0 on failure
+# (libro returns 0 on success, error ptr on failure — we translate)
+fn audit_log_verify(log) {
+    var result = chain_verify(log);
+    if (result == 0) { return 1; }
+    return 0;
+}
+
+# Query by source string
+fn audit_log_by_source(log, source) {
+    return chain_by_source(log, str_from(source));
+}
+
+# Query by exact severity
+fn audit_log_by_severity(log, severity) {
+    return chain_by_severity(log, severity);
+}
+
+# Query by minimum severity (severity >= min)
+fn audit_log_by_min_severity(log, min_severity) {
+    var q = query_new();
+    query_min_severity(q, min_severity);
+    return chain_query(log, q);
+}
+
+# Composite query: source + min_severity
+fn audit_log_query(log, source, min_severity) {
+    var q = query_new();
+    query_source(q, str_from(source));
+    query_min_severity(q, min_severity);
+    return chain_query(log, q);
+}
+
+# Full query: all QueryFilter fields
+# Pass 0 for unused fields, -1 for unused severity fields.
+fn audit_log_query_full(log, source, min_sev, agent, after, before) {
+    var q = query_new();
+    if (source != 0) { query_source(q, str_from(source)); }
+    if (min_sev >= 0) { query_min_severity(q, min_sev); }
+    if (agent != 0) { query_agent_id(q, str_from(agent)); }
+    if (after > 0) { query_after(q, after); }
+    if (before > 0) { query_before(q, before); }
+    return chain_query(log, q);
+}
+
+# Record with agent_id
+fn audit_log_record_with_agent(log, service, event_type, agent) {
+    var severity = audit_event_severity(event_type);
+    var source = str_from("argonaut");
+    var action = str_from(event_type_str(event_type));
+    var details = str_from(service);
+    return chain_append_with_agent(
+    log, severity, source, action, details, str_from(agent));
+}
+
+# Export audit log to file descriptor as JSONL
+fn audit_log_export_jsonl(log, fd) {
+    return export_jsonl(chain_entries(log), fd);
+}
+
+# Export audit log to file descriptor as CSV
+fn audit_log_export_csv(log, fd) {
+    return export_csv(chain_entries(log), fd);
+}
+
+# =========================================================================
+# Entry accessors — bridge to libro's entry_*() functions
+# =========================================================================
+# These provide backward-compatible names for argonaut consumers.
+# Libro entries are 88-byte structs with Str fields and SHA-256 hashes.
+
+fn audit_entry_timestamp(e) { return entry_timestamp(e); }
+fn audit_entry_severity(e)  { return entry_severity(e); }
+fn audit_entry_source(e)    { return entry_source(e); }
+fn audit_entry_action(e)    { return entry_action(e); }
+fn audit_entry_prev_hash(e) { return entry_prev_hash(e); }
+fn audit_entry_hash(e)      { return entry_hash(e); }
+fn audit_entry_agent_id(e)  { return entry_agent_id(e); }
+
+# Service name is stored in the details field
+fn audit_entry_service(e)   { return entry_details(e); }

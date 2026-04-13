@@ -12,7 +12,7 @@
 #   8. Event loop: signals, health, watchdog, notify, restarts
 #   9. Shutdown on SIGTERM/SIGINT (coordinated via argonaut)
 
-# Kybernet modules (stdlib + deps resolved via cyrius.toml)
+# Kybernet modules (stdlib + deps auto-included via cyrius.toml)
 include "src/lib/console.cyr"
 include "src/lib/signals.cyr"
 include "src/lib/reaper.cyr"

@@ -12,7 +12,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CYRIUS_VERSION: "3.9.2"
+  CYRIUS_VERSION: "3.9.3"
 
 jobs:
   # ── Build ──

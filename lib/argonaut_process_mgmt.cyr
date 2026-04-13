@@ -1,0 +1,397 @@
+# process_mgmt.cyr — Process execution and management
+# Spawn, track, signal, and reap service processes.
+# Ported from rust-old/src/process.rs
+#
+# Uses lib/process.cyr for low-level spawn and lib/syscalls.cyr for signals.
+
+# =========================================================================
+# Environment file loading
+# =========================================================================
+
+# Load KEY=VALUE pairs from a file into a map.
+# Lines starting with # are comments. Empty lines ignored.
+# Values optionally quoted with " or '.
+fn load_env_file(path, env_map) {
+    var buf = alloc(8192);
+    var n = file_read_all(str_data(path), buf, 8192);
+    if (n <= 0) { return 0 - 1; }
+
+    var line_start = 0;
+    for (var i = 0; i <= n; i = i + 1) {
+        var c = 0;
+        if (i < n) { c = load8(buf + i); }
+
+        if (c == 10 || i == n) {  # newline or EOF
+            var line_len = i - line_start;
+            if (line_len > 0) {
+                var first = load8(buf + line_start);
+                if (first != 35) {  # not '#'
+                    # Find '=' separator
+                    var eq_pos = 0 - 1;
+                    for (var j = line_start; j < i; j = j + 1) {
+                        if (load8(buf + j) == 61) {  # '='
+                            eq_pos = j;
+                            break;
+                        }
+                    }
+                    if (eq_pos > line_start) {
+                        # Null-terminate key in-place for map lookup
+                        var saved = load8(buf + eq_pos);
+                        store8(buf + eq_pos, 0);
+                        var val_start = eq_pos + 1;
+                        var val_len = i - val_start;
+                        # Strip optional quotes
+                        if (val_len >= 2) {
+                            var first_q = load8(buf + val_start);
+                            var last_q = load8(buf + val_start + val_len - 1);
+                            if ((first_q == 34 && last_q == 34) || (first_q == 39 && last_q == 39)) {
+                                val_start = val_start + 1;
+                                val_len = val_len - 2;
+                            }
+                        }
+                        # Copy key and value to heap
+                        var key_len = eq_pos - line_start;
+                        var key_copy = alloc(key_len + 1);
+                        memcpy(key_copy, buf + line_start, key_len);
+                        store8(key_copy + key_len, 0);
+                        var val_copy = alloc(val_len + 1);
+                        memcpy(val_copy, buf + val_start, val_len);
+                        store8(val_copy + val_len, 0);
+                        var val = str_new(val_copy, val_len);
+                        map_set(env_map, key_copy, val);
+                        store8(buf + eq_pos, saved);
+                    }
+                }
+            }
+            line_start = i + 1;
+        }
+    }
+    return 0;
+}
+
+# Load and merge env vars from multiple file paths (vec of Str).
+fn load_env_files(paths) {
+    var merged = map_new();
+    for (var i = 0; i < vec_len(paths); i = i + 1) {
+        load_env_file(vec_get(paths, i), merged);
+    }
+    return merged;
+}
+
+# =========================================================================
+# SafeCommand execution
+# =========================================================================
+
+# Run a SafeCommand and return exit code. -1 on spawn failure.
+fn run_safe_cmd(cmd) {
+    var binary = str_data(safe_cmd_binary(cmd));
+    var cmd_args = safe_cmd_args(cmd);
+    var argc = vec_len(cmd_args);
+
+    # Build argv vec for exec_vec
+    var argv = vec_new();
+    vec_push(argv, safe_cmd_binary(cmd));
+    for (var i = 0; i < argc; i = i + 1) {
+        vec_push(argv, vec_get(cmd_args, i));
+    }
+
+    return exec_vec(argv);
+}
+
+# Run a sequence of SafeCommands, stopping on first failure.
+fn run_safe_cmd_sequence(cmds) {
+    for (var i = 0; i < vec_len(cmds); i = i + 1) {
+        var code = run_safe_cmd(vec_get(cmds, i));
+        if (code != 0) { return code; }
+    }
+    return 0;
+}
+
+# =========================================================================
+# Process spawning for services
+# =========================================================================
+
+# Spawn a service process. Returns child PID or -1 on error.
+fn spawn_service(svc_def) {
+    var binary = svc_def_binary(svc_def);
+    var args = svc_def_args(svc_def);
+
+    # Build argv
+    var argv = vec_new();
+    vec_push(argv, binary);
+    for (var i = 0; i < vec_len(args); i = i + 1) {
+        vec_push(argv, vec_get(args, i));
+    }
+
+    # Build environment
+    var env = svc_def_env(svc_def);
+
+    return exec_env(argv, env);
+}
+
+# Fork + exec a service, returning child PID.
+# Parent returns immediately; child execs the binary.
+fn fork_exec_service(svc_def) {
+    var sn = svc_def_name(svc_def);
+    sakshi_debug(str_data(sn), str_len(sn));
+
+    var pid = sys_fork();
+    if (pid < 0) { return 0 - 1; }
+
+    if (pid == 0) {
+        # Child process
+        # Redirect stdin to /dev/null
+        var devnull = sys_open("/dev/null", 0, 0);  # O_RDONLY
+        if (devnull >= 0) {
+            sys_dup2(devnull, 0);
+            sys_close(devnull);
+        }
+
+        # Exec the binary
+        var binary = svc_def_binary(svc_def);
+        var args = svc_def_args(svc_def);
+
+        var argv = vec_new();
+        vec_push(argv, binary);
+        for (var i = 0; i < vec_len(args); i = i + 1) {
+            vec_push(argv, vec_get(args, i));
+        }
+
+        exec_env(argv, svc_def_env(svc_def));
+        sys_exit(127);  # exec failed
+    }
+
+    return pid;  # Parent returns child PID
+}
+
+# =========================================================================
+# Process table — tracks running service processes
+# =========================================================================
+
+# Process table is a map: service_name -> pid
+# Started-at times: separate map: service_name -> monotonic_ms
+var g_proc_table = 0;
+var g_proc_times = 0;
+
+fn proc_table_init() {
+    g_proc_table = map_new();
+    g_proc_times = map_new();
+}
+
+fn proc_table_insert(name, pid) {
+    map_set(g_proc_table, str_data(name), pid);
+    map_set(g_proc_times, str_data(name), monotonic_ms());
+}
+
+fn proc_table_remove(name) {
+    map_delete(g_proc_table, str_data(name));
+    map_delete(g_proc_times, str_data(name));
+}
+
+fn proc_table_pid(name) {
+    return map_get(g_proc_table, str_data(name));
+}
+
+fn proc_table_has(name) {
+    return map_has(g_proc_table, str_data(name));
+}
+
+fn proc_table_uptime_ms(name) {
+    var started = map_get(g_proc_times, str_data(name));
+    if (started == 0) { return 0; }
+    return monotonic_ms() - started;
+}
+
+fn proc_table_count() {
+    return map_count(g_proc_table);
+}
+
+fn proc_table_keys() {
+    return map_keys(g_proc_table);
+}
+
+# Check if a process is alive via kill(pid, 0)
+fn process_alive(pid) {
+    if (pid <= 0) { return 0; }
+    var ret = sys_kill(pid, 0);
+    return ret == 0;
+}
+
+# Send SIGTERM to a process
+fn process_terminate(pid) {
+    return sys_kill(pid, SIGTERM);
+}
+
+# Send SIGKILL to a process
+fn process_kill(pid) {
+    return sys_kill(pid, SIGKILL);
+}
+
+# Graceful stop: SIGTERM, wait up to timeout_ms, then SIGKILL.
+# Returns exit code or -1.
+fn process_stop(pid, timeout_ms) {
+    process_terminate(pid);
+
+    var deadline = monotonic_ms() + timeout_ms;
+    while (monotonic_ms() < deadline) {
+        var status_buf[8];
+        var ret = sys_waitpid(pid, &status_buf, WNOHANG);
+        if (ret > 0) {
+            var status = load64(&status_buf);
+            if (WIFEXITED(status)) { return WEXITSTATUS(status); }
+            if (WIFSIGNALED(status)) { return 128 + WTERMSIG(status); }
+            return 0 - 1;
+        }
+        # Sleep 50ms (nanosleep)
+        var ts[16];
+        store64(&ts, 0);           # seconds
+        store64(&ts + 8, 50000000); # 50ms in nanoseconds
+        syscall(35, &ts, 0);       # SYS_nanosleep
+    }
+
+    # Timed out — SIGKILL
+    sakshi_warn("SIGKILL", 7);
+    process_kill(pid);
+
+    # Wait up to 500ms for SIGKILL
+    var kill_deadline = monotonic_ms() + 500;
+    while (monotonic_ms() < kill_deadline) {
+        var status_buf[8];
+        var ret = sys_waitpid(pid, &status_buf, WNOHANG);
+        if (ret > 0) {
+            var status = load64(&status_buf);
+            if (WIFEXITED(status)) { return WEXITSTATUS(status); }
+            if (WIFSIGNALED(status)) { return 128 + WTERMSIG(status); }
+            return 0 - 1;
+        }
+        var ts[16];
+        store64(&ts, 0);
+        store64(&ts + 8, 10000000); # 10ms
+        syscall(35, &ts, 0);
+    }
+
+    return 0 - 1;
+}
+
+# Stop all tracked processes
+fn proc_table_stop_all(timeout_ms) {
+    var results = vec_new();
+    var keys = proc_table_keys();
+
+    # Send SIGTERM to all
+    for (var i = 0; i < vec_len(keys); i = i + 1) {
+        var name = vec_get(keys, i);
+        var pid = map_get(g_proc_table, name);
+        if (pid > 0) { process_terminate(pid); }
+    }
+
+    # Wait with timeout
+    var deadline = monotonic_ms() + timeout_ms;
+    var remaining = vec_new();
+    for (var i = 0; i < vec_len(keys); i = i + 1) {
+        vec_push(remaining, vec_get(keys, i));
+    }
+
+    while (vec_len(remaining) > 0 && monotonic_ms() < deadline) {
+        var still_alive = vec_new();
+        for (var i = 0; i < vec_len(remaining); i = i + 1) {
+            var name = vec_get(remaining, i);
+            var pid = map_get(g_proc_table, name);
+            if (pid > 0) {
+                var status_buf[8];
+                var ret = sys_waitpid(pid, &status_buf, WNOHANG);
+                if (ret > 0) {
+                    var status = load64(&status_buf);
+                    var code = 0 - 1;
+                    if (WIFEXITED(status)) { code = WEXITSTATUS(status); }
+                    # Pack name + code into result
+                    var pair = alloc(16);
+                    store64(pair, str_from(name));
+                    store64(pair + 8, code);
+                    vec_push(results, pair);
+                } else {
+                    vec_push(still_alive, name);
+                }
+            }
+        }
+        remaining = still_alive;
+        if (vec_len(remaining) > 0) {
+            var ts[16];
+            store64(&ts, 0);
+            store64(&ts + 8, 50000000);
+            syscall(35, &ts, 0);
+        }
+    }
+
+    # SIGKILL anything still alive
+    for (var i = 0; i < vec_len(remaining); i = i + 1) {
+        var name = vec_get(remaining, i);
+        var pid = map_get(g_proc_table, name);
+        if (pid > 0) { process_kill(pid); }
+        var pair = alloc(16);
+        store64(pair, str_from(name));
+        store64(pair + 8, 0 - 1);
+        vec_push(results, pair);
+    }
+
+    # Clear the table
+    g_proc_table = map_new();
+    g_proc_times = map_new();
+
+    return results;
+}
+
+# Reap any processes that have exited.
+# Returns vec of (name, exit_code) pairs.
+fn proc_table_reap() {
+    var exited = vec_new();
+    var keys = proc_table_keys();
+
+    for (var i = 0; i < vec_len(keys); i = i + 1) {
+        var name = vec_get(keys, i);
+        var pid = map_get(g_proc_table, name);
+        if (pid > 0) {
+            var status_buf[8];
+            var ret = sys_waitpid(pid, &status_buf, WNOHANG);
+            if (ret > 0) {
+                var status = load64(&status_buf);
+                var code = 0 - 1;
+                if (WIFEXITED(status)) { code = WEXITSTATUS(status); }
+                var pair = alloc(16);
+                store64(pair, str_from(name));
+                store64(pair + 8, code);
+                vec_push(exited, pair);
+            }
+        }
+    }
+
+    # Remove reaped processes
+    for (var i = 0; i < vec_len(exited); i = i + 1) {
+        var pair = vec_get(exited, i);
+        var name = str_data(load64(pair));
+        map_delete(g_proc_table, name);
+        map_delete(g_proc_times, name);
+    }
+
+    return exited;
+}
+
+# =========================================================================
+# PID file reading
+# =========================================================================
+
+fn read_pid_file(path) {
+    var buf[64];
+    var n = file_read_all(str_data(path), &buf, 63);
+    if (n <= 0) { return 0 - 1; }
+    store8(&buf + n, 0);  # null terminate
+
+    # Parse integer from trimmed content
+    var pid = str_to_int(str_new(&buf, n));
+    if (pid <= 0) { return 0 - 1; }
+
+    # Check process is alive
+    if (process_alive(pid) == 0) { return 0 - 1; }
+
+    return pid;
+}

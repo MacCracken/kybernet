@@ -1,0 +1,310 @@
+# chain.cyr — AuditChain and ChainArchive
+# Hash-linked chain with auto-rotation, query, pagination, retention.
+
+# ================================================================
+# ChainArchive layout (16 bytes)
+# ================================================================
+#   +0  entries     vec pointer
+#   +8  head_hash   Str pointer (last entry's hash)
+
+fn archive_new(entries, head_hash) {
+    var a = fl_alloc(16);
+    store64(a, entries);
+    store64(a + 8, head_hash);
+    return a;
+}
+
+fn archive_entries(a) { return load64(a); }
+fn archive_head_hash(a) { return load64(a + 8); }
+
+# ================================================================
+# AuditChain layout (32 bytes)
+# ================================================================
+#   +0   entries           vec pointer
+#   +8   prev_chain_hash   Str pointer (0 = none)
+#   +16  max_capacity      i64 (0 = unlimited)
+#   +24  overflow_archives vec pointer
+
+fn chain_new() {
+    var c = fl_alloc(32);
+    store64(c, vec_new());
+    store64(c + 8, 0);
+    store64(c + 16, 0);
+    store64(c + 24, vec_new());
+    return c;
+}
+
+fn chain_with_capacity(max_entries) {
+    var c = chain_new();
+    if (max_entries > 0) {
+        store64(c + 16, max_entries);
+    }
+    return c;
+}
+
+fn chain_entries(c) { return load64(c); }
+fn chain_prev_hash(c) { return load64(c + 8); }
+fn chain_max_capacity(c) { return load64(c + 16); }
+fn chain_overflow(c) { return load64(c + 24); }
+
+fn chain_len(c) {
+    return vec_len(load64(c));
+}
+
+fn chain_is_empty(c) {
+    if (chain_len(c) == 0) { return 1; }
+    return 0;
+}
+
+fn chain_head_hash(c) {
+    var entries = load64(c);
+    var n = vec_len(entries);
+    if (n == 0) { return 0; }
+    var last = vec_get(entries, n - 1);
+    return entry_hash(last);
+}
+
+# ================================================================
+# Append — add entry to chain, auto-rotating if full
+# ================================================================
+
+var _chain_c = 0;
+
+fn chain_append(c, severity, source, action, details) {
+    _chain_c = c;
+    _chain_auto_rotate(_chain_c);
+
+    # Determine prev_hash
+    var prev = _chain_prev_link(_chain_c);
+    var e = entry_new(severity, source, action, details, prev);
+    vec_push(load64(_chain_c), e);
+    sakshi_debug("chain: append", 13);
+    return e;
+}
+
+fn chain_append_with_agent(c, severity, source, action, details, agent_id) {
+    _chain_c = c;
+    _chain_auto_rotate(_chain_c);
+
+    var prev = _chain_prev_link(_chain_c);
+    var e = entry_new(severity, source, action, details, prev);
+    entry_with_agent(e, agent_id);
+    vec_push(load64(_chain_c), e);
+    return e;
+}
+
+# Get the prev_hash for a new entry
+fn _chain_prev_link(c) {
+    var entries = load64(c);
+    var n = vec_len(entries);
+    if (n > 0) {
+        var last = vec_get(entries, n - 1);
+        return entry_hash(last);
+    }
+    var pch = load64(c + 8);
+    if (pch != 0) {
+        return pch;
+    }
+    return str_from("");
+}
+
+# ================================================================
+# Auto-rotation — archive entries when capacity reached
+# ================================================================
+
+fn _chain_auto_rotate(c) {
+    var cap = load64(c + 16);
+    if (cap == 0) { return 0; }
+    var entries = load64(c);
+    if (vec_len(entries) >= cap) {
+        sakshi_info("chain: auto-rotate at capacity", 30);
+        var arch = chain_rotate(c);
+        vec_push(load64(c + 24), arch);
+    }
+    return 0;
+}
+
+# ================================================================
+# Rotate — drain entries to archive, reset chain
+# ================================================================
+
+fn chain_rotate(c) {
+    var entries = load64(c);
+    var n = vec_len(entries);
+    sakshi_info("chain: rotate", 13);
+
+    var head = str_from("");
+    if (n > 0) {
+        var last = vec_get(entries, n - 1);
+        head = entry_hash(last);
+    }
+
+    var arch = archive_new(entries, head);
+
+    # Reset chain with empty entries, set prev_chain_hash
+    store64(c, vec_new());
+    if (n > 0) {
+        store64(c + 8, head);
+    }
+
+    return arch;
+}
+
+# Take and clear overflow archives
+fn chain_take_overflow(c) {
+    var ov = load64(c + 24);
+    store64(c + 24, vec_new());
+    return ov;
+}
+
+# ================================================================
+# From entries — create chain from existing entries
+# ================================================================
+
+fn chain_from_entries(entries) {
+    var c = fl_alloc(32);
+    store64(c, entries);
+    store64(c + 8, 0);
+    store64(c + 16, 0);
+    store64(c + 24, vec_new());
+    return c;
+}
+
+# ================================================================
+# Verification — check integrity of the chain
+# ================================================================
+
+fn chain_verify(c) {
+    sakshi_debug("chain: verify", 13);
+    var entries = load64(c);
+    var n = vec_len(entries);
+    if (n == 0) { return 0; }
+
+    # Check genesis entry's prev_hash matches prev_chain_hash
+    var first = vec_get(entries, 0);
+    var first_prev = entry_prev_hash(first);
+    var expected_prev = load64(c + 8);
+    if (expected_prev == 0) {
+        expected_prev = str_from("");
+    }
+    if (constant_time_eq_str(first_prev, expected_prev) == 0) {
+        return error_integrity(0, expected_prev, first_prev);
+    }
+
+    return verify_chain(entries);
+}
+
+# ================================================================
+# Query / filter / pagination
+# ================================================================
+
+fn chain_by_source(c, source) {
+    var result = vec_new();
+    var entries = load64(c);
+    var n = vec_len(entries);
+    var i = 0;
+    while (i < n) {
+        var e = vec_get(entries, i);
+        if (str_eq(entry_source(e), source) == 1) {
+            vec_push(result, e);
+        }
+        i = i + 1;
+    }
+    return result;
+}
+
+fn chain_by_severity(c, severity) {
+    var result = vec_new();
+    var entries = load64(c);
+    var n = vec_len(entries);
+    var i = 0;
+    while (i < n) {
+        var e = vec_get(entries, i);
+        if (entry_severity(e) == severity) {
+            vec_push(result, e);
+        }
+        i = i + 1;
+    }
+    return result;
+}
+
+fn chain_by_agent(c, agent_id) {
+    var result = vec_new();
+    var entries = load64(c);
+    var n = vec_len(entries);
+    var i = 0;
+    while (i < n) {
+        var e = vec_get(entries, i);
+        var eaid = entry_agent_id(e);
+        if (eaid != 0) {
+            if (str_eq(eaid, agent_id) == 1) {
+                vec_push(result, e);
+            }
+        }
+        i = i + 1;
+    }
+    return result;
+}
+
+fn chain_query(c, filter) {
+    return query_apply(filter, load64(c));
+}
+
+# Pagination — returns a vec of entries from offset with limit
+fn chain_page(c, offset, limit) {
+    var entries = load64(c);
+    var n = vec_len(entries);
+    var start = offset;
+    if (start > n) { start = n; }
+    var end = start + limit;
+    if (end > n) { end = n; }
+
+    var result = vec_new();
+    var i = start;
+    while (i < end) {
+        vec_push(result, vec_get(entries, i));
+        i = i + 1;
+    }
+    return result;
+}
+
+# ================================================================
+# Retention — archive old entries per policy
+# ================================================================
+# Returns archive pointer, or 0 if nothing archived.
+
+fn chain_apply_retention(c, policy) {
+    sakshi_info("chain: apply retention", 22);
+    var entries = load64(c);
+    var n = vec_len(entries);
+    var split = retention_split_index(policy, entries);
+
+    if (split == 0) { return 0; }
+
+    # Split entries: [0..split) = archive, [split..n) = retained
+    var archived = vec_new();
+    var retained = vec_new();
+    var i = 0;
+    while (i < n) {
+        var e = vec_get(entries, i);
+        if (i < split) {
+            vec_push(archived, e);
+        } else {
+            vec_push(retained, e);
+        }
+        i = i + 1;
+    }
+
+    # Head hash of last archived entry
+    var head = str_from("");
+    if (vec_len(archived) > 0) {
+        var last_arch = vec_get(archived, vec_len(archived) - 1);
+        head = entry_hash(last_arch);
+    }
+
+    # Update chain
+    store64(c, retained);
+    store64(c + 8, head);
+
+    return archive_new(archived, head);
+}
