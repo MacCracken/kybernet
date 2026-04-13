@@ -34,13 +34,29 @@ jobs:
           echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
           echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
 
+      - name: Verify toolchain
+        run: |
+          echo "cc3: $(cc3 --version 2>&1 | head -1)"
+          CYRIUS_BIN="$(which cyrius)"
+          echo "cyrius: $(file $CYRIUS_BIN)"
+          # If cyrius is a shell script (stale release), rebuild from source
+          if file "$CYRIUS_BIN" | grep -q "shell script\|text"; then
+            echo "WARN: cyrius is shell script — rebuilding from source"
+            curl -sLO "https://raw.githubusercontent.com/MacCracken/cyrius/main/programs/cyrius.cyr"
+            cat cyrius.cyr | cc3 > "$HOME/.cyrius/bin/cyrius"
+            chmod +x "$HOME/.cyrius/bin/cyrius"
+            rm cyrius.cyr
+            echo "Rebuilt: $(file $HOME/.cyrius/bin/cyrius)"
+          fi
+          cyrius version
+
       - name: Resolve dependencies
         run: cyrius deps
 
       - name: Build kybernet
         run: |
           mkdir -p build
-          cyrius build src/main.cyr build/kybernet
+          cyrius build -v src/main.cyr build/kybernet 2>&1
           echo "kybernet: $(wc -c < build/kybernet) bytes"
 
       - name: Upload build artifacts
@@ -125,6 +141,15 @@ jobs:
           echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
           echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
 
+      - name: Ensure compiled cyrius binary
+        run: |
+          CYRIUS_BIN="$(which cyrius)"
+          if file "$CYRIUS_BIN" | grep -q "shell script\|text"; then
+            curl -sLO "https://raw.githubusercontent.com/MacCracken/cyrius/main/programs/cyrius.cyr"
+            cat cyrius.cyr | cc3 > "$HOME/.cyrius/bin/cyrius" && chmod +x "$HOME/.cyrius/bin/cyrius"
+            rm cyrius.cyr
+          fi
+
       - name: Resolve dependencies
         run: cyrius deps
 
@@ -152,6 +177,15 @@ jobs:
           chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
           echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
           echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
+
+      - name: Ensure compiled cyrius binary
+        run: |
+          CYRIUS_BIN="$(which cyrius)"
+          if file "$CYRIUS_BIN" | grep -q "shell script\|text"; then
+            curl -sLO "https://raw.githubusercontent.com/MacCracken/cyrius/main/programs/cyrius.cyr"
+            cat cyrius.cyr | cc3 > "$HOME/.cyrius/bin/cyrius" && chmod +x "$HOME/.cyrius/bin/cyrius"
+            rm cyrius.cyr
+          fi
 
       - name: Resolve dependencies
         run: cyrius deps
