@@ -33,6 +33,9 @@ jobs:
           chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
           echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
 
+      - name: Resolve dependencies
+        run: cyrius deps
+
       - name: Build kybernet
         run: |
           mkdir -p build
@@ -87,17 +90,14 @@ jobs:
       - name: Scan for dangerous patterns
         run: |
           WARN=0
-          # PID 1 must never call exit directly (only via do_shutdown)
           if grep -rn 'syscall(60' src/main.cyr | grep -v '# ' | grep -v 'fn main' | grep -v 'var r = main'; then
             echo "WARN: direct exit syscall outside main()"
             WARN=1
           fi
-          # Check for raw execve outside emergency shell
           if grep -rn 'syscall(59' src/lib/ 2>/dev/null | grep -v '# '; then
             echo "WARN: raw execve in lib module"
             WARN=1
           fi
-          # Check for unchecked sys_open (must have matching sys_close)
           OPENS=$(grep -rn 'sys_open' src/ | grep -v '# ' | wc -l)
           CLOSES=$(grep -rn 'sys_close' src/ | grep -v '# ' | wc -l)
           echo "sys_open calls: $OPENS, sys_close calls: $CLOSES"
@@ -122,11 +122,8 @@ jobs:
           chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
           echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
 
-      - name: Clone dependencies
-        run: |
-          git clone --depth 1 --branch 0.97.2 https://github.com/MacCracken/agnosys.git ../agnosys
-          git clone --depth 1 --branch 0.97.1 https://github.com/MacCracken/agnostik.git ../agnostik
-          git clone --depth 1 --branch 1.1.0 https://github.com/MacCracken/argonaut.git ../argonaut
+      - name: Resolve dependencies
+        run: cyrius deps
 
       - name: Run test suite
         run: |
@@ -152,11 +149,8 @@ jobs:
           chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
           echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
 
-      - name: Clone dependencies
-        run: |
-          git clone --depth 1 --branch 0.97.2 https://github.com/MacCracken/agnosys.git ../agnosys
-          git clone --depth 1 --branch 0.97.1 https://github.com/MacCracken/agnostik.git ../agnostik
-          git clone --depth 1 --branch 1.1.0 https://github.com/MacCracken/argonaut.git ../argonaut
+      - name: Resolve dependencies
+        run: cyrius deps
 
       - name: Run benchmarks
         run: cyrius bench src/bench.cyr

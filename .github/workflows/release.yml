@@ -50,6 +50,9 @@ jobs:
           chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
           echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
 
+      - name: Resolve dependencies
+        run: cyrius deps
+
       - name: Build x86_64 binary
         run: |
           mkdir -p build
