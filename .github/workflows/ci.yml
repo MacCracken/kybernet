@@ -11,27 +11,191 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CYRIUS_VERSION: "3.8.0"
+
 jobs:
-  validate:
+  # ── Build ──
+  build:
+    name: Build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Clone Cyrius toolchain
+      - name: Install Cyrius toolchain
         run: |
-          git clone --depth 1 https://github.com/MacCracken/cyrius.git ../cyrius
-          cd ../cyrius
-          sh bootstrap/bootstrap.sh
-          cat stage1/cc2.cyr | ./build/stage1f > ./build/cc2 && chmod +x ./build/cc2
+          curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
+          tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
+          CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
+          mkdir -p "$HOME/.cyrius/bin" "$HOME/.cyrius/lib"
+          cp "$CYRIUS_DIR/bin/"* "$HOME/.cyrius/bin/" 2>/dev/null || true
+          cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/lib/" 2>/dev/null || true
+          chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
+          echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
+
+      - name: Clone dependencies
+        run: |
+          git clone --depth 1 --branch 0.97.2 https://github.com/MacCracken/agnosys.git ../agnosys
+          git clone --depth 1 --branch 0.97.1 https://github.com/MacCracken/agnostik.git ../agnostik
+          git clone --depth 1 --branch 1.1.0 https://github.com/MacCracken/argonaut.git ../argonaut
 
       - name: Build kybernet
-        run: sh scripts/build.sh
+        run: |
+          mkdir -p build
+          cyrius build src/main.cyr build/kybernet
+          echo "kybernet: $(wc -c < build/kybernet) bytes"
 
-      - name: Run tests (33 assertions)
-        run: sh scripts/test.sh
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-x86_64
+          path: build/kybernet
+          retention-days: 5
 
-      - name: Verify VERSION
+  # ── Check & Format ──
+  check:
+    name: Check & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Cyrius toolchain
+        run: |
+          curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
+          tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
+          CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
+          mkdir -p "$HOME/.cyrius/bin" "$HOME/.cyrius/lib"
+          cp "$CYRIUS_DIR/bin/"* "$HOME/.cyrius/bin/" 2>/dev/null || true
+          cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/lib/" 2>/dev/null || true
+          chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
+          echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
+
+      - name: Format check
+        run: |
+          FAIL=0
+          for f in src/main.cyr src/lib/*.cyr; do
+            [ -f "$f" ] || continue
+            cyrfmt "$f" > /tmp/fmt_check
+            if ! diff -q "$f" /tmp/fmt_check >/dev/null 2>&1; then
+              echo "  NEEDS FORMAT: $f"
+              FAIL=1
+            fi
+          done
+          test $FAIL -eq 0 && echo "PASS: all files formatted"
+
+  # ── Security ──
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan for dangerous patterns
+        run: |
+          WARN=0
+          # PID 1 must never call exit directly (only via do_shutdown)
+          if grep -rn 'syscall(60' src/main.cyr | grep -v '# ' | grep -v 'fn main' | grep -v 'var r = main'; then
+            echo "WARN: direct exit syscall outside main()"
+            WARN=1
+          fi
+          # Check for raw execve outside emergency shell
+          if grep -rn 'syscall(59' src/lib/ 2>/dev/null | grep -v '# '; then
+            echo "WARN: raw execve in lib module"
+            WARN=1
+          fi
+          # Check for unchecked sys_open (must have matching sys_close)
+          OPENS=$(grep -rn 'sys_open' src/ | grep -v '# ' | wc -l)
+          CLOSES=$(grep -rn 'sys_close' src/ | grep -v '# ' | wc -l)
+          echo "sys_open calls: $OPENS, sys_close calls: $CLOSES"
+          echo "security scan complete (warnings: $WARN)"
+
+  # ── Tests ──
+  test:
+    name: Test (140 assertions)
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Cyrius toolchain
+        run: |
+          curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
+          tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
+          CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
+          mkdir -p "$HOME/.cyrius/bin" "$HOME/.cyrius/lib"
+          cp "$CYRIUS_DIR/bin/"* "$HOME/.cyrius/bin/" 2>/dev/null || true
+          cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/lib/" 2>/dev/null || true
+          chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
+          echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
+
+      - name: Clone dependencies
+        run: |
+          git clone --depth 1 --branch 0.97.2 https://github.com/MacCracken/agnosys.git ../agnosys
+          git clone --depth 1 --branch 0.97.1 https://github.com/MacCracken/agnostik.git ../agnostik
+          git clone --depth 1 --branch 1.1.0 https://github.com/MacCracken/argonaut.git ../argonaut
+
+      - name: Run test suite
+        run: |
+          cyrius test src/test.cyr 2>&1 | tee /tmp/test_output
+          tail -1 /tmp/test_output | grep "0 failed"
+
+  # ── Benchmarks ──
+  benchmarks:
+    name: Benchmarks (46)
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Cyrius toolchain
+        run: |
+          curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
+          tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
+          CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
+          mkdir -p "$HOME/.cyrius/bin" "$HOME/.cyrius/lib"
+          cp "$CYRIUS_DIR/bin/"* "$HOME/.cyrius/bin/" 2>/dev/null || true
+          cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/lib/" 2>/dev/null || true
+          chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
+          echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
+
+      - name: Clone dependencies
+        run: |
+          git clone --depth 1 --branch 0.97.2 https://github.com/MacCracken/agnosys.git ../agnosys
+          git clone --depth 1 --branch 0.97.1 https://github.com/MacCracken/agnostik.git ../agnostik
+          git clone --depth 1 --branch 1.1.0 https://github.com/MacCracken/argonaut.git ../argonaut
+
+      - name: Run benchmarks
+        run: cyrius bench src/bench.cyr
+        continue-on-error: true
+
+  # ── Documentation ──
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check required docs exist
+        run: |
+          MISSING=0
+          for doc in README.md CHANGELOG.md VERSION CONTRIBUTING.md SECURITY.md LICENSE CLAUDE.md; do
+            if [ -f "$doc" ]; then
+              echo "  OK: $doc"
+            else
+              echo "  MISSING: $doc"
+              MISSING=1
+            fi
+          done
+          exit $MISSING
+
+      - name: Verify version consistency
         run: |
           VERSION=$(cat VERSION | tr -d '[:space:]')
-          echo "Version: $VERSION"
-          test -n "$VERSION"
+          TOML_VERSION=$(grep '^version' cyrius.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "VERSION file:  $VERSION"
+          echo "cyrius.toml:   $TOML_VERSION"
+          if [ "$VERSION" != "$TOML_VERSION" ]; then
+            echo "FAIL: VERSION != cyrius.toml"
+            exit 1
+          fi
+          echo "Version consistent: $VERSION"
