@@ -4,7 +4,7 @@ version = "1.0.0"
 description = "PID 1 init system for AGNOS"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "3.9.3"
+cyrius = "3.9.5"
 
 [build]
 entry = "src/main.cyr"
