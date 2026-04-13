@@ -25,12 +25,14 @@ fn setup_console() {
     }
     # If con_fd isn't 1, dup it there
     if (con_fd != 1) {
-        sys_dup2(con_fd, 1);
+        var r1 = sys_dup2(con_fd, 1);
+        if (r1 < 0) { return Err(0 - r1); }
         if (con_fd > 2) { sys_close(con_fd); }
     }
 
     # Dup stdout to stderr
-    sys_dup2(1, 2);
+    var r2 = sys_dup2(1, 2);
+    if (r2 < 0) { return Err(0 - r2); }
 
     return Ok(0);
 }

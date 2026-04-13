@@ -12,7 +12,9 @@ fn is_mounted(target) {
     var n = file_read_all("/proc/self/mounts", buf, 8192);
     if (n <= 0) { return 0; }
     var tlen = strlen(target);
-    for (var mi = 0; mi < n - tlen; mi = mi + 1) {
+    if (tlen >= n) { return 0; }
+    var limit = n - tlen;
+    for (var mi = 0; mi < limit; mi = mi + 1) {
         if (load8(buf + mi) == 32 && memeq(buf + mi + 1, target, tlen) == 1) {
             var after = load8(buf + mi + 1 + tlen);
             if (after == 32 || after == 10) { return 1; }
@@ -37,7 +39,7 @@ fn mount_devtmpfs() {
 }
 
 # Essential mount table — data-driven instead of hardcoded per Rust
-var _mount_table[8];
+var _mount_table[240];
 var _mount_count = 0;
 
 fn _init_mount_table() {

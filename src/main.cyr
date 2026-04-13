@@ -11,7 +11,19 @@
 #   7. Event loop: signals, health, watchdog, notify, restarts
 #   8. Shutdown on SIGTERM/SIGINT (coordinated via argonaut)
 
-# Kybernet modules (deps resolved via cyrb.toml)
+# Stdlib
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/io.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/fnptr.cyr"
+include "lib/tagged.cyr"
+include "lib/callback.cyr"
+include "lib/hashmap.cyr"
+
+# Kybernet modules
 include "src/lib/console.cyr"
 include "src/lib/signals.cyr"
 include "src/lib/reaper.cyr"
@@ -327,8 +339,10 @@ fn run() {
     # Phase 4: Signals
     var sfd_r = setup_signals();
     if (is_err_result(sfd_r) == 1) {
-        kmsg("phase 4: signal setup failed");
-        klog("signal setup failed");
+        kmsg("phase 4: FATAL signal setup failed");
+        klog("FATAL: signal setup failed — entering shutdown");
+        do_shutdown(SHUTDOWN_POWEROFF);
+        sys_pause();
         return 1;
     }
     g_sfd = result_unwrap(sfd_r);
@@ -337,8 +351,10 @@ fn run() {
     # Phase 5: Event loop
     var epfd_r = eventloop_setup(g_sfd, 30, 10);
     if (is_err_result(epfd_r) == 1) {
-        kmsg("phase 5: eventloop setup failed");
-        klog("eventloop setup failed");
+        kmsg("phase 5: FATAL eventloop setup failed");
+        klog("FATAL: eventloop setup failed — entering shutdown");
+        do_shutdown(SHUTDOWN_POWEROFF);
+        sys_pause();
         return 1;
     }
     g_epfd = result_unwrap(epfd_r);
@@ -348,8 +364,14 @@ fn run() {
     g_nfd = 0 - 1;
     if (is_ok(nfd_r) == 1) {
         g_nfd = result_unwrap(nfd_r);
-        eventloop_add_notify(g_epfd, g_nfd);
-        klog("notify socket bound");
+        var notify_r = eventloop_add_notify(g_epfd, g_nfd);
+        if (is_err_result(notify_r) == 1) {
+            klog("notify epoll registration failed (continuing)");
+            sys_close(g_nfd);
+            g_nfd = 0 - 1;
+        } else {
+            klog("notify socket bound");
+        }
     } else {
         klog("notify socket failed (continuing)");
     }

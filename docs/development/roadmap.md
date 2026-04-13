@@ -12,7 +12,7 @@
 - [x] epoll event loop
 - [x] Boot flow: config → stages → waves → event loop → shutdown
 
-## v0.50.0 — Hardening + QEMU Boot (done)
+## v0.50.0 — Hardening + QEMU Boot (done, Rust era)
 
 - [x] P(-1) audit: 11 findings fixed (fd leaks, no panics, /proc mount order, etc.)
 - [x] 27 unit tests (reaper, eventloop, cgroup, config, signals, mount, privdrop)
@@ -24,48 +24,64 @@
 - [x] Health-driven restart (threshold exceeded → schedule restart)
 - [x] Watchdog-killed services scheduled for restart
 - [x] Emergency shell authentication (verify_emergency_auth)
-- [x] cargo vet initialized (Mozilla, ISRG, Google, Zcash imports)
-- [x] CI + release workflows (no `v` prefix on tags)
 - [x] QEMU boot: minimal mode — 2.98s total, 140ms init-to-event-loop
 - [x] QEMU boot: desktop mode with real daimon — 2.9s total, 120ms init-to-event-loop
-- [x] Crash recovery tested: exponential backoff (1s→2s→4s), restart limit enforced, GiveUp after 3/3
-- [x] Clean shutdown tested: SIGTERM → shutdown plan → stop services → sync → power off
-- [x] Wave-based parallel startup verified (postgres+redis parallel, then daimon+dependents)
-- [x] Reap ordering fix: reap_services BEFORE reap_zombies (prevents waitpid race)
-- [x] devtmpfs mount before console setup (QEMU initramfs has no device nodes)
-- [x] kmsg-based serial output for QEMU debugging
+- [x] Crash recovery tested: exponential backoff, restart limit, GiveUp
+- [x] Clean shutdown tested: SIGTERM → plan → stop → sync → poweroff
 
-## v0.60.0 — Security Enforcement
+## v0.9.0 — Cyrius Rewrite (done)
 
-- [ ] Apply seccomp filters via agnosys in pre_exec
-- [ ] Apply Landlock rules via agnosys in pre_exec
-- [ ] Audit logging integration (libro AuditLog in event loop)
-- [ ] Capability drop via pre_exec (integrate privdrop with CapabilityConfig)
-- [ ] NOTIFY_SOCKET registered in epoll (event-driven, not polled)
+- [x] Complete rewrite from Rust to Cyrius — 727 lines (was 1,649 Rust)
+- [x] All 7 original modules + main in Cyrius
+- [x] Result/Option error handling throughout (via tagged.cyr)
+- [x] String builder for path construction
+- [x] Data-driven mount table
+- [x] Callback library for functional patterns
+- [x] 33 integration tests
 
-## v0.70.0 — Production Hardening
+## v0.90.0 — Security + Argonaut Integration (done)
 
-- [ ] Edge boot test in QEMU (< 1s target)
-- [ ] Real hardware testing (RPi4, NUC)
-- [ ] Integration tests with real argonaut configs
+- [x] seccomp.cyr — BPF filter builder, 37 safe syscalls preset, agnostik bridge
+- [x] sandbox.cyr — Landlock filesystem sandbox, builder pattern, graceful fallback
+- [x] privdrop.cyr — capability dropping, no_new_privs, agnostik security_context bridge
+- [x] notify.cyr — sd_notify socket integrated with epoll event loop
+- [x] Full argonaut integration — boot stages, wave-based startup, health, watchdog, crash recovery, shutdown
+- [x] Audit logging via libro (SHA-256 hash-linked chain)
+- [x] agnosys 0.97.2, agnostik 0.97.1, argonaut 1.0.1 deps wired
+- [x] cyrius.toml manifest with 22 stdlib + 3 external deps
+- [x] 98 integration tests, 22 benchmarks
+- [x] Builds on cc3 3.8.0 (474KB, ~900ms, 1 warning)
+
+## v0.95.0 — Production Hardening (next)
+
+- [ ] P(-1) scaffold hardening audit (current session)
+- [ ] QEMU boot tests with Cyrius binary
 - [ ] Graceful degradation on mount failures
-- [ ] Control socket for agnoshi runtime commands
-- [ ] Structured log output to /var/log/kybernet.log
-- [ ] Boot time optimization (profile + reduce allocations)
+- [ ] Close all fds before exec (CLOEXEC audit)
+- [ ] Verify all error paths return, never fall through
+- [ ] Audit kmsg/klog for all boot failure paths
+- [ ] Integration tests with real argonaut configs
+- [ ] Binary size optimization (currently 474KB — mostly from transitive deps)
 
-## v1.0.0 Criteria
+## v1.0.0 — Release
 
-- [x] QEMU boot: minimal < 3s ✓ (2.98s)
-- [x] QEMU boot: desktop < 3s with ALL real AGNOS binaries ✓ (3.28s, 21MB initramfs)
-- [x] QEMU boot: edge mode ✓ (init 99ms, total 3.8s — daimon startup dominates)
-- [x] QEMU boot: pure AGNOS — zero external dependencies (no busybox) ✓
-- [x] Crash recovery ✓ (exponential backoff 1s→2s→4s, restart limit, GiveUp)
-- [x] Shutdown ordering ✓ (SIGTERM → plan → stop services → sync → poweroff)
-- [x] No panics under crash/shutdown ✓
-- [x] All unsafe blocks documented with SAFETY comments ✓
-- [x] synapse → ifran rename across argonaut + kybernet ✓
-- [x] agnosys ioctl musl fix (enables agnoshi static build) ✓
-- [x] Boot times recorded in bench history ✓
+- [ ] Service lifecycle fully exercised (wave startup, crash recovery, shutdown ordering)
+- [ ] Health check enforcement and watchdog timeout handling tested end-to-end
+- [ ] Config loading from JSON / SIGHUP reload
+- [ ] Edge boot (dm-verity, LUKS, PCR binding)
+- [ ] Emergency shell with authentication
 - [ ] Real hardware boot (RPi4, NUC)
-- [ ] Unit coverage 13.88% (expected — PID 1 code needs QEMU, not unit tests)
-- [ ] Edge boot < 1s from init (currently 99ms init + ~1s daimon — needs daimon hardening)
+- [ ] QEMU boot: minimal < 3s, desktop < 3s
+- [ ] Structured log output
+
+## Not Yet Ported from Rust
+
+These features existed in the Rust version and need reimplementation:
+
+- Service restart with exponential backoff (timerfd-based PendingRestart queue)
+- Tmpfile directive execution
+- Emergency shell with authentication
+- Edge boot (dm-verity, LUKS, PCR binding)
+- Configuration loading from JSON / SIGHUP reload
+
+Most depend on argonaut APIs that are now available via the 1.0.1 integration.

@@ -4,10 +4,11 @@ Contributions are welcome. All contributions must be licensed under GPL-3.0-only
 
 ## Development
 
-Follow the conventions in `CLAUDE.md`. Run the cleanliness check before submitting:
+Follow the conventions in `CLAUDE.md`. Build and test before submitting:
 
 ```sh
-make check
+cyrius build src/main.cyr build/kybernet
+cyrius test src/test.cyr
 ```
 
 ## Reporting Issues

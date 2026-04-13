@@ -47,7 +47,7 @@ fn signalfd_raw(sfd_result) {
 # signalfd_siginfo struct is 128 bytes, signal number at offset 0 (u32)
 # Returns: Option(signal_number) — Some(signum) or None
 fn read_signal(sfd) {
-    var buf[16];
+    var buf[128];
     var n = sys_read(sfd, &buf, 128);
     if (n >= 4) {
         return Some(load32(&buf));

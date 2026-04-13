@@ -241,7 +241,7 @@ fn test_agnostik_security() {
 
     # sandbox_config_new
     var sbox = sandbox_config_new();
-    assert_eq(sandbox_net_access(sbox), NET_NONE, "sandbox net default none");
+    assert_eq(sandbox_net_access(sbox), NET_LOCALHOST_ONLY, "sandbox net default localhost_only");
     assert_eq(sandbox_isolate_net(sbox), 1, "sandbox isolate_net default 1");
 
     # cgroup_limits_new
@@ -334,11 +334,12 @@ fn test_agnostik_agent() {
     var got_sbox = aconf_sandbox(ac);
     assert_eq(sandbox_net_access(got_sbox), NET_LOCALHOST_ONLY, "aconf sandbox net");
 
-    # health_check_new
-    var hc = health_check_new();
-    assert_eq(hc_interval(hc), 30, "hc 30s interval");
-    assert_eq(hc_timeout(hc), 5, "hc 5s timeout");
-    assert_eq(hc_retries(hc), 3, "hc 3 retries");
+    # health_check_new (argonaut 6-param version overrides agnostik default)
+    # argonaut layout: {check_type, target, port, interval_ms, timeout_ms, retries}
+    var hc = health_check_new(HC_TCP_CONNECT, 0, 8080, 30, 5, 3);
+    assert_eq(load64(hc + 24), 30, "hc 30s interval");
+    assert_eq(load64(hc + 32), 5, "hc 5s timeout");
+    assert_eq(load64(hc + 40), 3, "hc 3 retries");
 
     return 0;
 }

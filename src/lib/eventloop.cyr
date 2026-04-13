@@ -94,8 +94,9 @@ fn eventloop_setup(signal_fd, health_sec, watchdog_sec) {
     if (is_err_result(epfd_r) == 1) { return epfd_r; }
     var epfd = result_unwrap(epfd_r);
 
-    # Register signal fd
-    epoll_add_read(epfd, signal_fd, TOKEN_SIGNAL);
+    # Register signal fd — critical, must succeed
+    var sig_r = epoll_add_read(epfd, signal_fd, TOKEN_SIGNAL);
+    if (is_err_result(sig_r) == 1) { return sig_r; }
 
     # Health check timer
     if (health_sec > 0) {
