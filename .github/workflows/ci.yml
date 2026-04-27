@@ -11,22 +11,16 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  # Override with CYRIUS_VERSION env to pin a specific version.
-  # Default: reads from .cyrius-toolchain file.
-  CYRIUS_TOOLCHAIN: ".cyrius-toolchain"
-
 jobs:
-  # ── Build ──
   build:
-    name: Build
+    name: Build & Test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Cyrius toolchain
         run: |
-          CYRIUS_VERSION="${CYRIUS_VERSION:-$(cat .cyrius-toolchain | tr -d '[:space:]')}"
+          CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep -oP '(?<=^cyrius = ")[^"]+' cyrius.cyml)}"
           echo "Installing Cyrius $CYRIUS_VERSION"
           curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
           tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
@@ -38,73 +32,86 @@ jobs:
           echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
           echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
 
-      - name: Verify toolchain
-        run: |
-          echo "cc3: $(cc3 --version 2>&1 | head -1)"
-          CYRIUS_BIN="$(which cyrius)"
-          echo "cyrius: $(file $CYRIUS_BIN)"
-          # If cyrius is a shell script (stale release), rebuild from source
-          if file "$CYRIUS_BIN" | grep -q "shell script\|text"; then
-            echo "WARN: cyrius is shell script — rebuilding from source"
-            curl -sLO "https://raw.githubusercontent.com/MacCracken/cyrius/main/programs/cyrius.cyr"
-            cat cyrius.cyr | cc3 > "$HOME/.cyrius/bin/cyrius"
-            chmod +x "$HOME/.cyrius/bin/cyrius"
-            rm cyrius.cyr
-            echo "Rebuilt: $(file $HOME/.cyrius/bin/cyrius)"
-          fi
-          cyrius version
-
       - name: Resolve dependencies
         run: cyrius deps
 
-      - name: Build kybernet
+      - name: Verify dep hashes
+        # cyrius.lock pins agnosys/agnostik/libro/argonaut hashes; CI fails
+        # if a resolved file's sha256 doesn't match the locked entry.
+        # Skip on the first push that introduces a new dep before
+        # cyrius.lock is generated and committed.
+        run: |
+          if [ -f cyrius.lock ]; then
+            cyrius deps --verify
+          else
+            echo "::warning::cyrius.lock not committed — skipping hash verification"
+          fi
+
+      - name: Format check
+        # cyrius fmt --check emits the formatted source to stdout;
+        # diff against the file in-place to catch drift.
+        run: |
+          fail=0
+          for f in src/main.cyr src/test.cyr src/bench.cyr src/lib/*.cyr; do
+            [ -f "$f" ] || continue
+            if ! diff -q <(cyrius fmt "$f" --check 2>/dev/null) "$f" > /dev/null; then
+              echo "needs fmt: $f"
+              fail=1
+            fi
+          done
+          [ $fail -eq 0 ] || { echo "fmt: drift detected"; exit 1; }
+
+      - name: Lint (advisory)
+        # Advisory-only; tighten to fail-on-warning once the
+        # standing dead-code warnings are addressed.
+        continue-on-error: true
+        run: |
+          for f in src/main.cyr src/test.cyr src/bench.cyr src/lib/*.cyr; do
+            [ -f "$f" ] || continue
+            cyrius lint "$f"
+          done
+
+      - name: Vet
+        run: cyrius vet src/main.cyr
+
+      - name: Build (DCE)
         run: |
           mkdir -p build
-          cyrius build -v src/main.cyr build/kybernet 2>&1
+          CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet
           echo "kybernet: $(wc -c < build/kybernet) bytes"
 
-      - name: Upload build artifacts
+      - name: Verify ELF
+        run: xxd -l 4 build/kybernet | grep -q "7f45 4c46"
+
+      - name: Cross-build aarch64 (best-effort)
+        # Only when toolchain bundle includes cc5_aarch64.
+        run: |
+          if [ ! -x "$HOME/.cyrius/bin/cc5_aarch64" ]; then
+            echo "::warning::cc5_aarch64 not shipped with this Cyrius — skipping"
+            exit 0
+          fi
+          CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr build/kybernet-aarch64
+          file build/kybernet-aarch64 | grep -q "aarch64" || {
+            echo "ERROR: kybernet-aarch64 is not aarch64 ELF"; exit 1; }
+          echo "kybernet-aarch64: $(wc -c < build/kybernet-aarch64) bytes"
+
+      - name: Test (140 assertions)
+        run: |
+          cyrius test src/test.cyr 2>&1 | tee /tmp/test_output
+          tail -1 /tmp/test_output | grep -E "^[0-9]+ passed," | grep -q "0 failed"
+
+      - name: Bench
+        # Non-fatal — bench numbers vary by runner.
+        continue-on-error: true
+        run: cyrius bench src/bench.cyr
+
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: build-x86_64
           path: build/kybernet
           retention-days: 5
 
-  # ── Check & Format ──
-  check:
-    name: Check & Format
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Cyrius toolchain
-        run: |
-          CYRIUS_VERSION="${CYRIUS_VERSION:-$(cat .cyrius-toolchain | tr -d '[:space:]')}"
-          echo "Installing Cyrius $CYRIUS_VERSION"
-          curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
-          tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
-          CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
-          mkdir -p "$HOME/.cyrius/bin" "$HOME/.cyrius/lib"
-          cp "$CYRIUS_DIR/bin/"* "$HOME/.cyrius/bin/" 2>/dev/null || true
-          cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/lib/" 2>/dev/null || true
-          chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
-          echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
-          echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
-
-      - name: Format check
-        run: |
-          FAIL=0
-          for f in src/main.cyr src/lib/*.cyr; do
-            [ -f "$f" ] || continue
-            cyrfmt "$f" > /tmp/fmt_check
-            if ! diff -q "$f" /tmp/fmt_check >/dev/null 2>&1; then
-              echo "  NEEDS FORMAT: $f"
-              FAIL=1
-            fi
-          done
-          test $FAIL -eq 0 && echo "PASS: all files formatted"
-
-  # ── Security ──
   security:
     name: Security Scan
     runs-on: ubuntu-latest
@@ -112,126 +119,71 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Scan for dangerous patterns
+        # kybernet is PID 1 — fork/execve via argonaut is intentional, but
+        # raw exit/execve syscalls in lib modules are not. Scan code lines
+        # only (skip comments via awk, not "grep -v '# '" which would also
+        # eat lines with inline comments).
         run: |
-          WARN=0
-          if grep -rn 'syscall(60' src/main.cyr | grep -v '# ' | grep -v 'fn main' | grep -v 'var r = main'; then
-            echo "WARN: direct exit syscall outside main()"
-            WARN=1
-          fi
-          if grep -rn 'syscall(59' src/lib/ 2>/dev/null | grep -v '# '; then
-            echo "WARN: raw execve in lib module"
-            WARN=1
-          fi
-          OPENS=$(grep -rn 'sys_open' src/ | grep -v '# ' | wc -l)
-          CLOSES=$(grep -rn 'sys_close' src/ | grep -v '# ' | wc -l)
-          echo "sys_open calls: $OPENS, sys_close calls: $CLOSES"
-          echo "security scan complete (warnings: $WARN)"
+          FAIL=0
+          scan() {
+            local label="$1"; shift
+            local pat="$1"; shift
+            local hits
+            hits=$(grep -rn "$pat" src/ 2>/dev/null | awk -F: '
+              { line=$3; for(i=4;i<=NF;i++) line=line":"$i;
+                sub(/^[[:space:]]+/,"",line);
+                if (substr(line,1,1) != "#") print $1":"$2":"line }')
+            if [ -n "$hits" ]; then
+              echo "FAIL: $label"
+              echo "$hits"
+              FAIL=1
+            fi
+          }
+          # Raw execve outside lib/process_mgmt territory (handled by argonaut).
+          hits=$(grep -rn 'syscall( *59' src/lib/ 2>/dev/null || true)
+          [ -n "$hits" ] && { echo "FAIL: raw execve in lib module"; echo "$hits"; FAIL=1; }
+          # Direct exit(60) outside main entrypoint.
+          hits=$(grep -rn 'syscall( *60' src/lib/ 2>/dev/null || true)
+          [ -n "$hits" ] && { echo "FAIL: direct exit syscall in lib module"; echo "$hits"; FAIL=1; }
+          scan "raw system()" '\bsystem\s*\('
+          # Unbounded stack buffers (>= 64KB → require heap review).
+          awk -F: '
+            /var [A-Za-z_][A-Za-z0-9_]*\[[0-9]+\]/ {
+              match($0, /\[[0-9]+\]/); s=substr($0,RSTART+1,RLENGTH-2); n=s+0;
+              if (n >= 65536) print FILENAME":"NR": large stack buffer ("n" bytes): "$0
+            }' src/*.cyr src/lib/*.cyr 2>/dev/null | tee /tmp/bigbuf.txt
+          [ -s /tmp/bigbuf.txt ] && FAIL=1
+          # Informational counts — fd hygiene tracking.
+          OPENS=$(grep -rn 'sys_open' src/ 2>/dev/null | awk -F: '
+            { line=$3; sub(/^[[:space:]]+/,"",line);
+              if (substr(line,1,1) != "#") print }' | wc -l)
+          CLOSES=$(grep -rn 'sys_close' src/ 2>/dev/null | awk -F: '
+            { line=$3; sub(/^[[:space:]]+/,"",line);
+              if (substr(line,1,1) != "#") print }' | wc -l)
+          echo "sys_open: $OPENS, sys_close: $CLOSES (informational)"
+          echo "security scan complete (fail: $FAIL)"
+          exit $FAIL
 
-  # ── Tests ──
-  test:
-    name: Test (140 assertions)
-    needs: [build]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Cyrius toolchain
-        run: |
-          CYRIUS_VERSION="${CYRIUS_VERSION:-$(cat .cyrius-toolchain | tr -d '[:space:]')}"
-          echo "Installing Cyrius $CYRIUS_VERSION"
-          curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
-          tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
-          CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
-          mkdir -p "$HOME/.cyrius/bin" "$HOME/.cyrius/lib"
-          cp "$CYRIUS_DIR/bin/"* "$HOME/.cyrius/bin/" 2>/dev/null || true
-          cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/lib/" 2>/dev/null || true
-          chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
-          echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
-          echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
-
-      - name: Ensure compiled cyrius binary
-        run: |
-          CYRIUS_BIN="$(which cyrius)"
-          if file "$CYRIUS_BIN" | grep -q "shell script\|text"; then
-            curl -sLO "https://raw.githubusercontent.com/MacCracken/cyrius/main/programs/cyrius.cyr"
-            cat cyrius.cyr | cc3 > "$HOME/.cyrius/bin/cyrius" && chmod +x "$HOME/.cyrius/bin/cyrius"
-            rm cyrius.cyr
-          fi
-
-      - name: Resolve dependencies
-        run: cyrius deps
-
-      - name: Run test suite
-        run: |
-          cyrius test src/test.cyr 2>&1 | tee /tmp/test_output
-          tail -1 /tmp/test_output | grep "0 failed"
-
-  # ── Benchmarks ──
-  benchmarks:
-    name: Benchmarks (46)
-    needs: [build]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Cyrius toolchain
-        run: |
-          CYRIUS_VERSION="${CYRIUS_VERSION:-$(cat .cyrius-toolchain | tr -d '[:space:]')}"
-          echo "Installing Cyrius $CYRIUS_VERSION"
-          curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
-          tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
-          CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
-          mkdir -p "$HOME/.cyrius/bin" "$HOME/.cyrius/lib"
-          cp "$CYRIUS_DIR/bin/"* "$HOME/.cyrius/bin/" 2>/dev/null || true
-          cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/lib/" 2>/dev/null || true
-          chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
-          echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
-          echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
-
-      - name: Ensure compiled cyrius binary
-        run: |
-          CYRIUS_BIN="$(which cyrius)"
-          if file "$CYRIUS_BIN" | grep -q "shell script\|text"; then
-            curl -sLO "https://raw.githubusercontent.com/MacCracken/cyrius/main/programs/cyrius.cyr"
-            cat cyrius.cyr | cc3 > "$HOME/.cyrius/bin/cyrius" && chmod +x "$HOME/.cyrius/bin/cyrius"
-            rm cyrius.cyr
-          fi
-
-      - name: Resolve dependencies
-        run: cyrius deps
-
-      - name: Run benchmarks
-        run: cyrius bench src/bench.cyr
-        continue-on-error: true
-
-  # ── Documentation ──
   docs:
     name: Documentation
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Check required docs exist
+      - name: Check required files
         run: |
           MISSING=0
-          for doc in README.md CHANGELOG.md VERSION CONTRIBUTING.md SECURITY.md LICENSE CLAUDE.md; do
-            if [ -f "$doc" ]; then
-              echo "  OK: $doc"
-            else
-              echo "  MISSING: $doc"
-              MISSING=1
-            fi
+          for f in README.md CHANGELOG.md VERSION CONTRIBUTING.md SECURITY.md \
+                   LICENSE CLAUDE.md cyrius.cyml; do
+            if [ -f "$f" ]; then echo "  OK: $f"
+            else echo "  MISSING: $f"; MISSING=1; fi
           done
           exit $MISSING
 
       - name: Verify version consistency
+        # cyrius.cyml pulls package.version from VERSION via ${file:VERSION};
+        # just check VERSION appears in CHANGELOG.
         run: |
           VERSION=$(cat VERSION | tr -d '[:space:]')
-          TOML_VERSION=$(grep '^version' cyrius.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-          echo "VERSION file:  $VERSION"
-          echo "cyrius.toml:   $TOML_VERSION"
-          if [ "$VERSION" != "$TOML_VERSION" ]; then
-            echo "FAIL: VERSION != cyrius.toml"
-            exit 1
-          fi
-          echo "Version consistent: $VERSION"
+          echo "VERSION file: $VERSION"
+          grep -q "$VERSION" CHANGELOG.md || { echo "FAIL: version not in CHANGELOG.md"; exit 1; }
+          echo "Version consistent (cyrius.cyml pulls VERSION via \${file:VERSION})"

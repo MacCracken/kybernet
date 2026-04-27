@@ -31,11 +31,12 @@
 
 ## Build
 
-Requires Cyrius 3.8.0+ (`cyriusly install 3.8.0`).
+Requires Cyrius 5.7.12 (`cyriusly install 5.7.12 && cyriusly use 5.7.12`).
 
 ```sh
-cyrius build src/main.cyr build/kybernet   # Build (resolves deps from cyrius.toml)
-cyrius test src/test.cyr                   # Run 98 tests
+cyrius deps                                # Resolve deps from cyrius.cyml into lib/
+cyrius build src/main.cyr build/kybernet   # Build
+cyrius test src/test.cyr                   # Run 140 tests
 cyrius bench src/bench.cyr                 # Run benchmarks
 ```
 
@@ -66,25 +67,27 @@ cyrius bench src/bench.cyr                 # Run benchmarks
 - **Data-driven mount table** — not hardcoded per-mount calls
 - **sd_notify compatible** — READY, STOPPING, WATCHDOG, STATUS messages via epoll
 - **String builder** for path construction and logging
-- **98 tests**, 22 benchmarks
+- **140 tests**, 46 benchmarks
 
 ## Dependencies
 
-Resolved via `cyrius.toml`:
+Resolved via `cyrius.cyml` (locked in `cyrius.lock`):
 
 | Dep | Version | What |
 |-----|---------|------|
-| agnosys | 0.97.2 | Linux syscall bindings |
-| agnostik | 0.97.1 | Shared AGNOS types (security, agent, error) |
-| argonaut | 1.0.1 | Service lifecycle, boot stages, health, audit |
-| libro | (via argonaut) | Cryptographic audit chain |
+| agnosys | 1.0.2 | Linux syscall bindings |
+| agnostik | 1.0.1 | Shared AGNOS types (security, agent, error) |
+| libro | 2.0.5 | Cryptographic audit chain |
+| argonaut | 1.5.0 | Service lifecycle, boot stages, health, audit |
 
-Plus 22 stdlib modules from `~/.cyrius/lib/`.
+Plus 21 stdlib modules from `~/.cyrius/lib/`. Selective `src/<module>.cyr`
+imports (not `dist/` bundles) keep the combined unit under the 64-struct
+compiler ceiling.
 
 ## Requirements
 
 - Linux x86_64
-- Cyrius 3.8.0+ (`~/.cyrius/bin/cc3`)
+- Cyrius 5.7.12 (`~/.cyrius/bin/cyrius`)
 - No C, no Rust, no libc
 
 ## Legacy
