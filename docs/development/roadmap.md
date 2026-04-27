@@ -25,6 +25,12 @@
 - [ ] QEMU boot: minimal < 3s, desktop < 3s
 - [ ] QEMU boot time profiling and optimization
 
+### Cleanup
+
+- [ ] Remove stale shell scripts: `scripts/build.sh`, `scripts/test.sh`, `scripts/bench.sh`, `scripts/bench-compare.sh` (all reference old `cc2` and `../cyrius/build/cc2` — superseded by `cyrius build/test/bench`)
+- [ ] Update `scripts/version.sh` — still references `Cargo.toml`/`Cargo.lock` (Rust era)
+- [ ] Fix `src/bench.cyr` comment: "cyrb.toml" → "cyrius.toml"
+
 ## v1.1.0 — Optimization
 
 - [ ] Cgroup path precomputation — cgroup_file() at 911ns per call, precompute common paths per service
