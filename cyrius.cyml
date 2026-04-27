@@ -46,7 +46,7 @@ modules = ["lib/syscalls_linux.cyr"]
 [deps.agnostik]
 git = "https://github.com/MacCracken/agnostik.git"
 path = "../agnostik"
-tag = "1.0.1"
+tag = "1.0.0"
 modules = [
     "src/error.cyr",
     "src/types.cyr",

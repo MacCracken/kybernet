@@ -16,7 +16,7 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Dependencies
 - agnosys 0.97.2 → **1.0.2** (still imports `lib/syscalls_linux.cyr` only — the dist bundle would push past the 64-struct compiler limit)
-- agnostik 0.97.1 → **1.0.1** (selective: src/error, types, security, agent)
+- agnostik 0.97.1 → **1.0.0** (selective: src/error, types, security, agent)
 - libro is now declared directly (was previously transitive via argonaut): pinned to **2.0.5** with src/error, hasher, entry, verify, query, retention, chain, export
 - argonaut 1.2.0 → **1.5.0** (src/types, audit, services, health, process_mgmt, boot, init)
 

@@ -76,7 +76,7 @@ Resolved via `cyrius.cyml` (locked in `cyrius.lock`):
 | Dep | Version | What |
 |-----|---------|------|
 | agnosys | 1.0.2 | Linux syscall bindings |
-| agnostik | 1.0.1 | Shared AGNOS types (security, agent, error) |
+| agnostik | 1.0.0 | Shared AGNOS types (security, agent, error) |
 | libro | 2.0.5 | Cryptographic audit chain |
 | argonaut | 1.5.0 | Service lifecycle, boot stages, health, audit |
 

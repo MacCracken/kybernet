@@ -63,7 +63,7 @@ Dependencies are resolved by `cyrius deps` from `cyrius.cyml` and locked in `cyr
 
 **External** (local paths, pinned tags) — selective module imports to stay under the 64-struct compiler limit; do **not** switch to dist bundles:
 - agnosys 1.0.2 — Linux syscall bindings (lib/syscalls_linux.cyr)
-- agnostik 1.0.1 — Shared AGNOS types (src/error.cyr, src/types.cyr, src/security.cyr, src/agent.cyr)
+- agnostik 1.0.0 — Shared AGNOS types (src/error.cyr, src/types.cyr, src/security.cyr, src/agent.cyr)
 - libro 2.0.5 — Audit chain (src/error.cyr, hasher, entry, verify, query, retention, chain, export)
 - argonaut 1.5.0 — Service lifecycle, boot stages, health, audit (src/types.cyr, audit, services, health, process_mgmt, boot, init)
 
