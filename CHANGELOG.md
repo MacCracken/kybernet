@@ -7,6 +7,32 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.0.2] — 2026-04-27
+
+### Changed
+- **Cyrius language**: bumped requirement from 4.5.0 → **5.7.12** for consistency with the rest of the AGNOS base OS (daimon and agnostik already pin 5.7.12).
+- **Manifest format**: renamed `cyrius.toml` → `cyrius.cyml` to match the current `cyrius deps` resolver. Package version now interpolates from `VERSION` via `${file:VERSION}`.
+- **Stdlib**: dropped `sakshi_full` from `[deps]` — it is no longer shipped in the 5.7.x stdlib (functionality folded into `sakshi`).
+
+### Dependencies
+- agnosys 0.97.2 → **1.0.2** (still imports `lib/syscalls_linux.cyr` only — the dist bundle would push past the 64-struct compiler limit)
+- agnostik 0.97.1 → **1.0.1** (selective: src/error, types, security, agent)
+- libro is now declared directly (was previously transitive via argonaut): pinned to **2.0.5** with src/error, hasher, entry, verify, query, retention, chain, export
+- argonaut 1.2.0 → **1.5.0** (src/types, audit, services, health, process_mgmt, boot, init)
+
+### Notes
+- Build green on cyrius 5.7.12; **140 tests pass**.
+- Stayed on selective `src/<module>.cyr` imports for the heavy deps rather than switching to `dist/<dep>.cyr` bundles — full bundles overflow the compiler's 64-struct ceiling for kybernet's combined unit. daimon/argonaut can use dist bundles because their dep graphs are lighter.
+
+---
+
+## [1.0.1] — 2026-04-12
+
+### Fixed
+- Release pipeline / CI version handling (versioning fixups, no source-level changes from 1.0.0).
+
+---
+
 ## [1.0.0] — 2026-04-12
 
 ### Added
