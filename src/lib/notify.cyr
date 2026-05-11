@@ -5,12 +5,26 @@
 # registers with epoll as TOKEN_NOTIFY, and parses sd_notify messages.
 # Event-driven (not polled) — required for v0.60.0.
 
-# Socket syscall numbers (not in base syscalls.cyr)
+# Socket syscall numbers (not in base syscalls.cyr at cyrius 5.10.44).
+# Per-arch dispatch via `#ifdef CYRIUS_ARCH_*` — the pre-1.1.5
+# single-block form hardcoded x86_64 numbers and silently called the
+# wrong syscalls on aarch64 (SYS_SOCKET=41 there is SYS_PIPE2, etc).
+# Filed upstream as a stdlib-wrapper request — fold these out when
+# `sys_socket`/`sys_bind`/`sys_recvfrom` land in the stdlib.
+#ifdef CYRIUS_ARCH_X86
 enum SockSysNr {
     SYS_SOCKET = 41;
     SYS_BIND = 49;
     SYS_RECVFROM = 45;
 }
+#endif
+#ifdef CYRIUS_ARCH_AARCH64
+enum SockSysNr {
+    SYS_SOCKET = 198;
+    SYS_BIND = 200;
+    SYS_RECVFROM = 207;
+}
+#endif
 
 enum SockConst {
     AF_UNIX = 1;

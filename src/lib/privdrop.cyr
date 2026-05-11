@@ -53,9 +53,13 @@ fn is_root() {
 # Capability drop via prctl
 # ================================================================
 
-# prctl constants
+# prctl constants. SYS_PRCTL is intentionally NOT redefined here —
+# the stdlib's per-arch syscalls module exports it correctly
+# (x86_64=157, aarch64=167). Pre-1.1.5 we shadowed it with the
+# x86_64 number, which silently broke capability dropping on aarch64
+# (the call hit SYS_SETPRIORITY instead). PR_* and CAP_LAST_CAP are
+# kernel constants — arch-independent.
 enum PrctlConst {
-    SYS_PRCTL = 157;
     PR_CAPBSET_READ = 23;
     PR_CAPBSET_DROP = 24;
     PR_SET_NO_NEW_PRIVS = 38;

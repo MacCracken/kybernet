@@ -221,7 +221,11 @@ fn execute_tmpfiles() {
             if (is_err(r) == 0) { created = created + 1; }
         } elif (etype == TMP_SYMLINK) {
             var target = load64(entry + 16);
-            syscall(88, target, path);
+            # sys_symlink() dispatches to symlinkat(AT_FDCWD,...) on
+            # aarch64 (SYS_SYMLINK 88 is x86_64-only — aarch64 numbers
+            # SYS_PIPE2 there). Same lesson as the 1.0.0 sandbox.cyr
+            # SYS_OPEN fix.
+            sys_symlink(target, path);
             created = created + 1;
         } elif (etype == TMP_TOUCH) {
             var mode = load64(entry + 16);
@@ -260,15 +264,17 @@ fn drop_to_emergency() {
     # Fork and exec the shell
     var pid = sys_fork();
     if (pid == 0) {
-        # Child — exec the emergency shell
+        # Child — exec the emergency shell. The raw syscall(59/60,...)
+        # this replaces was x86_64-only; sys_execve / sys_exit dispatch
+        # per-arch (SYS_EXECVE 59→221, SYS_EXIT 60→93 on aarch64).
         var argv = alloc(16);
         store64(argv, str_data(shell_path));
         store64(argv + 8, 0);
-        syscall(59, str_data(shell_path), argv, 0);
+        sys_execve(str_data(shell_path), argv, 0);
         # If exec fails, try /bin/sh
         store64(argv, "/bin/sh");
-        syscall(59, "/bin/sh", argv, 0);
-        syscall(60, 1);
+        sys_execve("/bin/sh", argv, 0);
+        sys_exit(1);
     } elif (pid > 0) {
         # Parent — wait for shell to exit
         klog("emergency shell started");
@@ -410,23 +416,29 @@ fn handle_sigchld() {
         var exit_code = load64(entry + 8);
         var action = load64(entry + 16);
 
-        klog2("service exited: ", name);
-        slog("warn", name);
+        # argonaut returns service names as Str (boxed); kybernet's
+        # logging path expects cstr. Same fix as the 1.1.4 boot-stage
+        # `desc` patch — that one was point-only, this pass closes the
+        # rest of the surface (handle_sigchld, start_services, health,
+        # watchdog).
+        var name_cs = str_data(name);
+        klog2("service exited: ", name_cs);
+        slog("warn", name_cs);
 
         if (action != 0) {
             var action_type = load64(action);
             if (action_type == CRASH_RESTART) {
                 var delay = load64(action + 8);
-                klog2("  restarting (backoff): ", name);
+                klog2("  restarting (backoff): ", name_cs);
                 init_restart_service(g_init, name, delay);
             } elif (action_type == CRASH_GIVE_UP) {
                 var reason = load64(action + 16);
-                klog2("  giving up on: ", name);
+                klog2("  giving up on: ", name_cs);
                 if (reason != 0) {
                     klog2("  reason: ", str_data(reason));
                 }
             } elif (action_type == CRASH_IGNORE) {
-                klog2("  ignoring exit: ", name);
+                klog2("  ignoring exit: ", name_cs);
             }
         }
     }
@@ -525,15 +537,20 @@ fn start_services() {
 
         for (var si = 0; si < wlen; si = si + 1) {
             var name = vec_get(wave, si);
-            klog2("  starting: ", name);
+            # argonaut's service-name vec is Str; cgroup path builders
+            # and klog2 both want cstr. str_data() once, reuse the
+            # cstr ptr — cgroup_path's cache also keys on it so we get
+            # stable cache hits within the burst.
+            var name_cs = str_data(name);
+            klog2("  starting: ", name_cs);
 
             var pid = init_start_service(g_init, name);
             if (pid > 0) {
-                klog2("  started: ", name);
-                create_service_cgroup(name);
-                move_to_cgroup(name, pid);
+                klog2("  started: ", name_cs);
+                create_service_cgroup(name_cs);
+                move_to_cgroup(name_cs, pid);
             } else {
-                klog2("  FAILED to start: ", name);
+                klog2("  FAILED to start: ", name_cs);
             }
         }
     }
@@ -555,8 +572,9 @@ fn handle_health_tick() {
         var passed = load64(result + 16);
         if (passed == 0) {
             var svc_name = load64(result);
-            klog2("health check failed: ", svc_name);
-            slog("error", svc_name);
+            var svc_cs = str_data(svc_name);
+            klog2("health check failed: ", svc_cs);
+            slog("error", svc_cs);
         }
     }
     return 0;
@@ -569,8 +587,9 @@ fn handle_watchdog_tick() {
     var klen = vec_len(killed);
     for (var ki = 0; ki < klen; ki = ki + 1) {
         var name = vec_get(killed, ki);
-        klog2("watchdog killed: ", name);
-        slog("error", name);
+        var name_cs = str_data(name);
+        klog2("watchdog killed: ", name_cs);
+        slog("error", name_cs);
     }
     return 0;
 }
@@ -738,7 +757,15 @@ fn kybernet_run() {
                 case 2: handle_health_tick();
                 case 3: handle_watchdog_tick();
                 case 5: handle_notify_msg();
-                default: return 0;
+                default: {
+                    # Unknown epoll event token — log and continue.
+                    # Previously returned 0 here, which fell through to
+                    # main → sys_exit(0) and panicked the kernel
+                    # (PID 1 must NEVER return cleanly). Same class as
+                    # 0.95.0's PID-1-exit-path fix; this case was
+                    # missed at the time.
+                    klog("WARNING: unknown epoll token — ignoring");
+                }
             }
         }
     }
@@ -759,4 +786,4 @@ fn main() {
 }
 
 var r = main();
-syscall(60, r);
+sys_exit(r);

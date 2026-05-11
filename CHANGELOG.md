@@ -7,6 +7,52 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.1.5] — 2026-05-11
+
+**P(-1) audit pass.** Per-roadmap pre-1.2.0 review of `src/main.cyr` + every `src/lib/*.cyr`. Full report at [`docs/audit/2026-05-11-audit.md`](docs/audit/2026-05-11-audit.md). Summary: **7 CRITICAL / 3 HIGH / 1 MEDIUM / 2 LOW** — 12 closed in this cut, 1 LOW deferred with documented mitigation.
+
+The headline finding was a class — **raw `syscall(N, ...)` calls with x86_64-specific N**. These cross-build fine on aarch64 (cc5_aarch64 doesn't validate syscall numbers per arch) but route to completely different syscalls at runtime. The harness test runs only on x86_64 KVM (sakshi invariant-TSC requirement, transitive via libro/patra), so aarch64 production deployments would have been the first to surface the breakage. 7 sites across `src/main.cyr` + `src/lib/privdrop.cyr` + `src/lib/notify.cyr` were affected.
+
+The remaining findings are pattern-recurrences of 0.95.0 audit lessons: undersized stack/BSS buffers (`status_buf[1]`, `_mount_skipped[16]`) and a missed PID-1 exit path (`default: return 0` in the event loop on unknown epoll tokens — kernel panics when reached). The MEDIUM finding is the Str↔cstr type confusion class that 1.1.4 caught point-only — this pass closes the rest of the surface.
+
+### Security
+- **CRITICAL × 7 — raw syscall numbers vs aarch64**:
+  - `src/main.cyr:224` `syscall(88, target, path)` (TMP_SYMLINK) → `sys_symlink(target, path)`. SYS_SYMLINK is 88 on x86_64, not on aarch64 (uses SYMLINKAT=36).
+  - `src/main.cyr:267, 270` `syscall(59, ...)` (emergency shell `execve`) → `sys_execve(...)`. SYS_EXECVE is 59 on x86_64, 221 on aarch64.
+  - `src/main.cyr:271` `syscall(60, 1)` (emergency shell child `exit`) + `src/main.cyr:762` `syscall(60, r)` (kybernet final exit) → `sys_exit(...)`. SYS_EXIT is 60 on x86_64, 93 on aarch64. The final-exit case meant **kybernet on aarch64 would never actually exit** — `syscall(60, r)` would invoke an unallocated syscall, return EINVAL, and the program would fall off the end of the runtime epilogue.
+  - `src/lib/privdrop.cyr:58` local enum `SYS_PRCTL = 157` shadowed the stdlib's per-arch definition (157 on x86_64, **167 on aarch64**). On aarch64 every `drop_cap` / `set_no_new_privs` call hit `setpriority`+1 instead of `prctl` → silent capability-drop failure. Local enum entry removed; stdlib's per-arch value now wins.
+  - `src/lib/notify.cyr:10-12` local enum `SYS_SOCKET=41, SYS_BIND=49, SYS_RECVFROM=45` (x86_64) — sd_notify socket creation/bind/recv on aarch64 routed to `pipe2` / `setsockopt` / `getsockopt`. Wrapped in `#ifdef CYRIUS_ARCH_*` per-arch enum (aarch64: 198/200/207). Upstream issue filed for stdlib wrappers (`cyrius/docs/development/issues/2026-05-11-kybernet-socket-syscall-wrappers.md`); local fix folds out when stdlib catches up.
+- **HIGH-1 — `status_buf[1]` stack overflow** in `reap_zombies` (`src/lib/reaper.cyr:14`). `sys_waitpid` writes a 4-byte Linux `int wstatus` into a 1-byte stack array — 3-byte stack overflow that worked in practice only because cyrius's 8-byte stack alignment puts the spill in padding. Same class as 0.95.0's `signalfd_siginfo buf[16]→[128]` fix. Fixed: `var status_buf[8]`.
+- **HIGH-2 — `_mount_skipped[16]` BSS overflow** in `mount.cyr:72`. 16-byte global array (capacity 2 i64 ptrs); loop bound-checked at `< 16` and stored up to 16 ptrs at offsets `0..120` for a 128-byte total span — 112-byte BSS overflow. Same class as 0.95.0's `_mount_table[8]→[240]` fix. Fixed: `var _mount_skipped[128]` (16 slots × 8 bytes).
+- **HIGH-3 — PID-1 exit path regression** in event loop default case (`main.cyr:741`). On any unexpected epoll event token, `default: return 0` returned from `kybernet_run` → `main` → `sys_exit(0)` while PID 1 — kernel panic ("Attempted to kill init!"). Same class as 0.95.0's "PID 1 exit paths now call do_shutdown() instead of returning" — the case was missed at the time. Fixed: log a warning via `klog` and continue the loop.
+
+### Fixed
+- **MEDIUM-1 — `Str` vs `cstr` type confusion** across the logging surface. 12+ `klog2 / slog / cgroup_*` call sites passed argonaut-returned `Str` (boxed) values where `cstr` was expected — the receiver read the Str header bytes as ASCII chars (garbage output) or as path-construction input (cgroup paths derived from header layout). Latent because the default config has no services so none of the sites fire. **1.1.4 fixed one site** (`run_boot_stages` `klog2("boot: ", desc)`) point-only; this pass closes `handle_sigchld` (4 sites), `start_services` (3 sites including `create_service_cgroup(name)` / `move_to_cgroup(name, pid)`), `handle_health_tick`, and `handle_watchdog_tick`. Each loop iteration calls `str_data()` once at the top and reuses the cstr ptr for all downstream operations — preserves the 1.1.3 cgroup cache LRU hit (which keys on cstr pointer identity).
+
+### Documented (not source-patched)
+- **LOW-1 — `_logbuf` no `plen` bounds check** in `_log_write` / `klog2`. If a caller passes a prefix longer than 254 bytes, `copylen = 254 - plen` underflows and `memcpy` blows out the 256-byte `_logbuf`. Every current caller passes a short literal (longest is 35 chars) so the bug isn't reachable. Inline comment block documents the `plen ≤ 254` precondition + the current-caller audit table; promote to MEDIUM the moment a non-literal prefix shows up. Defensive bounds-check deferred — would have diluted the audit-doc signal.
+- **LOW-2 — `_mount_table[288]` at exact capacity**. 6 entries × 48 bytes per entry = 288 bytes exactly. Adding a 7th mount entry without growing the array overflows. Inline comment documents the size↔count invariant + next-bump target (`[480]` for 10 entries). Same class as the 0.95.0 `[8]→[240]` fix. The `test_mount_required_flag` regression in `src/test.cyr` is the canary — it asserts the per-entry classification at offset +40, so a stride change without re-doing the test offsets fails immediately.
+
+### Standing rules added (per the audit-doc trailer)
+- No literal `syscall(N, ...)`. Use a stdlib wrapper or `#ifdef CYRIUS_ARCH_*`-gated enum.
+- `var X[N]` is N **bytes**, not N slots. Sites that hold N i64 ptrs need `[N * 8]`. Write the math inline at the declaration.
+- `Str` vs `cstr` — argonaut surface is mostly `Str`; kybernet logging + cgroup path helpers are cstr-only. `vec_get`-derived names need `str_data()` before being passed downstream.
+- PID-1 exit paths must call `do_shutdown()` or log-and-continue. Never `return 0` from `kybernet_run` directly.
+- Mount table size and stride comments must be updated together; `test_mount_required_flag` is the canary.
+
+### Stats
+- x86_64 DCE binary: 1.027 MB → **1.028 MB** (+1 KB for the cstr-wrapping plumbing)
+- aarch64 cross-build: clean — and now actually correct (the cross-build was compiling but linking to wrong syscall numbers pre-1.1.5)
+- Local harness end-to-end: 768 ms wall time (vs. 3000 ms budget); all 6 markers
+- 160 / 160 tests; fmt / vet / bench clean
+- Files audited: 11 (`src/main.cyr` + 10 × `src/lib/*.cyr`); LOC reviewed: ~1700
+
+### Notes
+- One upstream filing landed alongside this audit: `cyrius/docs/development/issues/2026-05-11-kybernet-socket-syscall-wrappers.md`. Pairs with the 2026-05-10 kavach `prctl/seccomp/setresuid/...` post-fork-syscall request — schedule both in the same stdlib-wrapper batch if cyrius scheduling allows.
+- Roadmap consequence: 1.1.5 inserted between 1.1.4 (QEMU harness) and 1.2.0 (edge boot). The audit fixes in privdrop / notify make 1.2.0 work safer to start (those modules will gain new call sites for `agnosys-trust` / `agnosys-storage` integration).
+
+---
+
 ## [1.1.4] — 2026-05-11
 
 **QEMU PID-1 boot harness.** Closes a 1.0.1-era roadmap item that had been blocked on argonaut shipping a PID-1 harness pattern — argonaut 1.6.x landed it, and kybernet now lifts the pattern to validate that the actual kybernet binary boots clean as real PID 1 under KVM, with marker assertions and a boot-time budget rather than the previous "grep stdout and hope" shape.

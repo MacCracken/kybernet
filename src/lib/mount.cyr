@@ -62,14 +62,26 @@ fn mount_devtmpfs() {
 # Each entry is 6 i64 slots: { source, target, fstype, flags, data, required }
 # `required` = 1 → failure is fatal (mount_essential returns Err)
 # `required` = 0 → failure is logged + skipped, boot continues
+#
+# Sizing: array is BYTES, not slots. 6 entries × 48 bytes/entry =
+# 288 bytes exactly — at the limit. Adding a 7th entry (e.g. bpf,
+# tracefs) requires growing this. Use _mount_table[480] (10 entries
+# × 48) for the next bump; the BSS cost is negligible and headroom
+# kills a class of regression. The 0.95.0 `_mount_table[8]→[240]`
+# fix and 1.1.5 `_mount_skipped[16]→[128]` fix both came from this.
 var _mount_table[288];
 var _mount_count = 0;
 
 # Skipped-mount tracking — populated by mount_essential() when an
 # optional mount fails. Main reads this after mount_essential() to
-# surface a kmsg/klog line per skipped target. Capacity 8 covers
-# the current 6-entry table with headroom.
-var _mount_skipped[16];
+# surface a kmsg/klog line per skipped target.
+#
+# Sizing: 16 slots × 8 bytes/i64-ptr = 128 bytes. Pre-1.1.5 audit
+# caught this as `_mount_skipped[16]` (only 16 bytes — fit 2 ptrs)
+# while the bounds check capped at 16 entries → 112-byte BSS
+# overflow if 3+ optional mounts failed. Same class as 0.95.0's
+# `_mount_table[8]→[240]` fix.
+var _mount_skipped[128];
 var _mount_skipped_count = 0;
 
 fn _init_mount_table() {

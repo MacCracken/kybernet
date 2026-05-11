@@ -49,6 +49,16 @@ cc5 was at `fn_table 92%` / `identifier buffer 85%` against the 1.1.0 build — 
 - [x] Local validation: boot wall time **789–860 ms** (KVM, kernel hand-off → phase 8 → clean shutdown) on a dev host. Single boot mode for now — per-mode gates deferred to when `kybernet.boot_mode=...` cmdline plumbing lands
 - [x] Auxiliary `boot-crash-test.sh` / `boot-shutdown-test.sh` repaired (stale `scripts/build.sh` refs; not PID-1 tests but still useful)
 
+### v1.1.5 — P(-1) audit pass (done, 2026-05-11)
+
+Pre-1.2.0 review. Full report at [`docs/audit/2026-05-11-audit.md`](../audit/2026-05-11-audit.md).
+- [x] **7 CRITICAL** — raw `syscall(N, ...)` calls with x86_64-specific N. aarch64 cross-built fine but routed to wrong syscalls at runtime. Closed: 4 sites in `main.cyr` (SYS_EXIT/EXECVE/SYMLINK), `privdrop.cyr` `SYS_PRCTL=157` shadowing stdlib's 167, `notify.cyr` `SYS_SOCKET/BIND/RECVFROM` enum. New rule: no literal syscall numbers.
+- [x] **3 HIGH** — `status_buf[1]` 4-byte stack overflow in `reap_zombies`, `_mount_skipped[16]` 112-byte BSS overflow in `mount.cyr`, PID-1-exit `default: return 0` regression in event loop. All same-class as 0.95.0 audit lessons.
+- [x] **1 MEDIUM** — Str↔cstr type confusion across 12+ `klog2 / slog / cgroup_*` sites (1.1.4 fixed one point-only; this closes the rest).
+- [x] **2 LOW** — `_logbuf` no plen check (documented; not reachable under current callers); `_mount_table[288]` at exact capacity (inline invariant comment).
+- [x] Upstream issue: `cyrius/docs/development/issues/2026-05-11-kybernet-socket-syscall-wrappers.md` requests stdlib `sys_socket / sys_bind / sys_recvfrom / ...` wrappers — kybernet's `notify.cyr` workaround folds out when those land.
+- [x] 160/160 tests, harness end-to-end clean, x86_64 1.028 MB / aarch64 clean
+
 ## v1.2.0 — Edge boot
 
 **Unblocked** by agnosys 1.2.5's `agnosys-trust` profile bundle (tpm + ima + secureboot + certpin) and `agnosys-storage` (luks + dmverity + fuse). The 1.0.x roadmap blocked this on dep surface; the surface now exists. Will be the first kybernet release to pull a second `[deps.agnosys-*]` profile alongside `agnosys-core`.

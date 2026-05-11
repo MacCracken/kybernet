@@ -11,7 +11,13 @@ struct ReapedProcess { pid; exit_code; }
 # Returns a vec of ReapedProcess pointers.
 fn reap_zombies() {
     var results = vec_new();
-    var status_buf[1];
+    # sys_waitpid writes a 4-byte int (Linux `int wstatus`) to the
+    # status pointer. The pre-1.1.5 `status_buf[1]` was a 1-byte
+    # stack array — the kernel wrote 3 bytes past it, corrupting
+    # stack. Worked in practice because cyrius's stack alignment is
+    # 8 bytes and the 3-byte overflow landed in padding, but the
+    # safety property was accidental. 8 bytes for the same alignment.
+    var status_buf[8];
     while (1 == 1) {
         var pid = sys_waitpid(0 - 1, &status_buf, WNOHANG);
         if (pid <= 0) { break; }
