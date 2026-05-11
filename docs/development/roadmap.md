@@ -2,8 +2,8 @@
 
 ## v1.1.0 — Foundation refresh (current)
 
-- [x] cyrius pin bump 5.7.12 → **5.10.44** (matches argonaut 1.6.3)
-- [x] Dep bumps: agnosys 1.0.2 → 1.2.4, agnostik 1.0.0 → 1.2.1, libro 2.0.5 → 2.6.2, argonaut 1.5.0 → 1.6.3, patra newly declared at 1.9.3
+- [x] cyrius pin bump 5.7.12 → **5.10.44** (matches argonaut 1.6.2)
+- [x] Dep bumps: agnosys 1.0.2 → 1.2.4, agnostik 1.0.0 → 1.2.1, libro 2.0.5 → 2.6.2, argonaut 1.5.0 → 1.6.2, patra newly declared at 1.9.3
 - [x] Dist-bundle adoption for agnosys / agnostik / libro / patra (cc5 lifts the cc3 64-struct ceiling that previously forced selective imports)
 - [x] Stdlib pins refreshed; sakshi + sigil dropped (transitive via libro/patra)
 - [x] Argonaut imports extended (resolver, notify, audit_ext, tmpfiles) — backs symbols 1.6.x services/init now reference
@@ -32,7 +32,7 @@ Binary is 1.29 MB under `CYRIUS_DCE=1`. Argonaut's own DCE binary is ~1.0 MB on 
 
 ### v1.1.3 — CLOEXEC audit + mount graceful degradation
 
-Carried forward from old v1.1.0 slate. argonaut 1.6.3 closeout audit added `reset_child_signal_mask` and `build_default_envp`; the equivalent fd-hygiene sweep belongs at the kybernet layer (we own pre-exec).
+Carried forward from old v1.1.0 slate. argonaut 1.6.2 closeout audit added `reset_child_signal_mask` and `build_default_envp`; the equivalent fd-hygiene sweep belongs at the kybernet layer (we own pre-exec).
 - [ ] CLOEXEC sweep: every `sys_open` in `src/lib/*.cyr` either sets `O_CLOEXEC` or has a documented reason
 - [ ] `mount.cyr` — graceful degradation on per-mount failure (today: hard fail except for `/sys/fs/cgroup` already retried)
 - [ ] Add regression tests for both
@@ -46,7 +46,7 @@ Carried forward from old v1.1.0 slate. `cgroup_file()` measured at 911 ns/call i
 
 ### v1.1.5 — QEMU PID-1 boot harness
 
-Carried forward from the old v1.0.1 slate; **unblocked** by argonaut 1.6.3's `pid1_harness.cyr` pattern (12 KB statically-linked helper + initramfs-staged marker file). We can lift that pattern directly.
+Carried forward from the old v1.0.1 slate; **unblocked** by argonaut 1.6.2's `pid1_harness.cyr` pattern (12 KB statically-linked helper + initramfs-staged marker file). We can lift that pattern directly.
 - [ ] Port `qemu/build-initramfs.sh` from argonaut, swap the helper for a kybernet boot-stage marker
 - [ ] Boot-time gate: `< 3s` to `STAGE_BOOT_COMPLETE` in minimal mode, `< 3s` desktop
 - [ ] Wire into CI as a non-fatal `qemu-boot-test.sh` job (mirrors argonaut's pattern — failures are signal, not blocker)
