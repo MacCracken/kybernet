@@ -59,8 +59,14 @@ stdlib = [
 [deps.agnosys]
 git = "https://github.com/MacCracken/agnosys.git"
 path = "../agnosys"
-tag = "1.2.4"
-modules = ["dist/agnosys.cyr"]
+tag = "1.2.5"
+# Profile bundle: kybernet's source calls zero agnosys-* functions
+# (only stdlib syscalls). libro/agnostik/argonaut dist bundles also
+# make no agnosys-specific calls. Pulling `dist/agnosys-core.cyr`
+# (syscall+error+logging, 56 fns) instead of `dist/agnosys.cyr`
+# (350 fns) reclaims ~290 fn_table slots vs the full bundle. Matches
+# the kavach pattern: core + per-domain profile.
+modules = ["dist/agnosys-core.cyr"]
 
 [deps.agnostik]
 git = "https://github.com/MacCracken/agnostik.git"

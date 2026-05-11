@@ -16,35 +16,29 @@
 
 Sequenced patches; no item below is gated on roadmap work outside the current dep set.
 
-### v1.1.1 — Compiler-headroom cliff
+### v1.1.1 — Compiler-headroom cliff + size pass (done, 2026-05-11)
 
-`cc5` reports `fn_table at 92% (3773/4096)` and `identifier buffer at 85% (111862/131072)` against the new dist-bundle build. Both ceilings are hard; the next dep-surface bump or new module addition will tip past them. Trim now while it's cheap.
-- [ ] Audit dead-code reports from `CYRIUS_DCE=1` build — many sandbox/seccomp/health helpers are flagged unused after the 1.6.x argonaut import shape settled
-- [ ] Decide: trim unused dist-bundle surface vs. split kybernet into compilation units (cyrius supports `#ifdef`-gated includes)
-- [ ] Re-measure: target `fn_table < 80%`, `identifier buffer < 70%`
+cc5 was at `fn_table 92%` / `identifier buffer 85%` against the 1.1.0 build — next dep bump would have tipped the hard ceilings. The trim and the size pass (originally sequenced as 1.1.2) collapsed into one fix: switched `[deps.agnosys]` from `dist/agnosys.cyr` (350 fns) to `dist/agnosys-core.cyr` (56 fns). Kybernet calls zero agnosys-prefixed functions from its own source, and the libro/agnostik/argonaut dist bundles make no agnosys-domain calls either, so the trim was lossless.
+- [x] Dead-fn audit: 3116 dead out of ~3779 registered — almost entirely from agnosys storage/trust/security/system domains kybernet never touches
+- [x] `dist/agnosys.cyr` → `dist/agnosys-core.cyr` (kavach-style profile pattern)
+- [x] agnosys 1.2.4 → 1.2.5
+- [x] Result: fn_table + identifier buffer warnings gone; binary 1.29 MB → **1.02 MB** (−21%, parity with argonaut); dead-fn count 3116 → 2430; 140/140 tests, aarch64 cross-build clean
 
-### v1.1.2 — DCE + size pass
-
-Binary is 1.29 MB under `CYRIUS_DCE=1`. Argonaut's own DCE binary is ~1.0 MB on essentially the same dep tree, so 200–300 KB headroom looks tractable.
-- [ ] Profile per-module contribution to final binary (use `nm`/`readelf` on the DCE output)
-- [ ] Re-evaluate full agnosys dist bundle vs. `agnosys-core` profile — kybernet doesn't currently use `audit/pam/luks/dmverity/tpm/...`
-- [ ] Move callers off any libro persistence surface kybernet doesn't actually exercise
-
-### v1.1.3 — CLOEXEC audit + mount graceful degradation
+### v1.1.2 — CLOEXEC audit + mount graceful degradation
 
 Carried forward from old v1.1.0 slate. argonaut 1.6.2 closeout audit added `reset_child_signal_mask` and `build_default_envp`; the equivalent fd-hygiene sweep belongs at the kybernet layer (we own pre-exec).
 - [ ] CLOEXEC sweep: every `sys_open` in `src/lib/*.cyr` either sets `O_CLOEXEC` or has a documented reason
 - [ ] `mount.cyr` — graceful degradation on per-mount failure (today: hard fail except for `/sys/fs/cgroup` already retried)
 - [ ] Add regression tests for both
 
-### v1.1.4 — Cgroup path precomputation
+### v1.1.3 — Cgroup path precomputation
 
 Carried forward from old v1.1.0 slate. `cgroup_file()` measured at 911 ns/call in 1.0.x bench. Precompute common per-service paths at service-definition time; expected ~10x shrink under load.
 - [ ] Bench baseline (current `bench.cyr` doesn't cover this hot path — add it)
 - [ ] Precompute table at `argonaut_init_new` time keyed by service name
 - [ ] Compare under desktop boot service set
 
-### v1.1.5 — QEMU PID-1 boot harness
+### v1.1.4 — QEMU PID-1 boot harness
 
 Carried forward from the old v1.0.1 slate; **unblocked** by argonaut 1.6.2's `pid1_harness.cyr` pattern (12 KB statically-linked helper + initramfs-staged marker file). We can lift that pattern directly.
 - [ ] Port `qemu/build-initramfs.sh` from argonaut, swap the helper for a kybernet boot-stage marker
@@ -53,16 +47,15 @@ Carried forward from the old v1.0.1 slate; **unblocked** by argonaut 1.6.2's `pi
 
 ## v1.2.0 — Edge boot
 
-**Unblocked** by agnosys 1.2.4's `agnosys-trust` profile bundle (tpm + ima + secureboot + certpin) and `agnosys-storage` (luks + dmverity + fuse). The 1.0.x roadmap blocked this on dep surface; the surface now exists.
-- [ ] dm-verity rootfs verify at boot (uses `agnosys/dmverity.cyr`)
-- [ ] LUKS unlock path (uses `agnosys/luks.cyr`)
-- [ ] TPM PCR binding for `EdgeBootConfig.pcr_bindings` ("7+14" default already in argonaut types)
+**Unblocked** by agnosys 1.2.5's `agnosys-trust` profile bundle (tpm + ima + secureboot + certpin) and `agnosys-storage` (luks + dmverity + fuse). The 1.0.x roadmap blocked this on dep surface; the surface now exists. Will be the first kybernet release to pull a second `[deps.agnosys-*]` profile alongside `agnosys-core`.
+- [ ] dm-verity rootfs verify at boot (uses `agnosys/dmverity.cyr` via `agnosys-storage`)
+- [ ] LUKS unlock path (uses `agnosys/luks.cyr` via `agnosys-storage`)
+- [ ] TPM PCR binding for `EdgeBootConfig.pcr_bindings` ("7+14" default already in argonaut types; needs `agnosys-trust`)
 - [ ] Real hardware boot validation: RPi4, NUC
 
 ## Deferred (no movement until trigger surfaces)
 
 - **Control socket for agnoshi runtime commands** — separate transport surface; pinned until an agnoshi consumer drives the protocol shape
-- **Compilation-unit split** — only if 1.1.1 trim-pass can't get back under the 80%/70% ceiling targets
 - **Binary signing on release** — pinned until libro 2.6+ signing/timestamping is consumer-driven from outside kybernet's tree
 
 ## History
