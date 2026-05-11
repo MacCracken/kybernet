@@ -558,6 +558,47 @@ fn test_cgroup_extended() {
     return 0;
 }
 
+fn test_cgroup_path_cache() {
+    println("--- cgroup path cache ---");
+    # 1.1.3 regression: warm-cache hit must return the same string
+    # content as a cold build, and invalidation must force a re-build.
+    # We can't easily test pointer-equality of cached vs uncached
+    # results (the cold path returns a fresh str_builder build, and
+    # cache might or might not hand back that same ptr depending on
+    # build order). What we CAN verify is content correctness across
+    # the cache lifecycle.
+
+    var svc = "cachetest-svc";
+
+    # Cold: first call builds and caches.
+    var p_cold = cgroup_path(svc);
+    assert(str_ends_with(p_cold, "cachetest-svc") == 1, "cold path correct");
+
+    # Warm: second call must return same content.
+    var p_warm = cgroup_path(svc);
+    assert(str_eq(p_cold, p_warm) == 1, "warm path content matches cold");
+
+    # Same shape for cgroup_file: cold + warm produce same content.
+    var f_cold = cgroup_file(svc, "memory.high");
+    assert(str_ends_with(f_cold, "cachetest-svc/memory.high") == 1, "cold file correct");
+    var f_warm = cgroup_file(svc, "memory.high");
+    assert(str_eq(f_cold, f_warm) == 1, "warm file content matches cold");
+
+    # Different filename, same service — hits the LRU's outer slot
+    # but misses the inner filename key. Verify still correct.
+    var f2 = cgroup_file(svc, "cpu.weight");
+    assert(str_ends_with(f2, "cpu.weight") == 1, "second file correct");
+    assert(str_eq(f2, f_cold) == 0, "different filenames → different paths");
+
+    # Invalidation: _cg_cache_drop should clear both caches for the
+    # service. The next call rebuilds; content stays identical because
+    # the path function is deterministic, so we check content again.
+    _cg_cache_drop(svc);
+    var p_rebuilt = cgroup_path(svc);
+    assert(str_eq(p_rebuilt, p_cold) == 1, "rebuilt path content matches");
+    return 0;
+}
+
 fn test_notify_edge_cases() {
     println("--- notify edge ---");
     # Empty message
@@ -648,6 +689,7 @@ fn main() {
     test_reaper_macros();
     test_signal_buffer();
     test_cgroup_extended();
+    test_cgroup_path_cache();
     test_notify_edge_cases();
     test_seccomp_agnostik_bridge();
     test_sandbox_rules();

@@ -7,6 +7,43 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.1.3] — 2026-05-11
+
+**Cgroup path precomputation.** `cgroup_file()` was a hot path (every service start writes 4-5 limits + moves the pid into the cgroup; shutdown reads/writes more). 1.0.x bench had it at 911 ns/op; on 5.10.44 stdlib it was already down to 800 ns/op via toolchain improvements alone, but it was still doing 6 `str_builder_*` calls per invocation, all in PID 1's startup hot loop.
+
+The fix is precomputation: cache the path strings by `(service, filename)` after first build. Cgroup paths are deterministic functions of the pair, and the same pairs get hit repeatedly across a service's lifecycle.
+
+### Changed
+- **`src/lib/cgroup.cyr`** — added a layered path cache:
+  - **Two-key LRU** (1 slot) on `cgroup_file()`. Pointer-compares `(service, filename)` against the last-call pair; hit short-circuits before any hashmap touch. Catches the same-pair-repeat case (read-then-write same control file).
+  - **Per-service inner hashmap** keyed on filename, with a 1-slot LRU on the inner-map pointer keyed on service. The realistic burst pattern (apply 4-5 different limits for one service in a row) lands here: the 2-key LRU misses on each filename change, but the 1-slot service LRU skips the outer map lookup so each call is just one filename → fullpath hashmap_get.
+  - **`cgroup_path()`** gets the same 1-slot LRU on service → prefix.
+  - `_cg_cache_drop(service)` invalidates all three caches for a service; called from `remove_service_cgroup()`. Cached strings stay in memory (cyrius is gc-less); only the cache indices drop their references.
+
+### Stats — bench delta vs. 1.1.2 (cyrius 5.10.44, x86_64)
+
+| | 1.1.2 baseline | 1.1.3 |   |
+|---|---:|---:|---:|
+| `cgroup_path` (repeat-svc) | 417 ns/op | **3 ns/op** | **139× faster** |
+| `cgroup_file` (same pair, best case) | 800 ns/op | **3 ns/op** | **267× faster** |
+| `cgroup_file` (5-file burst, realistic) | 800 ns/op | **97 ns/op** | **8.2× faster** |
+
+The realistic-burst number is the one to trust for live PID 1 use — `cgroup_apply_limits` writes memory.max → memory.high → cpu.weight → pids.max → cgroup.procs, exactly the pattern the burst bench measures. Same-pair best-case is only hit by read-modify-write loops, which kybernet does on shutdown but not at start.
+
+The roadmap target was "~10× shrink under load." Realistic 8.2× hits within tolerance; same-pair 267× exceeds it. Cold path (first call for a new pair) is unchanged at ~800 ns — the cache only changes the warm case.
+
+### Added
+- **`test_cgroup_path_cache`** (5 assertions): exercises cold call → warm hit → different-filename-same-service → invalidation → re-build. Verifies content correctness across the cache lifecycle (cold and warm produce identical strings; different filenames produce different paths; re-build after invalidation produces the same string the cold call did). Catches future cache-key mismatches that would silently return stale paths.
+- **`bench_cgroup_file_burst`** in `src/bench.cyr` — measures the 5-different-files-per-service pattern that mirrors `cgroup_apply_limits`. The pre-existing `bench_cgroup_file` measures the best case (same pair every iter); both numbers stay in the bench output so future changes show drift in either direction.
+- Total: **153 → 160 tests** pass.
+
+### Notes
+- Two globals × two LRU slots = four extra `var` cells (32 bytes BSS). No allocation on the hot path; the only heap work is the str_builder + str_builder_build on cold-path misses, same as before.
+- Cache keys are cstr (default `map_new()` mode), so any caller passing `Str`-shape names would need to drop to `str_data()` first. All current callers pass cstr literals or cstr-from-vec, so no change needed. Documented in the cache block comment.
+- Pointer-identity assumption (the 1-slot LRU compares ptrs, not contents) is safe because: (a) string literals in cyrius have stable addresses, and (b) service-name cstrs from argonaut come from a single allocation per service that's stable across the service's lifetime. Misses on pointer-equal-but-different-contents are impossible; misses on pointer-different-but-content-equal degrade to the slow path (correct, just slower) and are caught by the inner hashmap on hit.
+
+---
+
 ## [1.1.2] — 2026-05-11
 
 **CLOEXEC sweep + mount graceful degradation.** Two long-standing items on the v1.0.1/v1.1.0 slate that didn't have a forcing function but are necessary hygiene for a PID 1: fd-leak audit across `sys_open` call sites, and mount-table classification so optional filesystems don't wedge boot on minimal hardware.

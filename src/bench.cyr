@@ -128,7 +128,28 @@ fn bench_cgroup_file() {
         var f = cgroup_file("myservice", "cgroup.procs");
         k = k + 1;
     }
-    report("cgroup_file", now_ns() - start, iters);
+    report("cgroup_file (best case, same pair)", now_ns() - start, iters);
+    return 0;
+}
+
+# Realistic burst: cgroup_apply_limits writes 4 different control
+# files for the same service in sequence (memory.max, memory.high,
+# cpu.weight, pids.max), then move_to_cgroup hits cgroup.procs.
+# Single-service-burst pattern → 2-key LRU misses (different filenames)
+# but the 1-slot inner-map LRU still skips the outer map_get.
+fn bench_cgroup_file_burst() {
+    var iters = 100000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        cgroup_file("burstsvc", "memory.max");
+        cgroup_file("burstsvc", "memory.high");
+        cgroup_file("burstsvc", "cpu.weight");
+        cgroup_file("burstsvc", "pids.max");
+        cgroup_file("burstsvc", "cgroup.procs");
+        k = k + 1;
+    }
+    report("cgroup_file (5-file burst, per call)", now_ns() - start, iters * 5);
     return 0;
 }
 
@@ -938,6 +959,7 @@ fn main() {
     alloc_reset();
     alloc_init();
     bench_cgroup_file();
+    bench_cgroup_file_burst();
     println("");
 
     # --- Mount ---

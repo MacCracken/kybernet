@@ -31,14 +31,14 @@ cc5 was at `fn_table 92%` / `identifier buffer 85%` against the 1.1.0 build — 
 - [x] Regression tests: `test_cloexec_fcntl_probe` (fcntl F_GETFD probe with control), `test_mount_required_flag` (per-entry classification + skipped accessor bounds). 140 → 153 tests
 - [x] Upstream filing: `cyrius/docs/development/issues/2026-05-11-kybernet-fn-table-identifier-buffer-caps.md` requesting fn_table + identifier buffer cap doubling (adjacent to 1.1.1 headroom work; not a fix for 1.1.2)
 
-### v1.1.3 — Cgroup path precomputation
+### v1.1.3 — Cgroup path precomputation (done, 2026-05-11)
 
-Carried forward from old v1.1.0 slate. `cgroup_file()` measured at 911 ns/call in 1.0.x bench. Precompute common per-service paths at service-definition time; expected ~10x shrink under load.
-- [ ] Bench baseline (current `bench.cyr` doesn't cover this hot path — add it)
-- [ ] Precompute table at `argonaut_init_new` time keyed by service name
-- [ ] Compare under desktop boot service set
+- [x] Baseline: `cgroup_path` 417 ns/op, `cgroup_file` 800 ns/op on cyrius 5.10.44 (already down from the 1.0.x 911 ns figure via toolchain improvement)
+- [x] Layered path cache: 2-key LRU (`cgroup_file`) → 1-slot service LRU → per-service inner hashmap. `cgroup_path` gets the 1-slot LRU. Invalidation via `_cg_cache_drop(service)` wired into `remove_service_cgroup()`
+- [x] Results: same-pair best case 267× (3 ns), realistic 5-file burst 8.2× (97 ns), cold path unchanged. Hit the ~10× target on the realistic case
+- [x] Regression test: `test_cgroup_path_cache` covers cold → warm → mixed-filename → invalidation → re-build. New burst bench `bench_cgroup_file_burst` reflects the `cgroup_apply_limits` shape. 153 → 160 tests
 
-### v1.1.4 — QEMU PID-1 boot harness
+### v1.1.4 — QEMU PID-1 boot harness (next)
 
 Carried forward from the old v1.0.1 slate; **unblocked** by argonaut 1.6.2's `pid1_harness.cyr` pattern (12 KB statically-linked helper + initramfs-staged marker file). We can lift that pattern directly.
 - [ ] Port `qemu/build-initramfs.sh` from argonaut, swap the helper for a kybernet boot-stage marker
