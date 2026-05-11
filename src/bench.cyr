@@ -4,6 +4,7 @@
 # Run: cyrius bench src/bench.cyr
 
 # Kybernet modules (stdlib + deps auto-included via cyrius.cyml)
+include "src/lib/log.cyr"
 include "src/lib/console.cyr"
 include "src/lib/signals.cyr"
 include "src/lib/reaper.cyr"
@@ -14,6 +15,9 @@ include "src/lib/eventloop.cyr"
 include "src/lib/notify.cyr"
 include "src/lib/seccomp.cyr"
 include "src/lib/sandbox.cyr"
+include "src/lib/edge_boot.cyr"
+
+var g_log_fd = 0;
 
 # ================================================================
 # Inline report (matches agnosys bench_compare format)

@@ -1,0 +1,107 @@
+# kybernet/log.cyr — logging primitives (stderr + /dev/kmsg + slog)
+#
+# Factored out of src/main.cyr at 1.2.0 so src/lib/*.cyr modules
+# (notably edge_boot.cyr) can call klog/klog2/kmsg without taking
+# a circular dependency on main.cyr. test.cyr and bench.cyr now
+# also resolve these — previously edge_boot.cyr's klog calls
+# crashed at runtime under test because the test binary didn't
+# include main.cyr's definitions.
+#
+# `g_log_fd` defaults to 0 → slog() short-circuits until
+# slog_init() is called from kybernet_run's phase 3b. test.cyr
+# and bench.cyr never call slog_init() so slog is a no-op there.
+
+# g_log_fd is declared in main.cyr's globals block (kept there so
+# the shutdown path can close it without reaching into this module).
+# This module reads/writes that single global by name.
+
+# Log buffer — single sys_write per message instead of 3-4. Used by
+# _log_write (klog) and klog2.
+#
+# 1.1.5 audit LOW-1: _log_write / klog2 don't bound-check `plen`.
+# Every current caller passes a short literal prefix (max 35 chars
+# at "FATAL: required boot stage failed: "), so the `plen ≤ 254`
+# precondition holds. Promote to MEDIUM and clamp if a non-literal
+# prefix ever reaches these fns.
+var _logbuf[256];
+
+fn _log_write(fd, prefix, plen, msg) {
+    var mlen = strlen(msg);
+    var total = plen + mlen + 1;
+    if (total > 255) { total = 255; }
+    memcpy(&_logbuf, prefix, plen);
+    var copylen = mlen;
+    if (plen + mlen > 254) { copylen = 254 - plen; }
+    memcpy(&_logbuf + plen, msg, copylen);
+    store8(&_logbuf + plen + copylen, 10);
+    sys_write(fd, &_logbuf, plen + copylen + 1);
+    return 0;
+}
+
+fn kmsg(msg) {
+    # 1.1.2 CLOEXEC sweep: fd is closed at the end of this frame,
+    # but signal-handler / pre-fork paths can interleave — O_CLOEXEC
+    # guards against the leak.
+    var fd = sys_open("/dev/kmsg", O_WRONLY | O_CLOEXEC, 0);
+    if (fd >= 0) {
+        sys_write(fd, msg, strlen(msg));
+        sys_close(fd);
+    }
+    return 0;
+}
+
+fn klog(msg) {
+    _log_write(STDERR_FD, "kybernet: ", 10, msg);
+    slog("info", msg);
+    return 0;
+}
+
+fn klog2(prefix, msg) {
+    # Build "kybernet: <prefix><msg>\n" in one buffer
+    var plen = strlen(prefix);
+    var mlen = strlen(msg);
+    var total = 10 + plen + mlen + 1;
+    if (total <= 255) {
+        memcpy(&_logbuf, "kybernet: ", 10);
+        memcpy(&_logbuf + 10, prefix, plen);
+        memcpy(&_logbuf + 10 + plen, msg, mlen);
+        store8(&_logbuf + 10 + plen + mlen, 10);
+        sys_write(STDERR_FD, &_logbuf, 10 + plen + mlen + 1);
+    } else {
+        sys_write(STDERR_FD, "kybernet: ", 10);
+        sys_write(STDERR_FD, prefix, plen);
+        sys_write(STDERR_FD, msg, mlen);
+        sys_write(STDERR_FD, "\n", 1);
+    }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, prefix);
+    str_builder_add_cstr(sb, msg);
+    var combined = str_builder_build(sb);
+    slog("info", str_data(combined));
+    return 0;
+}
+
+# ================================================================
+# Structured logging — JSON lines to /var/log/kybernet.log
+# ================================================================
+
+fn slog_init() {
+    # 1.1.2 CLOEXEC: g_log_fd is long-lived (open for PID 1's
+    # lifetime) and would leak into every spawned service without
+    # O_CLOEXEC.
+    g_log_fd = sys_open("/var/log/kybernet.log", O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0x1A4);
+    return 0;
+}
+
+fn slog(level, msg) {
+    if (g_log_fd <= 0) { return 0; }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"level\":\"");
+    str_builder_add_cstr(sb, level);
+    str_builder_add_cstr(sb, "\",\"msg\":\"");
+    str_builder_add_cstr(sb, msg);
+    str_builder_add_cstr(sb, "\"}\n");
+    var line = str_builder_build(sb);
+    sys_write(g_log_fd, str_data(line), str_len(line));
+    return 0;
+}

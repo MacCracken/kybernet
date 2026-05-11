@@ -7,6 +7,54 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.2.0] — 2026-05-11
+
+**Edge boot — first 1.2.x minor.** Lifts the verified-and-sealed boot machinery into kybernet via agnosys 1.2.5's `agnosys-storage` and `agnosys-trust` profile bundles, alongside the existing `agnosys-core`. First kybernet release to pull more than one agnosys profile; first to declare a `[deps.agnosys-*]` block per profile. The 1.1.1 CHANGELOG flagged this as the moment fn_table headroom would press back into the warn band — measured this cut: still under, no warning emitted.
+
+This cut is **scaffolding + capability detection + measurement**, not full verification. Real-device dm-verity / LUKS verify needs deployment-specific paths (data device, hash device, root hash, LUKS device) that argonaut's `EdgeBootConfig` doesn't carry yet. Those land in **1.2.1** alongside the argonaut-side struct extension. **1.2.2+** wires the real hardware boot validation (RPi4, NUC).
+
+### Added
+- **`[deps.agnosys-storage]` + `[deps.agnosys-trust]`** in `cyrius.cyml`. Both pin agnosys 1.2.5 (matches the existing `[deps.agnosys]` core entry). cyrius's dep resolver de-dupes the underlying git clone (one checkout, three profile-bundle reads). New `lib/agnosys-storage.cyr` + `lib/agnosys-trust.cyr` files in the resolved tree.
+- **`src/lib/edge_boot.cyr`** — new module. Provides:
+  - `edge_boot_run(config)` — orchestration entry point. Gates on `boot_mode == BOOT_EDGE && verify_on_boot != 0`. Returns 1 to continue boot, 0 to abort to emergency.
+  - **Capability detection** via `tpm_detect()` (checks `/dev/tpmrm0` / `/dev/tpm0`) and `dmverity_supported()` (checks `/sys/module/dm_verity` + veritysetup binary). Logs both.
+  - **PCR read** per `EdgeBootConfig.pcr_bindings` spec ("7+14" → indices 7, 14; tolerates any non-digit separator). Reads SHA-256 PCRs via agnosys-trust's `tpm_read_pcr`. Measurement-only — baseline comparison via `tpm_verify_measured_boot` lands in 1.2.1.
+  - **Hard-prerequisite gating**: when `tpm_attestation == 1` and TPM is unavailable, returns 0 (FATAL → emergency shell). Same for `readonly_rootfs == 1` and dm-verity unavailable.
+  - **`max_boot_ms` wall-clock budget** measured via `monotonic_ms()` deltas, warn-only.
+  - **LUKS unlock + dm-verity verify stubs** that log "config land in 1.2.1; skipped" — placeholder for real-device wiring.
+  - **Status accessors**: `edge_boot_tpm_present()`, `edge_boot_dmverity_supp()`, `edge_boot_pcr_count()`, `edge_boot_elapsed_ms()` for the boot-phase summary.
+- **Phase 6c** in `kybernet_run` — wired between `execute_tmpfiles()` and `run_boot_stages()`. Skips when not in EDGE mode. Drops to emergency shell on hard-prerequisite failure (same path as boot-stage failures).
+- **`src/lib/log.cyr`** — factored `klog` / `klog2` / `kmsg` / `slog` / `slog_init` / `_logbuf` / `_log_write` out of `src/main.cyr`. The forcing function was edge_boot.cyr's `klog` calls: src/lib/* modules can't take a circular dependency on main.cyr, and test/bench compiles emitted `error: undefined function 'klog' (will crash at runtime)` when edge_boot was included without main. Pure refactor — no behavior change at the boot path. `g_log_fd` stays in main's globals (shutdown still closes it directly).
+
+### Tests
+- **`test_edge_boot_pcr_parser`** (6 assertions) — exercises `_eb_parse_pcr_indices` against `"7+14"`, `"0,7,14,23"` (comma), `"  3  "` (space-padded), `""` (empty), and `"23"` (multi-digit boundary; must not split as 2+3).
+- **`test_edge_boot_gating`** (6 assertions) — covers the three deterministic skip paths (`config=0`, non-EDGE boot_mode, `verify_on_boot=0`) plus the accessor initial-state invariants. The host-environment-dependent run path (`EDGE + verify_on_boot=1 + tpm_attestation=1`) is intentionally NOT asserted at the unit-test level — its outcome depends on `/dev/tpm0` + `/usr/bin/tpm2_pcrread` + veritysetup presence. End-to-end coverage is the qemu boot harness's job once a future variant carries `kybernet.harness=edge` on the cmdline (1.2.1 task).
+- Total: **160 → 177 tests** pass (+17 — 6 parser + 6 gating + 5 from the 1.1.5 audit that I miscounted in the prior release notes).
+
+### Stats
+- x86_64 DCE binary: 1.028 MB → **1.148 MB** (+120 KB — `agnosys-storage` + `agnosys-trust` profile surfaces plus the new edge_boot module and the log-factor-out)
+- aarch64 cross-build: clean
+- fn_table: well under the 90% warn threshold — the 1.1.1 prediction that two new agnosys profiles would tip past was conservative. Upstream cap-raise (`cyrius/docs/development/issues/2026-05-11-kybernet-fn-table-identifier-buffer-caps.md`) tracking on the 5.11.x arc still relevant for the next round of growth.
+- Harness end-to-end: 751 ms wall time (within 3000 ms budget); all six markers
+- fmt / vet clean
+
+### Deferred to 1.2.1
+- argonaut-side: extend `EdgeBootConfig` with `data_device`, `hash_device`, `root_hash`, `luks_device`, `expected_pcrs` (vec of PCR baseline values). Out of kybernet's tree.
+- kybernet-side once 1.2.1 lands the config extension:
+  - `dmverity_verify(data_device, hash_device, root_hash)` against real devices
+  - `luks_open(config, key_ptr, key_len)` + `luks_mount(device, mount_point, fs)` against a configured LUKS volume; key sourced from TPM unseal or initramfs passphrase
+  - `tpm_verify_measured_boot(expected)` against the baseline vec from the extended config
+  - Edge-mode qemu harness variant (`kybernet.harness=edge`) — boots with synthetic LUKS volume + dm-verity device produced by `qemu/build-initramfs.sh`
+
+### Deferred to 1.2.2
+- Real hardware boot validation: RPi4 + NUC. Needs hardware-in-the-loop testing infra that isn't on the CI runner. Will be a dedicated cut with a hardware-validation report attached to the audit-doc folder.
+
+### Notes
+- The 1.1.5 audit's "no literal `syscall(N, ...)`" standing rule paid off here. edge_boot.cyr was written from scratch in 1.2.0 and went through the audit checklist before commit — no raw syscalls; all dep calls go through agnosys-trust / agnosys-storage wrappers which are arch-portable.
+- The pre-1.2.0 main.cyr → src/lib/ refactor (log.cyr extraction) inverts a class of bug: previously, adding a `klog` call to a src/lib/ module produced a runtime crash under test (warning-only at compile). 1.2.0 onward, every src/lib/ module that needs logging includes `lib/log.cyr` transitively via the inclusion at the top of main / test / bench. The compile-time error path is preserved (cc5 still emits `undefined function 'klog'` if log.cyr is missing); the runtime-crash path is closed.
+
+---
+
 ## [1.1.5] — 2026-05-11
 
 **P(-1) audit pass.** Per-roadmap pre-1.2.0 review of `src/main.cyr` + every `src/lib/*.cyr`. Full report at [`docs/audit/2026-05-11-audit.md`](docs/audit/2026-05-11-audit.md). Summary: **7 CRITICAL / 3 HIGH / 1 MEDIUM / 2 LOW** — 12 closed in this cut, 1 LOW deferred with documented mitigation.

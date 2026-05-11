@@ -13,6 +13,7 @@
 #   9. Shutdown on SIGTERM/SIGINT (coordinated via argonaut)
 
 # Kybernet modules (stdlib + deps auto-included via cyrius.toml)
+include "src/lib/log.cyr"
 include "src/lib/console.cyr"
 include "src/lib/signals.cyr"
 include "src/lib/reaper.cyr"
@@ -23,6 +24,7 @@ include "src/lib/eventloop.cyr"
 include "src/lib/notify.cyr"
 include "src/lib/seccomp.cyr"
 include "src/lib/sandbox.cyr"
+include "src/lib/edge_boot.cyr"
 
 # ================================================================
 # Globals
@@ -37,92 +39,9 @@ var g_config = 0;
 var g_log_fd = 0;
 
 # ================================================================
-# Logging
-# ================================================================
-
-# Log buffer — single sys_write per message instead of 3-4
-var _logbuf[256];
-
-fn _log_write(fd, prefix, plen, msg) {
-    var mlen = strlen(msg);
-    var total = plen + mlen + 1;
-    if (total > 255) { total = 255; }
-    memcpy(&_logbuf, prefix, plen);
-    var copylen = mlen;
-    if (plen + mlen > 254) { copylen = 254 - plen; }
-    memcpy(&_logbuf + plen, msg, copylen);
-    store8(&_logbuf + plen + copylen, 10);
-    sys_write(fd, &_logbuf, plen + copylen + 1);
-    return 0;
-}
-
-fn kmsg(msg) {
-    # O_CLOEXEC: defensive — fd is closed at the end of this frame,
-    # but if a signal handler or service fork interleaves, the
-    # /dev/kmsg fd must not leak into the spawned process.
-    var fd = sys_open("/dev/kmsg", O_WRONLY | O_CLOEXEC, 0);
-    if (fd >= 0) {
-        sys_write(fd, msg, strlen(msg));
-        sys_close(fd);
-    }
-    return 0;
-}
-
-fn klog(msg) {
-    _log_write(STDERR_FD, "kybernet: ", 10, msg);
-    slog("info", msg);
-    return 0;
-}
-
-fn klog2(prefix, msg) {
-    # Build "kybernet: <prefix><msg>\n" in one buffer
-    var plen = strlen(prefix);
-    var mlen = strlen(msg);
-    var total = 10 + plen + mlen + 1;
-    if (total <= 255) {
-        memcpy(&_logbuf, "kybernet: ", 10);
-        memcpy(&_logbuf + 10, prefix, plen);
-        memcpy(&_logbuf + 10 + plen, msg, mlen);
-        store8(&_logbuf + 10 + plen + mlen, 10);
-        sys_write(STDERR_FD, &_logbuf, 10 + plen + mlen + 1);
-    } else {
-        sys_write(STDERR_FD, "kybernet: ", 10);
-        sys_write(STDERR_FD, prefix, plen);
-        sys_write(STDERR_FD, msg, mlen);
-        sys_write(STDERR_FD, "\n", 1);
-    }
-    # Also write structured log
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, prefix);
-    str_builder_add_cstr(sb, msg);
-    var combined = str_builder_build(sb);
-    slog("info", str_data(combined));
-    return 0;
-}
-
-# ================================================================
-# Structured logging — JSON lines to /var/log/kybernet.log
-# ================================================================
-
-fn slog_init() {
-    # O_CLOEXEC required: g_log_fd is long-lived (open for PID 1's
-    # lifetime) and would leak into every spawned service without it.
-    g_log_fd = sys_open("/var/log/kybernet.log", O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0x1A4);
-    return 0;
-}
-
-fn slog(level, msg) {
-    if (g_log_fd <= 0) { return 0; }
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"level\":\"");
-    str_builder_add_cstr(sb, level);
-    str_builder_add_cstr(sb, "\",\"msg\":\"");
-    str_builder_add_cstr(sb, msg);
-    str_builder_add_cstr(sb, "\"}\n");
-    var line = str_builder_build(sb);
-    sys_write(g_log_fd, str_data(line), str_len(line));
-    return 0;
-}
+# Logging is factored into src/lib/log.cyr (since 1.2.0). klog,
+# klog2, kmsg, slog, slog_init, and _logbuf live there. g_log_fd
+# stays in the globals block above so the shutdown path can close it.
 
 # ================================================================
 # Config loading from JSON
@@ -707,6 +626,21 @@ fn kybernet_run() {
 
     # Phase 6b: Execute tmpfile directives
     execute_tmpfiles();
+
+    # Phase 6c: Edge boot pre-flight (capability detect + PCR read).
+    # No-op unless config_boot_mode == BOOT_EDGE && config_verify_boot.
+    # Returns 0 only when a hard prerequisite is missing (TPM required
+    # but absent, or dm-verity required but unsupported) — in that
+    # case drop straight to emergency shell since boot stages may
+    # need the verified rootfs.
+    var edge_ok = edge_boot_run(g_config);
+    if (edge_ok == 0) {
+        kmsg("phase 6c: FATAL edge-boot prerequisite missing");
+        klog("FATAL: edge-boot prerequisite missing — emergency shell");
+        drop_to_emergency();
+    } else {
+        kmsg("phase 6c: edge boot pre-flight complete");
+    }
 
     # Phase 7: Run boot stages
     var boot_r = run_boot_stages();

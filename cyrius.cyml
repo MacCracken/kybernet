@@ -60,13 +60,26 @@ stdlib = [
 git = "https://github.com/MacCracken/agnosys.git"
 path = "../agnosys"
 tag = "1.2.5"
-# Profile bundle: kybernet's source calls zero agnosys-* functions
-# (only stdlib syscalls). libro/agnostik/argonaut dist bundles also
-# make no agnosys-specific calls. Pulling `dist/agnosys-core.cyr`
-# (syscall+error+logging, 56 fns) instead of `dist/agnosys.cyr`
-# (350 fns) reclaims ~290 fn_table slots vs the full bundle. Matches
-# the kavach pattern: core + per-domain profile.
+# Profile bundle layering (1.2.0+): kybernet pulls `agnosys-core`
+# unconditionally for syscalls/error/logging (56 fns), plus the
+# `agnosys-storage` + `agnosys-trust` profiles which back the
+# edge-boot path (dm-verity, LUKS, TPM PCR primitives). The 1.1.1
+# CHANGELOG warned this would press fn_table back toward the warn
+# band; with the upstream cap-raise issue still in the 5.11.x arc,
+# the per-profile selection here is what keeps the build under-cap.
 modules = ["dist/agnosys-core.cyr"]
+
+[deps.agnosys-storage]
+git = "https://github.com/MacCracken/agnosys.git"
+path = "../agnosys"
+tag = "1.2.5"
+modules = ["dist/agnosys-storage.cyr"]
+
+[deps.agnosys-trust]
+git = "https://github.com/MacCracken/agnosys.git"
+path = "../agnosys"
+tag = "1.2.5"
+modules = ["dist/agnosys-trust.cyr"]
 
 [deps.agnostik]
 git = "https://github.com/MacCracken/agnostik.git"

@@ -59,13 +59,34 @@ Pre-1.2.0 review. Full report at [`docs/audit/2026-05-11-audit.md`](../audit/202
 - [x] Upstream issue: `cyrius/docs/development/issues/2026-05-11-kybernet-socket-syscall-wrappers.md` requests stdlib `sys_socket / sys_bind / sys_recvfrom / ...` wrappers — kybernet's `notify.cyr` workaround folds out when those land.
 - [x] 160/160 tests, harness end-to-end clean, x86_64 1.028 MB / aarch64 clean
 
-## v1.2.0 — Edge boot
+## v1.2.x arc — edge boot
 
-**Unblocked** by agnosys 1.2.5's `agnosys-trust` profile bundle (tpm + ima + secureboot + certpin) and `agnosys-storage` (luks + dmverity + fuse). The 1.0.x roadmap blocked this on dep surface; the surface now exists. Will be the first kybernet release to pull a second `[deps.agnosys-*]` profile alongside `agnosys-core`.
-- [ ] dm-verity rootfs verify at boot (uses `agnosys/dmverity.cyr` via `agnosys-storage`)
-- [ ] LUKS unlock path (uses `agnosys/luks.cyr` via `agnosys-storage`)
-- [ ] TPM PCR binding for `EdgeBootConfig.pcr_bindings` ("7+14" default already in argonaut types; needs `agnosys-trust`)
-- [ ] Real hardware boot validation: RPi4, NUC
+### v1.2.0 — Edge boot scaffolding + capability detection (done, 2026-05-11)
+
+First 1.2.x minor. Pulls agnosys 1.2.5's `agnosys-storage` + `agnosys-trust` profile bundles alongside `agnosys-core`. Scope: orchestration + detection + PCR read. Real-device verify/unlock deferred to 1.2.1 because argonaut's `EdgeBootConfig` doesn't yet carry deployment-specific device paths.
+- [x] `[deps.agnosys-storage]` + `[deps.agnosys-trust]` blocks in cyrius.cyml; fn_table headroom held (no warn)
+- [x] `src/lib/edge_boot.cyr` — `edge_boot_run(config)`, capability detection (`tpm_detect` + `dmverity_supported`), PCR read measurement, hard-prerequisite gating, `max_boot_ms` budget, stub LUKS/dm-verity calls
+- [x] Phase 6c wired into `kybernet_run`; drops to emergency on hard-prereq failure
+- [x] `src/lib/log.cyr` factor-out (forcing function: edge_boot needed klog without main.cyr dependency); pure refactor
+- [x] 17 new tests (6 PCR parser + 6 deterministic gating + 5 from 1.1.5 miscount); 160 → 177
+- [x] x86_64 1.028 MB → 1.148 MB (+120 KB), aarch64 cross-build clean, harness 751 ms
+
+### v1.2.1 — Real-device verify + edge harness variant
+
+Needs argonaut-side `EdgeBootConfig` extension first. Tracking in argonaut's roadmap.
+- [ ] argonaut: extend `EdgeBootConfig` with `data_device` / `hash_device` / `root_hash` / `luks_device` / `expected_pcrs` (vec of PCR baselines)
+- [ ] kybernet: `dmverity_verify(data, hash, root_hash)` against real devices
+- [ ] kybernet: `luks_open` + `luks_mount` against the configured LUKS volume; key from TPM unseal OR initramfs passphrase
+- [ ] kybernet: `tpm_verify_measured_boot(expected)` against the baseline vec
+- [ ] `qemu/build-initramfs.sh` edge variant — synthetic LUKS volume + dm-verity device staged into the cpio
+- [ ] `kybernet.harness=edge` cmdline path; assert edge-specific markers in boot-test.sh
+
+### v1.2.2 — Real hardware boot validation
+
+Hardware-in-the-loop; not CI-runnable.
+- [ ] RPi4 boot with verified rootfs + LUKS-encrypted data partition
+- [ ] NUC boot with TPM 2.0 PCR-sealed LUKS key
+- [ ] Hardware-validation report under `docs/audit/<date>-edge-hw.md` (mirror the P(-1) audit-doc pattern)
 
 ## Deferred (no movement until trigger surfaces)
 

@@ -1,0 +1,151 @@
+# kybernet/edge_boot.cyr — edge boot orchestration (verified + sealed)
+#
+# Reads `EdgeBootConfig` from the argonaut config and gates the
+# extra trust-platform checks on `boot_mode == BOOT_EDGE` +
+# `verify_on_boot`. Backed by agnosys-trust (`tpm_*`) and
+# agnosys-storage (`dmverity_*`, `luks_*`) profile bundles.
+#
+# 1.2.0 SCOPE (this file):
+#   - Capability detection: tpm_detect, dmverity_supported
+#   - PCR read per `pcr_bindings` spec ("7+14" → indices 7, 14)
+#   - Honor `tpm_attestation` / `readonly_rootfs` flags as hard
+#     prerequisites — boot aborts to emergency if required-but-missing
+#   - max_boot_ms wall-budget enforcement (warn-only)
+#   - LUKS unlock + dm-verity verify stubs that log "config land
+#     in 1.2.1" and skip. Real-device wiring needs argonaut to extend
+#     EdgeBootConfig with `data_device` / `hash_device` / `root_hash` /
+#     LUKS device paths — out of scope for this cut.
+#
+# 1.2.1 SCOPE (deferred):
+#   - argonaut EdgeBootConfig extension with device paths + expected
+#     PCR baseline vec
+#   - tpm_verify_measured_boot against the expected baseline
+#   - dmverity_verify with concrete data/hash devices
+#   - luks_open + luks_mount with TPM-unsealed or passphrase key
+#   - Real hardware boot validation (RPi4, NUC)
+
+# Status accessible after edge_boot_run completes — boot-phase logger
+# reads these to surface the detected platform shape.
+var _eb_tpm_present = 0;
+var _eb_dmverity_supp = 0;
+var _eb_pcr_count = 0;
+var _eb_elapsed_ms = 0;
+
+# Parse a `pcr_bindings` spec like "7+14" or "0,7,14" into a vec of
+# i64 indices. Accepts any non-digit separator (`+`, `,`, ` `, `:`)
+# so we tolerate the convention drift between consumers.
+fn _eb_parse_pcr_indices(spec) {
+    var out = vec_new();
+    if (spec == 0) { return out; }
+    var s = str_data(spec);
+    var slen = strlen(s);
+    var i = 0;
+    var cur = 0;
+    var have = 0;
+    while (i < slen) {
+        var c = load8(s + i);
+        if (c >= 48 && c <= 57) {
+            cur = cur * 10 + (c - 48);
+            have = 1;
+        } else {
+            if (have == 1) { vec_push(out, cur); cur = 0; have = 0; }
+        }
+        i = i + 1;
+    }
+    if (have == 1) { vec_push(out, cur); }
+    return out;
+}
+
+# Run the edge-boot pre-flight. Returns 1 to continue boot, 0 to
+# abort (caller should drop_to_emergency). Caller is responsible for
+# the boot_mode gate — this is a no-op if the config doesn't request
+# edge verification.
+fn edge_boot_run(config) {
+    if (config == 0) { return 1; }
+    # Only the EDGE boot mode invokes this layer. Other modes
+    # (server, desktop, minimal) skip the whole subsystem.
+    if (config_boot_mode(config) != BOOT_EDGE) { return 1; }
+    if (config_verify_boot(config) == 0) { return 1; }
+
+    var ec = config_edge(config);
+    if (ec == 0) {
+        klog("edge boot: no EdgeBootConfig — skipping");
+        return 1;
+    }
+
+    var start_ms = monotonic_ms();
+    var readonly_req = load64(ec);            # readonly_rootfs
+    var luks_req     = load64(ec + 8);        # luks_enabled
+    var tpm_req      = load64(ec + 16);       # tpm_attestation
+    var max_ms       = load64(ec + 24);       # max_boot_ms
+    var pcr_spec     = load64(ec + 32);       # pcr_bindings (Str)
+
+    klog("edge boot: capability detection");
+
+    # ---- TPM detection ----
+    _eb_tpm_present = tpm_detect();
+    if (_eb_tpm_present == 1) {
+        klog("edge boot: TPM detected (/dev/tpm{rm,}0)");
+    } else {
+        klog("edge boot: TPM not present");
+        if (tpm_req == 1) {
+            klog("FATAL: tpm_attestation required but TPM unavailable");
+            return 0;
+        }
+    }
+
+    # ---- dm-verity capability ----
+    _eb_dmverity_supp = dmverity_supported();
+    if (_eb_dmverity_supp == 1) {
+        klog("edge boot: dm-verity supported");
+    } else {
+        klog("edge boot: dm-verity not supported");
+        if (readonly_req == 1) {
+            klog("FATAL: readonly_rootfs required but dm-verity unavailable");
+            return 0;
+        }
+    }
+
+    # ---- PCR read (measurement; comparison vs baseline is 1.2.1) ----
+    if (_eb_tpm_present == 1 && tpm_req == 1) {
+        var indices = _eb_parse_pcr_indices(pcr_spec);
+        _eb_pcr_count = vec_len(indices);
+        if (_eb_pcr_count > 0) {
+            klog2("edge boot: reading PCRs ", "(measurement only — baseline compare lands in 1.2.1)");
+            var pcr_res = tpm_read_pcr(TPM_SHA256, indices);
+            if (is_err_result(pcr_res) == 1) {
+                klog("FATAL: tpm_read_pcr failed");
+                return 0;
+            }
+            klog("edge boot: PCR read complete");
+        } else {
+            klog("edge boot: pcr_bindings empty — skipping PCR read");
+        }
+    }
+
+    # ---- LUKS unlock — deferred to 1.2.1 ----
+    if (luks_req == 1) {
+        klog("edge boot: LUKS unlock — device-path config lands in 1.2.1; skipped");
+    }
+
+    # ---- dm-verity verify — deferred to 1.2.1 ----
+    if (readonly_req == 1 && _eb_dmverity_supp == 1) {
+        klog("edge boot: dm-verity verify — device-path config lands in 1.2.1; skipped");
+    }
+
+    # ---- Budget check ----
+    _eb_elapsed_ms = monotonic_ms() - start_ms;
+    if (max_ms > 0 && _eb_elapsed_ms > max_ms) {
+        klog("WARNING: edge boot exceeded max_boot_ms budget");
+    }
+
+    klog("edge boot: pre-flight complete");
+    return 1;
+}
+
+# Accessors — main reads these after edge_boot_run() to surface the
+# detected platform shape in the boot summary.
+fn edge_boot_tpm_present()    { return _eb_tpm_present; }
+fn edge_boot_dmverity_supp()  { return _eb_dmverity_supp; }
+fn edge_boot_pcr_count()      { return _eb_pcr_count; }
+fn edge_boot_elapsed_ms()     { return _eb_elapsed_ms; }

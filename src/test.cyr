@@ -2,6 +2,7 @@
 # Tests: Result returns, Option types, str_builder, callbacks
 
 # Kybernet modules (stdlib + deps resolved via cyrius.toml)
+include "src/lib/log.cyr"
 include "src/lib/console.cyr"
 include "src/lib/signals.cyr"
 include "src/lib/reaper.cyr"
@@ -12,6 +13,11 @@ include "src/lib/eventloop.cyr"
 include "src/lib/notify.cyr"
 include "src/lib/seccomp.cyr"
 include "src/lib/sandbox.cyr"
+include "src/lib/edge_boot.cyr"
+
+# log.cyr's slog() short-circuits on g_log_fd <= 0; we never call
+# slog_init() in tests so the default 0 is the right starting state.
+var g_log_fd = 0;
 
 fn test_constants() {
     println("--- constants ---");
@@ -439,6 +445,76 @@ fn test_cloexec_fcntl_probe() {
     return 0;
 }
 
+fn test_edge_boot_pcr_parser() {
+    println("--- edge boot pcr parser ---");
+    # 1.2.0 — `_eb_parse_pcr_indices` accepts any non-digit separator
+    # (`+`, `,`, space, colon) so consumer convention drift doesn't
+    # matter. Test the common shapes.
+    var i1 = _eb_parse_pcr_indices(str_from("7+14"));
+    assert_eq(vec_len(i1), 2, "7+14 parses to 2 indices");
+    assert_eq(vec_get(i1, 0), 7, "first index 7");
+    assert_eq(vec_get(i1, 1), 14, "second index 14");
+
+    var i2 = _eb_parse_pcr_indices(str_from("0,7,14,23"));
+    assert_eq(vec_len(i2), 4, "comma-separated parses to 4");
+    assert_eq(vec_get(i2, 0), 0, "first 0");
+    assert_eq(vec_get(i2, 3), 23, "last 23");
+
+    var i3 = _eb_parse_pcr_indices(str_from("  3  "));
+    assert_eq(vec_len(i3), 1, "space-padded single value");
+    assert_eq(vec_get(i3, 0), 3, "value 3");
+
+    var i4 = _eb_parse_pcr_indices(str_from(""));
+    assert_eq(vec_len(i4), 0, "empty string → 0 indices");
+
+    # Multi-digit boundary — 23 must not split as 2,3.
+    var i5 = _eb_parse_pcr_indices(str_from("23"));
+    assert_eq(vec_len(i5), 1, "23 is one index, not 2+3");
+    assert_eq(vec_get(i5, 0), 23, "value 23");
+    return 0;
+}
+
+fn test_edge_boot_gating() {
+    println("--- edge boot gating ---");
+    # 1.2.0 — verify the gate logic for the THREE deterministic skip
+    # paths: config=0, non-EDGE boot_mode, verify_on_boot=0. All three
+    # MUST return 1 (continue) without ever calling tpm_detect or
+    # dmverity_supported — i.e., without depending on test-host
+    # hardware/tooling state.
+    #
+    # The actual run path (EDGE + verify_on_boot=1 + tpm_attestation=1)
+    # IS environment-dependent — its outcome depends on whether the
+    # host has /dev/tpm0 + /usr/bin/tpm2_pcrread + /usr/sbin/veritysetup.
+    # That branch is exercised end-to-end by the qemu boot harness when
+    # the cmdline carries `kybernet.harness=edge`, not by unit tests.
+
+    # config=0: skip entirely, no subsystem touched.
+    assert_eq(edge_boot_run(0), 1, "config=0 → continue");
+
+    # Non-EDGE config: even with verify_on_boot=1, edge subsystem skips.
+    # argonaut_config_default() sets boot_mode = BOOT_DESKTOP so we
+    # exercise the boot_mode gate without constructing a custom config.
+    var cfg_desktop = argonaut_config_default();
+    assert_eq(edge_boot_run(cfg_desktop), 1, "BOOT_DESKTOP → continue");
+
+    # EDGE mode + verify_on_boot=0: still skips. We mutate the default
+    # config in place — boot_mode=EDGE, verify_on_boot=0.
+    var cfg_edge_noverify = argonaut_config_default();
+    store64(cfg_edge_noverify, BOOT_EDGE);          # boot_mode @ offset 0
+    store64(cfg_edge_noverify + 40, 0);             # verify_on_boot @ +40
+    assert_eq(edge_boot_run(cfg_edge_noverify), 1, "EDGE+verify=0 → continue");
+
+    # Accessors are deterministic in their initial state — before
+    # edge_boot_run runs through the detection branch, all four
+    # status globals are zero. The three calls above all short-
+    # circuited before the detection path, so the accessors still
+    # reflect zero.
+    assert_eq(edge_boot_tpm_present(), 0, "tpm_present accessor 0 after skip-only runs");
+    assert_eq(edge_boot_dmverity_supp(), 0, "dmverity_supp accessor 0 after skip-only runs");
+    assert_eq(edge_boot_pcr_count(), 0, "pcr_count accessor 0 after skip-only runs");
+    return 0;
+}
+
 fn test_owned_fd() {
     println("--- owned_fd ---");
     # Create and close an OwnedFd
@@ -690,6 +766,8 @@ fn main() {
     test_signal_buffer();
     test_cgroup_extended();
     test_cgroup_path_cache();
+    test_edge_boot_pcr_parser();
+    test_edge_boot_gating();
     test_notify_edge_cases();
     test_seccomp_agnostik_bridge();
     test_sandbox_rules();
