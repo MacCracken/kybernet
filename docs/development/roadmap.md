@@ -24,12 +24,12 @@ cc5 was at `fn_table 92%` / `identifier buffer 85%` against the 1.1.0 build — 
 - [x] agnosys 1.2.4 → 1.2.5
 - [x] Result: fn_table + identifier buffer warnings gone; binary 1.29 MB → **1.02 MB** (−21%, parity with argonaut); dead-fn count 3116 → 2430; 140/140 tests, aarch64 cross-build clean
 
-### v1.1.2 — CLOEXEC audit + mount graceful degradation
+### v1.1.2 — CLOEXEC audit + mount graceful degradation (done, 2026-05-11)
 
-Carried forward from old v1.1.0 slate. argonaut 1.6.2 closeout audit added `reset_child_signal_mask` and `build_default_envp`; the equivalent fd-hygiene sweep belongs at the kybernet layer (we own pre-exec).
-- [ ] CLOEXEC sweep: every `sys_open` in `src/lib/*.cyr` either sets `O_CLOEXEC` or has a documented reason
-- [ ] `mount.cyr` — graceful degradation on per-mount failure (today: hard fail except for `/sys/fs/cgroup` already retried)
-- [ ] Add regression tests for both
+- [x] CLOEXEC sweep: every `sys_open` in `src/main.cyr` + `src/lib/*.cyr` either sets `O_CLOEXEC` or has a documented reason (fds 0/1/2 in console.cyr intentionally pass through exec)
+- [x] `mount.cyr` — graceful degradation: `required` field per mount-table entry; required failures fatal, optional failures logged + skipped. `/dev/pts` `/dev/shm` are optional; `/proc` `/sys` `/run` `/sys/fs/cgroup` are required
+- [x] Regression tests: `test_cloexec_fcntl_probe` (fcntl F_GETFD probe with control), `test_mount_required_flag` (per-entry classification + skipped accessor bounds). 140 → 153 tests
+- [x] Upstream filing: `cyrius/docs/development/issues/2026-05-11-kybernet-fn-table-identifier-buffer-caps.md` requesting fn_table + identifier buffer cap doubling (adjacent to 1.1.1 headroom work; not a fix for 1.1.2)
 
 ### v1.1.3 — Cgroup path precomputation
 

@@ -379,6 +379,66 @@ fn test_mount_table() {
     return 0;
 }
 
+fn test_mount_required_flag() {
+    println("--- mount required flag ---");
+    # 1.1.2: each entry grew from 5 i64s to 6 — the 6th is `required`
+    # (1 = fatal on failure, 0 = log + skip + continue). Verify the
+    # flag is stored at offset +40 for each entry and matches the
+    # design: /proc /sys /run /sys/fs/cgroup = required; /dev/pts
+    # /dev/shm = optional. Regression catches re-orderings or stride
+    # mistakes the next time someone edits _init_mount_table.
+    _init_mount_table();
+    var t = &_mount_table;
+    # /proc
+    assert_eq(load64(t + 0 * 48 + 40), 1, "/proc required");
+    # /sys
+    assert_eq(load64(t + 1 * 48 + 40), 1, "/sys required");
+    # /dev/pts
+    assert_eq(load64(t + 2 * 48 + 40), 0, "/dev/pts optional");
+    # /dev/shm
+    assert_eq(load64(t + 3 * 48 + 40), 0, "/dev/shm optional");
+    # /run
+    assert_eq(load64(t + 4 * 48 + 40), 1, "/run required");
+    # /sys/fs/cgroup
+    assert_eq(load64(t + 5 * 48 + 40), 1, "cgroup required");
+
+    # Skipped-mount accessors: no mount has been attempted in this
+    # test process, so the counter should be zero and out-of-bounds
+    # indices should return 0 (not crash).
+    assert_eq(mount_skipped_count(), 0, "no skipped mounts at start");
+    assert_eq(mount_skipped_target(0), 0, "skipped[0] OOB → 0");
+    assert_eq(mount_skipped_target(0 - 1), 0, "skipped[-1] OOB → 0");
+    return 0;
+}
+
+fn test_cloexec_fcntl_probe() {
+    println("--- cloexec fcntl probe ---");
+    # 1.1.2 regression: verify O_CLOEXEC actually sets FD_CLOEXEC on
+    # the kernel side. Without this, the source-level audit (every
+    # long-lived sys_open carries O_CLOEXEC) could pass while a
+    # macro/typo silently turned the flag into a no-op.
+    # F_GETFD = 1, FD_CLOEXEC = 1 (POSIX, arch-independent).
+    # SYS_FCNTL is defined for both x86_64 (72) and aarch64 (25) —
+    # safe to call directly. No sys_fcntl wrapper in stdlib at 5.10.44.
+
+    # Probe 1: O_CLOEXEC set → FD_CLOEXEC bit must be 1.
+    var fd1 = sys_open("/dev/null", O_RDONLY | O_CLOEXEC, 0);
+    assert(fd1 >= 0, "open /dev/null with CLOEXEC");
+    var flags1 = syscall(SYS_FCNTL, fd1, 1, 0);
+    assert_eq(flags1 & 1, 1, "FD_CLOEXEC bit set when O_CLOEXEC");
+    sys_close(fd1);
+
+    # Probe 2: O_CLOEXEC NOT set → FD_CLOEXEC bit must be 0. This is
+    # the control — proves the probe distinguishes set from unset
+    # (a bogus probe that always returned 1 would still pass test 1).
+    var fd2 = sys_open("/dev/null", O_RDONLY, 0);
+    assert(fd2 >= 0, "open /dev/null without CLOEXEC");
+    var flags2 = syscall(SYS_FCNTL, fd2, 1, 0);
+    assert_eq(flags2 & 1, 0, "FD_CLOEXEC bit clear without O_CLOEXEC");
+    sys_close(fd2);
+    return 0;
+}
+
 fn test_owned_fd() {
     println("--- owned_fd ---");
     # Create and close an OwnedFd
@@ -580,6 +640,8 @@ fn main() {
     test_agnostik_security();
     test_agnostik_agent();
     test_mount_table();
+    test_mount_required_flag();
+    test_cloexec_fcntl_probe();
     test_owned_fd();
     test_eventloop_lifecycle();
     test_eventloop_setup_full();

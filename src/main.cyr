@@ -57,7 +57,10 @@ fn _log_write(fd, prefix, plen, msg) {
 }
 
 fn kmsg(msg) {
-    var fd = sys_open("/dev/kmsg", O_WRONLY, 0);
+    # O_CLOEXEC: defensive — fd is closed at the end of this frame,
+    # but if a signal handler or service fork interleaves, the
+    # /dev/kmsg fd must not leak into the spawned process.
+    var fd = sys_open("/dev/kmsg", O_WRONLY | O_CLOEXEC, 0);
     if (fd >= 0) {
         sys_write(fd, msg, strlen(msg));
         sys_close(fd);
@@ -102,7 +105,9 @@ fn klog2(prefix, msg) {
 # ================================================================
 
 fn slog_init() {
-    g_log_fd = sys_open("/var/log/kybernet.log", O_WRONLY | O_CREAT | O_APPEND, 0x1A4);
+    # O_CLOEXEC required: g_log_fd is long-lived (open for PID 1's
+    # lifetime) and would leak into every spawned service without it.
+    g_log_fd = sys_open("/var/log/kybernet.log", O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0x1A4);
     return 0;
 }
 
@@ -220,7 +225,9 @@ fn execute_tmpfiles() {
             created = created + 1;
         } elif (etype == TMP_TOUCH) {
             var mode = load64(entry + 16);
-            var fd = sys_open(path, O_WRONLY | O_CREAT, mode);
+            # O_CLOEXEC: tmpfile touch — fd is closed immediately after
+            # creation; CLOEXEC guards against fork-between-open-and-close.
+            var fd = sys_open(path, O_WRONLY | O_CREAT | O_CLOEXEC, mode);
             if (fd >= 0) {
                 sys_close(fd);
                 created = created + 1;
@@ -550,6 +557,19 @@ fn kybernet_run() {
     if (is_ok(mount_r) == 1) {
         kmsg("phase 3: filesystems mounted");
         klog("filesystems mounted");
+    } else {
+        # Required-mount failure: log and continue to emergency shell
+        # below rather than wedging without a recovery path. The Err
+        # branch returns errno; we drop it on the floor here because
+        # klog2 is best-effort (emergency boot may have no console).
+        kmsg("phase 3: FATAL required mount failed");
+        klog("FATAL: required mount failed");
+    }
+    # Surface any optional mounts that were skipped so the operator
+    # knows why /dev/pts or /dev/shm aren't available without having
+    # to read /proc/self/mounts. Boot continues either way.
+    for (var smi = 0; smi < mount_skipped_count(); smi = smi + 1) {
+        klog2("skipped optional mount: ", mount_skipped_target(smi));
     }
 
     # Phase 3b: Initialize structured logging (needs /var/log)

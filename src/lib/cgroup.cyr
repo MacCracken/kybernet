@@ -54,7 +54,11 @@ fn move_to_cgroup(service, pid) {
     var numbuf = alloc(24);
     var nlen = fmt_int_buf(pid, numbuf);
 
-    var fd = sys_open(str_data(procs), O_WRONLY, 0);
+    # O_CLOEXEC: cgroup write fds are closed in-frame, but kybernet
+    # is PID 1 — any fork (service spawn, emergency shell) that
+    # interleaves with this call must not inherit the cgroup-control
+    # fd. Same rationale applies to every sys_open in this file.
+    var fd = sys_open(str_data(procs), O_WRONLY | O_CLOEXEC, 0);
     if (fd < 0) { return Err(0 - fd); }
     var w = sys_write(fd, numbuf, nlen);
     sys_close(fd);
@@ -68,7 +72,7 @@ fn move_to_cgroup(service, pid) {
 fn kill_cgroup(service) {
     # Try cgroup.kill first (fast path, kernel 5.14+)
     var killpath = cgroup_file(service, "cgroup.kill");
-    var fd = sys_open(str_data(killpath), O_WRONLY, 0);
+    var fd = sys_open(str_data(killpath), O_WRONLY | O_CLOEXEC, 0);
     if (fd >= 0) {
         sys_write(fd, "1", 1);
         sys_close(fd);
@@ -112,7 +116,7 @@ fn _cgroup_write_u64(service, filename, value) {
     var file = cgroup_file(service, filename);
     var numbuf = alloc(24);
     var nlen = fmt_int_buf(value, numbuf);
-    var fd = sys_open(str_data(file), O_WRONLY, 0);
+    var fd = sys_open(str_data(file), O_WRONLY | O_CLOEXEC, 0);
     if (fd < 0) { return Err(0 - fd); }
     var w = sys_write(fd, numbuf, nlen);
     sys_close(fd);

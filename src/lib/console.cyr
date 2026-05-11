@@ -13,7 +13,11 @@ fn setup_console() {
     sys_close(1);
     sys_close(2);
 
-    # Open /dev/null as fd 0 (stdin)
+    # NOTE: NO O_CLOEXEC on the three opens below. fds 0/1/2 are
+    # standard I/O and MUST pass through exec to spawned services —
+    # they're the contract every Linux process expects. Argonaut
+    # services inherit these fds intentionally so kernel/early-boot
+    # output lands on /dev/console.
     var null_fd = sys_open("/dev/null", O_RDWR, 0);
     if (null_fd < 0) { return Err(0 - null_fd); }
 
