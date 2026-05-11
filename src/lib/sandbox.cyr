@@ -140,7 +140,10 @@ fn sandbox_apply(builder) {
         var allowed = _access_to_flags(access);
 
         if (allowed != 0) {
-            var path_fd = syscall(SYS_OPEN, path, O_PATH_FLAG | O_CLOEXEC_FLAG, 0);
+            # sys_open() dispatches to openat(AT_FDCWD, ...) on aarch64
+            # (no SYS_OPEN syscall on that arch). Direct `syscall(SYS_OPEN, ...)`
+            # would fail to compile on `cyrius build --aarch64`.
+            var path_fd = sys_open(path, O_PATH_FLAG | O_CLOEXEC_FLAG, 0);
             if (path_fd < 0) {
                 sys_close(ruleset_fd);
                 return Err(0 - path_fd);
@@ -235,7 +238,10 @@ fn sandbox_from_ruleset(ruleset) {
         var allowed = _ll_access_to_kernel(access_vec);
 
         if (allowed != 0) {
-            var path_fd = syscall(SYS_OPEN, path, O_PATH_FLAG | O_CLOEXEC_FLAG, 0);
+            # sys_open() dispatches to openat(AT_FDCWD, ...) on aarch64
+            # (no SYS_OPEN syscall on that arch). Direct `syscall(SYS_OPEN, ...)`
+            # would fail to compile on `cyrius build --aarch64`.
+            var path_fd = sys_open(path, O_PATH_FLAG | O_CLOEXEC_FLAG, 0);
             if (path_fd < 0) {
                 sys_close(ruleset_fd);
                 return Err(0 - path_fd);
