@@ -7,6 +7,13 @@
 # (agnosys / agnostik / libro / argonaut all gitignore lib/).
 /lib/
 
+# QEMU harness build artifacts — `qemu/build-initramfs.sh` stages a
+# tree under `qemu/initramfs/` and bundles `initramfs.cpio.gz`. The
+# checked-in shape lives in `qemu/build-initramfs.sh` only; the
+# artifacts regenerate from it. Matches argonaut's qemu/ convention.
+/qemu/initramfs/
+/qemu/initramfs.cpio.gz
+
 # IDE
 .idea/
 .vscode/

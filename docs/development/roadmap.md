@@ -38,12 +38,16 @@ cc5 was at `fn_table 92%` / `identifier buffer 85%` against the 1.1.0 build — 
 - [x] Results: same-pair best case 267× (3 ns), realistic 5-file burst 8.2× (97 ns), cold path unchanged. Hit the ~10× target on the realistic case
 - [x] Regression test: `test_cgroup_path_cache` covers cold → warm → mixed-filename → invalidation → re-build. New burst bench `bench_cgroup_file_burst` reflects the `cgroup_apply_limits` shape. 153 → 160 tests
 
-### v1.1.4 — QEMU PID-1 boot harness (next)
+### v1.1.4 — QEMU PID-1 boot harness (done, 2026-05-11)
 
-Carried forward from the old v1.0.1 slate; **unblocked** by argonaut 1.6.2's `pid1_harness.cyr` pattern (12 KB statically-linked helper + initramfs-staged marker file). We can lift that pattern directly.
-- [ ] Port `qemu/build-initramfs.sh` from argonaut, swap the helper for a kybernet boot-stage marker
-- [ ] Boot-time gate: `< 3s` to `STAGE_BOOT_COMPLETE` in minimal mode, `< 3s` desktop
-- [ ] Wire into CI as a non-fatal `qemu-boot-test.sh` job (mirrors argonaut's pattern — failures are signal, not blocker)
+- [x] `kybernet_harness_requested()` reads `/proc/cmdline` for `kybernet.harness=1` (substring + boundary-char checks, lifted from argonaut 1.6.x)
+- [x] Harness exit path wired into `kybernet_run()` — clean `do_shutdown(SHUTDOWN_POWEROFF)` after services start; skips event loop
+- [x] `qemu/build-initramfs.sh` rewritten — direct `cyrius build`, dynamic-loader + libc bundling for Arch's dynamically-linked busybox
+- [x] `qemu/boot-test.sh` rewritten — asserts 6 klog markers (starting → filesystems mounted → argonaut initialized → services started → harness done → shutdown), enforces `BUDGET_MS` (default 3000; CI 5000)
+- [x] CI job `qemu-harness` added: `continue-on-error: true`, skips with `::warning::` if `/dev/kvm` / qemu / kernel image is missing
+- [x] Fixed latent `klog2("boot: ", desc)` bug — was passing Str where cstr expected, printing garbage. Now passes `str_data(desc)`
+- [x] Local validation: boot wall time **789–860 ms** (KVM, kernel hand-off → phase 8 → clean shutdown) on a dev host. Single boot mode for now — per-mode gates deferred to when `kybernet.boot_mode=...` cmdline plumbing lands
+- [x] Auxiliary `boot-crash-test.sh` / `boot-shutdown-test.sh` repaired (stale `scripts/build.sh` refs; not PID-1 tests but still useful)
 
 ## v1.2.0 — Edge boot
 

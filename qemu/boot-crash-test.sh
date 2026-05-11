@@ -15,7 +15,7 @@ KERNEL="${1:-/boot/vmlinuz-linux-lts}"
 BINARY="${PROJECT_DIR}/build/kybernet"
 
 # Build if needed
-[ -f "$BINARY" ] || sh "${PROJECT_DIR}/scripts/build.sh"
+[ -f "$BINARY" ] || (cd "$PROJECT_DIR" && CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet >/dev/null)
 
 echo "Creating crash test initramfs..."
 INITRAMFS_DIR=$(mktemp -d)

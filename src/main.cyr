@@ -283,6 +283,68 @@ fn drop_to_emergency() {
 }
 
 # ================================================================
+# Harness mode — QEMU PID-1 boot-validation gate (1.1.4)
+# ================================================================
+# When `kybernet.harness=1` is on the kernel cmdline, kybernet runs
+# its normal boot sequence through phase 8 (services started) and
+# then shuts down cleanly instead of entering the event loop. The
+# qemu/boot-test.sh harness greps stdout for the phase markers and
+# the "harness done" line, asserting the full sequence completed
+# before the timeout fires.
+#
+# Pattern lifted from argonaut's pid1_harness_requested() (1.6.x).
+# Substring match with start-/end-boundary checks so
+# `kybernet.harness=11` or `nokybernet.harness=1` don't accidentally
+# trigger harness mode.
+
+fn kybernet_harness_requested() {
+    var fd = sys_open("/proc/cmdline", O_RDONLY | O_CLOEXEC, 0);
+    if (fd < 0) { return 0; }
+    var buf = alloc(1024);
+    var n = sys_read(fd, buf, 1024);
+    sys_close(fd);
+    if (n <= 0) { return 0; }
+    var needle = "kybernet.harness=1";
+    var nlen = 18;
+    var i = 0;
+    while (i <= n - nlen) {
+        var matched = 1;
+        var j = 0;
+        while (j < nlen) {
+            if (load8(buf + i + j) != load8(needle + j)) {
+                matched = 0;
+                j = nlen;
+            } else {
+                j = j + 1;
+            }
+        }
+        if (matched == 1) {
+            # Left boundary: start-of-buffer, space, or tab.
+            var left_ok = 0;
+            if (i == 0) { left_ok = 1; }
+            else {
+                var lb = load8(buf + i - 1);
+                if (lb == 32) { left_ok = 1; }
+                if (lb == 9)  { left_ok = 1; }
+            }
+            # Right boundary: end-of-buffer, space, tab, or newline.
+            var right_ok = 0;
+            var ri = i + nlen;
+            if (ri >= n) { right_ok = 1; }
+            else {
+                var rb = load8(buf + ri);
+                if (rb == 32) { right_ok = 1; }
+                if (rb == 9)  { right_ok = 1; }
+                if (rb == 10) { right_ok = 1; }
+            }
+            if (left_ok == 1 && right_ok == 1) { return 1; }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
 # Shutdown (coordinated via argonaut)
 # ================================================================
 
@@ -397,8 +459,10 @@ fn run_boot_stages() {
         var stage = load64(step);
         var desc = load64(step + 8);
 
-        klog2("boot: ", desc);
-        kmsg(desc);
+        # argonaut returns description as a Str (boxed) — klog2/kmsg
+        # need a cstr. str_data() reads the underlying buffer ptr.
+        klog2("boot: ", str_data(desc));
+        kmsg(str_data(desc));
 
         var ok = execute_boot_stage(stage);
         if (ok == 1) {
@@ -640,6 +704,18 @@ fn kybernet_run() {
     start_services();
     kmsg("phase 8: services started");
     klog("services started");
+
+    # 1.1.4 harness gate: if `kybernet.harness=1` was on /proc/cmdline,
+    # the boot-test scaffold has seen everything it needs (markers
+    # phase 0..8 + services_started). Shut down clean instead of
+    # entering the event loop — qemu's `-no-reboot` then terminates
+    # the VM cleanly and the test script asserts on the marker set.
+    if (kybernet_harness_requested() == 1) {
+        kmsg("phase 9: harness done — shutting down clean");
+        klog("harness done — shutting down clean");
+        do_shutdown(SHUTDOWN_POWEROFF);
+        return 0;
+    }
 
     kmsg("phase 9: ready — entering event loop");
     klog("ready — entering event loop");

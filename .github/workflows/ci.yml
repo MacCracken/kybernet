@@ -99,7 +99,7 @@ jobs:
             echo "ERROR: kybernet-aarch64 is not aarch64 ELF"; exit 1; }
           echo "kybernet-aarch64: $(wc -c < build/kybernet-aarch64) bytes"
 
-      - name: Test (140 assertions)
+      - name: Test (160 assertions)
         run: |
           cyrius test src/test.cyr 2>&1 | tee /tmp/test_output
           tail -1 /tmp/test_output | grep -E "^[0-9]+ passed," | grep -q "0 failed"
@@ -167,6 +167,66 @@ jobs:
           echo "sys_open: $OPENS, sys_close: $CLOSES (informational)"
           echo "security scan complete (fail: $FAIL)"
           exit $FAIL
+
+  qemu-harness:
+    name: QEMU PID-1 harness (best-effort)
+    runs-on: ubuntu-latest
+    # Non-fatal: GitHub-hosted runners rarely expose /dev/kvm, and
+    # sakshi's clock_init panics under TCG (missing invariant-TSC).
+    # The job runs the harness if all prerequisites are available and
+    # surfaces a clear warning otherwise — the signal is what matters,
+    # not gating every PR on it. Run locally for the hard gate
+    # (qemu/boot-test.sh — see roadmap v1.1.4).
+    continue-on-error: true
+    needs: [build]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check prerequisites
+        id: prereqs
+        run: |
+          missing=""
+          [ -r /dev/kvm ] || missing="$missing /dev/kvm"
+          command -v qemu-system-x86_64 >/dev/null 2>&1 || missing="$missing qemu-system-x86_64"
+          KERNEL=""
+          for cand in /boot/vmlinuz-linux-lts /boot/vmlinuz-linux /boot/vmlinuz-$(uname -r) /boot/vmlinuz; do
+            [ -f "$cand" ] && KERNEL="$cand" && break
+          done
+          [ -n "$KERNEL" ] || missing="$missing kernel-image"
+          if [ -n "$missing" ]; then
+            echo "::warning::QEMU harness skipped — missing:$missing"
+            echo "skip=1" >> $GITHUB_OUTPUT
+          else
+            echo "kernel=$KERNEL" >> $GITHUB_OUTPUT
+            echo "skip=0" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install Cyrius toolchain
+        if: steps.prereqs.outputs.skip == '0'
+        run: |
+          CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep -oP '(?<=^cyrius = ")[^"]+' cyrius.cyml)}"
+          curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
+          tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
+          CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
+          mkdir -p "$HOME/.cyrius/bin" "$HOME/.cyrius/lib"
+          cp "$CYRIUS_DIR/bin/"* "$HOME/.cyrius/bin/" 2>/dev/null || true
+          cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/lib/" 2>/dev/null || true
+          chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
+          echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
+
+      - name: Resolve deps + build kybernet
+        if: steps.prereqs.outputs.skip == '0'
+        run: |
+          cyrius deps
+          mkdir -p build
+          CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet
+
+      - name: Run harness
+        if: steps.prereqs.outputs.skip == '0'
+        env:
+          BUDGET_MS: 5000   # CI runners are slower than dev hosts — 5s buys headroom
+        run: |
+          bash qemu/boot-test.sh "${{ steps.prereqs.outputs.kernel }}" 30
 
   docs:
     name: Documentation
