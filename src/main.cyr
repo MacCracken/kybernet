@@ -110,10 +110,10 @@ fn slog(level, msg) {
     if (g_log_fd <= 0) { return 0; }
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"level\":\"");
-        str_builder_add_cstr(sb, level);
-        str_builder_add_cstr(sb, "\",\"msg\":\"");
-        str_builder_add_cstr(sb, msg);
-        str_builder_add_cstr(sb, "\"}\n");
+    str_builder_add_cstr(sb, level);
+    str_builder_add_cstr(sb, "\",\"msg\":\"");
+    str_builder_add_cstr(sb, msg);
+    str_builder_add_cstr(sb, "\"}\n");
     var line = str_builder_build(sb);
     sys_write(g_log_fd, str_data(line), str_len(line));
     return 0;

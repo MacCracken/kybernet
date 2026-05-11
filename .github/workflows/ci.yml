@@ -49,13 +49,16 @@ jobs:
           fi
 
       - name: Format check
-        # cyrius fmt --check emits the formatted source to stdout;
-        # diff against the file in-place to catch drift.
+        # `cyrius fmt <file>` writes the formatted source to stdout;
+        # diff against the committed file catches drift. (`--check`
+        # became a no-op in cyrius 5.9.x — it emits nothing and
+        # exits 0 regardless, so diffing its stdout reports spurious
+        # drift on every file. Matches argonaut / agnosys CI.)
         run: |
           fail=0
           for f in src/main.cyr src/test.cyr src/bench.cyr src/lib/*.cyr; do
             [ -f "$f" ] || continue
-            if ! diff -q <(cyrius fmt "$f" --check 2>/dev/null) "$f" > /dev/null; then
+            if ! diff -q <(cyrius fmt "$f" 2>/dev/null) "$f" > /dev/null; then
               echo "needs fmt: $f"
               fail=1
             fi
