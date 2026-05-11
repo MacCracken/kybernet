@@ -529,7 +529,7 @@ fn handle_notify_msg() {
 # Main boot + event loop
 # ================================================================
 
-fn run() {
+fn kybernet_run() {
     klog("starting");
     kmsg("phase 0: starting");
 
@@ -658,7 +658,7 @@ fn main() {
         klog("WARNING: not running as PID 1");
     }
 
-    var exit_code = run();
+    var exit_code = kybernet_run();
     return exit_code;
 }
 

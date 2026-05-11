@@ -36,10 +36,11 @@ jobs:
         run: cyrius deps
 
       - name: Verify dep hashes
-        # cyrius.lock pins agnosys/agnostik/libro/argonaut hashes; CI fails
-        # if a resolved file's sha256 doesn't match the locked entry.
-        # Skip on the first push that introduces a new dep before
-        # cyrius.lock is generated and committed.
+        # cyrius.lock pins agnosys/agnostik/libro/patra/argonaut hashes
+        # (plus sigil/sakshi pulled in transitively by libro+patra).
+        # CI fails if a resolved file's sha256 doesn't match the locked
+        # entry. Skip on the first push that introduces a new dep
+        # before cyrius.lock is generated and committed.
         run: |
           if [ -f cyrius.lock ]; then
             cyrius deps --verify

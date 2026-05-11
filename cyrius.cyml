@@ -5,80 +5,103 @@ description = "PID 1 init system for AGNOS"
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/kybernet"
 language = "cyrius"
-cyrius = "5.7.12"
+cyrius = "5.10.44"
 
 [build]
 entry = "src/main.cyr"
 test = "src/test.cyr"
 output = "build/kybernet"
 
+# `sakshi` and `sigil` are NOT listed as stdlib pins — libro 2.5+
+# promoted both to external git-pinned deps and patra 1.9+ pulls
+# sakshi as its own dep. They land in lib/ via `cyrius deps`
+# transitive resolution and would otherwise duplicate-define
+# against the version-pinned stdlib copy. Mirrors argonaut 1.6+'s
+# manifest convention.
 [deps]
 stdlib = [
     "string",
     "fmt",
     "alloc",
-    "io",
     "vec",
     "str",
-    "fnptr",
-    "tagged",
-    "callback",
-    "hashmap",
-    "json",
-    "freelist",
-    "process",
-    "sakshi",
-    "sigil",
     "syscalls",
+    "io",
+    "fs",
+    "process",
+    "hashmap",
+    "tagged",
+    "json",
+    "fnptr",
+    "callback",
+    "freelist",
     "mmap",
     "bigint",
     "chrono",
-    "bench",
+    "ct",
+    "keccak",
+    "thread",
+    "random",
+    "slice",
+    "trait",
+    "net",
+    "result",
     "assert",
+    "bench",
 ]
+
+# Dist-bundle adoption (1.1.0): cc5 lifts the cc3-era 64-struct
+# ceiling that previously forced selective module imports here.
+# Bundles also insulate kybernet from upstream module renames
+# (the reason the 1.0.2 → 1.1.0 jump was forced — agnosys moved
+# `lib/syscalls_linux.cyr` → `src/syscall.cyr`).
 
 [deps.agnosys]
 git = "https://github.com/MacCracken/agnosys.git"
 path = "../agnosys"
-tag = "1.0.2"
-modules = ["lib/syscalls_linux.cyr"]
+tag = "1.2.4"
+modules = ["dist/agnosys.cyr"]
 
 [deps.agnostik]
 git = "https://github.com/MacCracken/agnostik.git"
 path = "../agnostik"
-tag = "1.0.0"
-modules = [
-    "src/error.cyr",
-    "src/types.cyr",
-    "src/security.cyr",
-    "src/agent.cyr",
-]
+tag = "1.2.1"
+modules = ["dist/agnostik.cyr"]
 
 [deps.libro]
 git = "https://github.com/MacCracken/libro.git"
 path = "../libro"
-tag = "2.0.5"
-modules = [
-    "src/error.cyr",
-    "src/hasher.cyr",
-    "src/entry.cyr",
-    "src/verify.cyr",
-    "src/query.cyr",
-    "src/retention.cyr",
-    "src/chain.cyr",
-    "src/export.cyr",
-]
+tag = "2.6.2"
+modules = ["dist/libro.cyr"]
 
+# patra is pulled transitively by libro 2.6+; declared explicitly
+# here to pin the version kybernet ships with rather than inheriting
+# whatever libro's tag happens to point at. Matches argonaut 1.6+.
+[deps.patra]
+git = "https://github.com/MacCracken/patra.git"
+tag = "1.9.3"
+modules = ["dist/patra.cyr"]
+
+# argonaut has no dist bundle — selective module imports remain.
+# The module list mirrors argonaut's own src/main.cyr include order.
+# resolver/notify/audit_ext were added in 1.6.x to back symbols
+# referenced from health/init/process_mgmt; pid1_harness intentionally
+# omitted (kybernet IS PID 1 — the harness is for argonaut's own
+# QEMU-driven PID-1 graduation tests, not consumer-facing).
 [deps.argonaut]
 git = "https://github.com/MacCracken/argonaut.git"
 path = "../argonaut"
-tag = "1.5.0"
+tag = "1.6.3"
 modules = [
     "src/types.cyr",
-    "src/audit.cyr",
-    "src/services.cyr",
-    "src/health.cyr",
-    "src/process_mgmt.cyr",
     "src/boot.cyr",
+    "src/services.cyr",
+    "src/process_mgmt.cyr",
+    "src/resolver.cyr",
+    "src/health.cyr",
+    "src/notify.cyr",
+    "src/tmpfiles.cyr",
+    "src/audit.cyr",
+    "src/audit_ext.cyr",
     "src/init.cyr",
 ]

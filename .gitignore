@@ -2,6 +2,11 @@
 /build/
 /rust-old/target/
 
+# Resolved dependencies — populated by `cyrius deps` from `cyrius.cyml`
+# and pinned by sha256 in `cyrius.lock`. Match the AGNOS-wide convention
+# (agnosys / agnostik / libro / argonaut all gitignore lib/).
+/lib/
+
 # IDE
 .idea/
 .vscode/

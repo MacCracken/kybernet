@@ -1,10 +1,9 @@
 # kybernet_bench.cyr — benchmark suite for kybernet modules
 # Measures per-operation costs for PID 1 hot paths.
 #
-# Build: sh scripts/bench.sh
-# Run:   ./build/kybernet_bench
+# Run: cyrius bench src/bench.cyr
 
-# Kybernet modules (deps resolved via cyrb.toml)
+# Kybernet modules (stdlib + deps auto-included via cyrius.cyml)
 include "src/lib/console.cyr"
 include "src/lib/signals.cyr"
 include "src/lib/reaper.cyr"
