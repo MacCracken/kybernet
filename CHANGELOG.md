@@ -7,6 +7,47 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.2.1] — 2026-05-11
+
+**Pin argonaut 1.7.0 — boot-to-shell MVP path lit.** Consumer bump
+that picks up argonaut's new `BOOT_MINIMAL` agnoshi registration.
+Kybernet in BOOT_MINIMAL mode now launches agnoshi as a console
+shell with no `aethersafha` dependency, enabling the AGNOS
+closed-beta MVP (kernel + kybernet + shell prompt on real iron
+without the desktop compositor stack).
+
+### Changed
+
+- **`[deps.argonaut]` tag**: 1.6.2 → 1.7.0. Picks up argonaut's
+  `default_services(BOOT_MINIMAL)` agnoshi addition + the
+  `STAGE_SHELL` step in `build_boot_sequence(BOOT_MINIMAL)`.
+- Rebuilt against Cyrius 5.10.44 + argonaut 1.7.0. Binary size:
+  ~1.15 MB (was ~1.1 MB at 1.2.0; +~50 KB from agnoshi service
+  registration + STAGE_SHELL boot step in the argonaut bundle).
+
+### Tests
+
+- **177 passed, 0 failed** — full kybernet test suite clean against
+  argonaut 1.7.0. No kybernet-side changes; this is purely a
+  consumer pin bump.
+
+### Motivation
+
+The AGNOS closed-beta MVP is **boot-to-shell on real hardware**.
+Previously kybernet's BOOT_MINIMAL mode registered only daimon —
+no shell — and BOOT_DESKTOP required `aethersafha` (Wayland
+compositor, not yet Cyrius-ported). argonaut 1.7.0 unblocks the
+minimal-mode-with-shell path; this kybernet release picks it up.
+
+### Verification
+
+- `cyrius deps` clean resolution.
+- `CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet` clean.
+- Test suite 177/177.
+- Static linkage preserved (no glibc dependency).
+
+---
+
 ## [1.2.0] — 2026-05-11
 
 **Edge boot — first 1.2.x minor.** Lifts the verified-and-sealed boot machinery into kybernet via agnosys 1.2.5's `agnosys-storage` and `agnosys-trust` profile bundles, alongside the existing `agnosys-core`. First kybernet release to pull more than one agnosys profile; first to declare a `[deps.agnosys-*]` block per profile. The 1.1.1 CHANGELOG flagged this as the moment fn_table headroom would press back into the warn band — measured this cut: still under, no warning emitted.
