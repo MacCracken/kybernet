@@ -708,6 +708,13 @@ fn kybernet_run() {
 }
 
 fn main() {
+    # CMOS CP 0x30: kybernet entry. AGNOS syscall 26 = write_boot_checkpoint,
+    # writes CMOS[0x50] = 0x30. On Linux this invokes a different syscall
+    # (msync) with garbage args and silently fails — harmless. Iron-boot
+    # diagnostic: if CMOS[0x50] reaches 0x30, kybernet's main() executed
+    # at least one syscall after the ring-3 transition.
+    syscall(26, 0x30);
+
     alloc_init();
 
     # Check if we're PID 1
