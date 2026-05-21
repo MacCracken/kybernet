@@ -6,8 +6,8 @@
 
 - **Type**: Cyrius binary (PID 1 init)
 - **License**: GPL-3.0-only
-- **Version**: 1.2.0
-- **Language**: Cyrius 5.10.44 (matches argonaut's pin; via `~/.cyrius/bin/cyrius`, `cyriusly use 5.10.44`)
+- **Version**: 1.2.2
+- **Language**: Cyrius 6.0.1 (leads the AGNOS pack — argonaut/patra still at 5.10.44, agnosys/libro at 5.11.4; via `~/.cyrius/bin/cyrius`, `cyriusly use 6.0.1`)
 - **Tools**: `owl` to read .cyr files, `cyim` to write/edit .cyr files
 
 ## Goal

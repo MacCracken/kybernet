@@ -7,6 +7,84 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.2.2] — 2026-05-20
+
+**Cyrius toolchain bump to 6.0.1 — x86_64 clean, aarch64 cross-build
+blocked on upstream regression.** First kybernet cut to leapfrog the
+sibling AGNOS pack on the toolchain pin: argonaut + patra still at
+5.10.44, agnosys + libro at 5.11.4, kybernet now at 6.0.1. The "matches
+argonaut's pin" rationale carried since 1.1.0 no longer holds — kybernet
+leads on this one.
+
+### Changed
+
+- **`[cyrius]` toolchain pin**: 5.10.44 → **6.0.1**. The cc5→cycc rename
+  ceremony in the 6.0.x arc landed alongside new peer binaries (`cybs`,
+  `cyaudit`, `ts_test_runner`); cc5 / cc5_aarch64 are retained as
+  symlinks to `cycc` / `cycc_aarch64`. No kybernet source changes — the
+  bump is toolchain-only.
+
+### Stats
+
+- x86_64 DCE binary: 1.148 MB → **1.146 MB** (−2 KB; codegen wash)
+- aarch64 cross-build: **BROKEN** — see "Known issues" below
+- 177 / 177 tests pass (unchanged from 1.2.1)
+- fmt / vet clean
+- Compile-time warning catalogue identical to 1.2.1 (all pre-existing
+  dep-bundle duplicates documented since 1.1.0)
+- New compile-time note from cyrius 6.0.1: `cwd ./lib/ shadows
+  version-pinned /home/macro/.cyrius/versions/6.0.1/lib/` — informational
+  only; the 6.0.x wrapper ships a bundled stdlib snapshot and notes when
+  a project's `lib/` (populated by `cyrius deps`) takes precedence. Set
+  `CYRIUS_NO_WARN_SHADOW_LIB=1` to silence. Kybernet's per-dep tag pins
+  in `cyrius.cyml` are the source of truth; the note is expected.
+
+### Known issues
+
+- **aarch64 cross-build hangs indefinitely in `cycc_aarch64` 6.0.1**
+  after parse/typecheck completes. Reproduces with and without
+  `CYRIUS_DCE=1`. Process pins at 99.9% CPU with no further output;
+  killed at the 4-minute mark on four consecutive attempts. The same
+  source cross-built cleanly under cc5_aarch64 5.10.44 in seconds.
+  Filed upstream at
+  [`cyrius/docs/development/issues/2026-05-20-kybernet-cycc_aarch64-6.0.1-codegen-hang.md`](../cyrius/docs/development/issues/2026-05-20-kybernet-cycc_aarch64-6.0.1-codegen-hang.md).
+  A one-line `fn main()` source builds + errors fast on aarch64 under
+  6.0.1, so the regression is workload-specific to kybernet's compile
+  size, not a universal aarch64 failure. Adjacent to the 2026-05-19
+  `cycc 6.0.0 emits ud2 at every fncallN site` issue — both surfaced in
+  the cc5→cycc rename cycle.
+
+### Deferred
+
+- **aarch64 release artifact** — held until upstream resolves the
+  `cycc_aarch64` codegen hang. Until then 1.2.2's release surface is
+  x86_64-only.
+- **Re-pinning siblings** — argonaut / patra / agnosys / libro live on
+  5.10.44 or 5.11.4; their own cross-build state under 6.0.1 is
+  unverified by this cut. If a sibling lands on 6.0.1 with a working
+  aarch64 path, that's evidence the upstream fix has landed and
+  kybernet should rebuild + ship aarch64.
+
+### Verification
+
+- `cyrius deps` clean resolution (10 deps).
+- `CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet` clean; binary
+  1.146 MB.
+- `cyrius test src/test.cyr` — 177 passed, 0 failed.
+- `cyrius build --aarch64` — **FAIL** (hang; see Known issues).
+- QEMU PID-1 harness: not run this cut (KVM not available in this
+  session). The 1.2.1 harness pass against the same binary shape stands.
+
+### Audit-checklist pass
+
+Standing 1.1.5 P(-1) rules re-applied — no kybernet source changed, so
+all five (no literal syscall(N, ...); var X[N] sizing; Str vs cstr;
+PID-1 exit paths; mount-table size↔stride) hold by inheritance from
+1.2.1. The x86_64 DCE delta (−2 KB) is consistent with a no-source-change
+cut.
+
+---
+
 ## [1.2.1] — 2026-05-11
 
 **Pin argonaut 1.7.0 — boot-to-shell MVP path lit.** Consumer bump
