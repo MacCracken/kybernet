@@ -20,17 +20,17 @@ jobs:
 
       - name: Install Cyrius toolchain
         run: |
-          CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep -oP '(?<=^cyrius = ")[^"]+' cyrius.cyml)}"
+          set -e
+          # The cyrius.cyml `[package].cyrius` pin is the single source of
+          # truth for the toolchain version — no version is hardcoded in
+          # this YAML. Read the pin and hand it to the upstream installer,
+          # which fetches + lays out $HOME/.cyrius/{bin,lib}. Matches
+          # patra / sigil / agnosys CI.
+          CYRIUS_VERSION="$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')"
           echo "Installing Cyrius $CYRIUS_VERSION"
-          curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
-          tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
-          CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
-          mkdir -p "$HOME/.cyrius/bin" "$HOME/.cyrius/lib"
-          cp "$CYRIUS_DIR/bin/"* "$HOME/.cyrius/bin/" 2>/dev/null || true
-          cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/lib/" 2>/dev/null || true
-          chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
-          echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
-          echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
+          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
+            CYRIUS_VERSION="$CYRIUS_VERSION" sh
+          echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
       - name: Resolve dependencies
         run: cyrius deps
@@ -88,10 +88,12 @@ jobs:
         run: xxd -l 4 build/kybernet | grep -q "7f45 4c46"
 
       - name: Cross-build aarch64 (best-effort)
-        # Only when toolchain bundle includes cc5_aarch64.
+        # Only when the toolchain ships an aarch64 backend. cyrius 6.0.x
+        # renamed cc5_aarch64 → cycc_aarch64 (cc5_aarch64 retained as a
+        # symlink); accept either so the guard works across toolchain ages.
         run: |
-          if [ ! -x "$HOME/.cyrius/bin/cc5_aarch64" ]; then
-            echo "::warning::cc5_aarch64 not shipped with this Cyrius — skipping"
+          if [ ! -x "$HOME/.cyrius/bin/cycc_aarch64" ] && [ ! -x "$HOME/.cyrius/bin/cc5_aarch64" ]; then
+            echo "::warning::no aarch64 backend (cycc_aarch64/cc5_aarch64) in this Cyrius — skipping"
             exit 0
           fi
           CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr build/kybernet-aarch64
@@ -99,7 +101,7 @@ jobs:
             echo "ERROR: kybernet-aarch64 is not aarch64 ELF"; exit 1; }
           echo "kybernet-aarch64: $(wc -c < build/kybernet-aarch64) bytes"
 
-      - name: Test (160 assertions)
+      - name: Test
         run: |
           cyrius test src/test.cyr 2>&1 | tee /tmp/test_output
           tail -1 /tmp/test_output | grep -E "^[0-9]+ passed," | grep -q "0 failed"
@@ -204,15 +206,11 @@ jobs:
       - name: Install Cyrius toolchain
         if: steps.prereqs.outputs.skip == '0'
         run: |
-          CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep -oP '(?<=^cyrius = ")[^"]+' cyrius.cyml)}"
-          curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
-          tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
-          CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
-          mkdir -p "$HOME/.cyrius/bin" "$HOME/.cyrius/lib"
-          cp "$CYRIUS_DIR/bin/"* "$HOME/.cyrius/bin/" 2>/dev/null || true
-          cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/lib/" 2>/dev/null || true
-          chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
-          echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
+          set -e
+          CYRIUS_VERSION="$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')"
+          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
+            CYRIUS_VERSION="$CYRIUS_VERSION" sh
+          echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
       - name: Resolve deps + build kybernet
         if: steps.prereqs.outputs.skip == '0'
