@@ -6,7 +6,7 @@
 
 - **Type**: Cyrius binary (PID 1 init)
 - **License**: GPL-3.0-only
-- **Version**: 1.2.2
+- **Version**: 1.2.3
 - **Language**: Cyrius 6.0.14 (leads the AGNOS pack — argonaut/patra still at 5.10.44, agnosys/libro at 5.11.4; via `~/.cyrius/bin/cyrius`, `cyriusly use 6.0.14`)
 - **Tools**: `owl` to read .cyr files, `cyim` to write/edit .cyr files
 
@@ -71,14 +71,14 @@ Dependencies are resolved by `cyrius deps` from `cyrius.cyml` and locked in `cyr
 - **NOT pinned** (transitive via libro/patra): sakshi, sigil
 
 **External deps** (dist bundles where available; selective for argonaut which ships none):
-- **agnosys 1.2.5** — three profile bundles pulled at 1.2.0+:
+- **agnosys 1.2.8** — three profile bundles pulled at 1.2.0+:
   - `agnosys-core` (syscall + error + logging — 56 fns) — unconditional
   - `agnosys-storage` (luks + dmverity + fuse) — for edge_boot
   - `agnosys-trust` (tpm + ima + secureboot + certpin) — for edge_boot
-- **agnostik 1.2.1** — `dist/agnostik.cyr` (full bundle)
+- **agnostik 1.2.3** — `dist/agnostik.cyr` (full bundle)
 - **libro 2.6.2** — `dist/libro.cyr` (full bundle)
 - **patra 1.9.3** — `dist/patra.cyr` (explicit pin; libro pulls transitively)
-- **argonaut 1.7.0** — selective imports (no dist bundle shipped):
+- **argonaut 1.7.1** — selective imports (no dist bundle shipped):
   - `src/types.cyr` + `src/boot.cyr` + `src/services.cyr` + `src/process_mgmt.cyr`
   - `src/resolver.cyr` + `src/health.cyr` + `src/notify.cyr` + `src/tmpfiles.cyr`
   - `src/audit.cyr` + `src/audit_ext.cyr` + `src/init.cyr`

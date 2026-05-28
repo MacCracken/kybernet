@@ -59,7 +59,7 @@ stdlib = [
 [deps.agnosys]
 git = "https://github.com/MacCracken/agnosys.git"
 path = "../agnosys"
-tag = "1.2.5"
+tag = "1.2.8"
 # Profile bundle layering (1.2.0+): kybernet pulls `agnosys-core`
 # unconditionally for syscalls/error/logging (56 fns), plus the
 # `agnosys-storage` + `agnosys-trust` profiles which back the
@@ -72,19 +72,19 @@ modules = ["dist/agnosys-core.cyr"]
 [deps.agnosys-storage]
 git = "https://github.com/MacCracken/agnosys.git"
 path = "../agnosys"
-tag = "1.2.5"
+tag = "1.2.8"
 modules = ["dist/agnosys-storage.cyr"]
 
 [deps.agnosys-trust]
 git = "https://github.com/MacCracken/agnosys.git"
 path = "../agnosys"
-tag = "1.2.5"
+tag = "1.2.8"
 modules = ["dist/agnosys-trust.cyr"]
 
 [deps.agnostik]
 git = "https://github.com/MacCracken/agnostik.git"
 path = "../agnostik"
-tag = "1.2.1"
+tag = "1.2.3"
 modules = ["dist/agnostik.cyr"]
 
 [deps.libro]
@@ -110,7 +110,7 @@ modules = ["dist/patra.cyr"]
 [deps.argonaut]
 git = "https://github.com/MacCracken/argonaut.git"
 path = "../argonaut"
-tag = "1.7.0"
+tag = "1.7.1"
 modules = [
     "src/types.cyr",
     "src/boot.cyr",

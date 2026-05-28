@@ -7,6 +7,65 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.2.3] — 2026-05-28
+
+**Dependency refresh — agnosys 1.2.8, agnostik 1.2.3, argonaut 1.7.1.**
+Consumer bump that picks up the sibling pack's own 6.0.14 adoptions (all
+three are toolchain-refresh patches on the dep side — no public API, wire
+format, or type-vocabulary changes). No kybernet source changes; the cut
+is dependency + lock + doc only.
+
+### Changed
+
+- **`[deps.agnosys]` / `-storage` / `-trust`**: 1.2.5 → **1.2.8**. Upstream
+  is a cyrius 6.0.1 → 6.0.14 pin bump + workaround audit (hand-rolled JSON
+  serializers and the CI fmt diff-gate remain required under 6.0.14 — none
+  repairable yet). The 6.0.14 stdlib snapshot adds `syscalls_linux_common.cyr`
+  (shared Linux syscall numbers), now pulled transitively.
+- **`[deps.agnostik]`**: 1.2.1 → **1.2.3**. Toolchain-refresh patch (5.10.44
+  → 6.0.14); type vocabulary and wire formats byte-identical. Note: agnostik
+  1.2.3 moved stdlib population from `cyrius deps` to the new `cyrius lib
+  sync` command under 6.0.x — verified kybernet is **unaffected** (a clean
+  `./lib/` resolve via `cyrius deps` alone still lands the stdlib here, so no
+  `cyrius lib sync` CI step is needed).
+- **`[deps.argonaut]`**: 1.7.0 → **1.7.1**. Toolchain pin to 6.0.14 +
+  aarch64 cross-build restoration on argonaut's side. Argonaut 1.7.1 bumps
+  its own patra to 1.10.3 internally; **kybernet holds its explicit patra
+  pin at 1.9.3** (the manifest's source-of-truth pin governs) — build, tests,
+  and harness are clean against the 1.9.3 + argonaut-1.7.1 combination.
+- **`cyrius.lock`**: regenerated — 54 → **55** locked units (the new
+  `syscalls_linux_common.cyr` stdlib file).
+
+### Stats
+
+- x86_64 DCE binary: 1.146 MB → **1.150 MB** (1,149,800 B; +2,880 B from
+  refreshed dep content)
+- aarch64 DCE binary: 1.258 MB → **1.262 MB** (1,262,408 B; +4,296 B)
+- 177 / 177 tests pass (unchanged from 1.2.2)
+- fmt / vet clean; warning catalogue identical (pre-existing dep-bundle
+  duplicates documented since 1.1.0)
+
+### Verification
+
+- All three requested tags confirmed to exist as released git tags
+  (`git tag --list`) and to match their repos' VERSION files before pinning
+  — none ahead of the latest tag.
+- `cyrius deps` clean resolution (10 deps, 55 locked); fresh-`./lib/` resolve
+  verified (no `cyrius lib sync` dependency).
+- `CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet` clean; 1.150 MB.
+- `cyrius test src/test.cyr` — 177 passed, 0 failed.
+- `CYRIUS_DCE=1 cyrius build --aarch64 …` — clean; 1.262 MB.
+- QEMU PID-1 harness (`bash qemu/boot-test.sh`, KVM available): **OK** — all
+  six boot markers, boot wall time 746 ms within the 3000 ms budget.
+
+### Audit-checklist pass
+
+Standing 1.1.5 P(-1) rules re-applied — no kybernet source changed, so all
+five (no literal syscall(N, ...); var X[N] sizing; Str vs cstr; PID-1 exit
+paths; mount-table size↔stride) hold by inheritance from 1.2.2.
+
+---
+
 ## [1.2.2] — 2026-05-28
 
 **Cyrius toolchain bump to 6.0.14 — both arches clean, aarch64
