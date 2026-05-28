@@ -90,7 +90,14 @@ sudo mknod "${INITRAMFS_DIR}/dev/kmsg"    c 1 11 2>/dev/null || true
 sudo chmod 666 "${INITRAMFS_DIR}/dev/console" "${INITRAMFS_DIR}/dev/null" "${INITRAMFS_DIR}/dev/ttyS0" "${INITRAMFS_DIR}/dev/kmsg" 2>/dev/null || true
 
 cd "${INITRAMFS_DIR}"
-find . | bsdcpio -o -H newc 2>/dev/null | gzip > "${SCRIPT_DIR}/initramfs.cpio.gz"
+# Prefer bsdcpio (libarchive) where present; fall back to GNU cpio so the
+# harness builds on stock CI runners that ship only `cpio`. Both emit the
+# `newc` format the kernel's initramfs loader expects.
+if command -v bsdcpio >/dev/null 2>&1; then
+    find . | bsdcpio -o -H newc 2>/dev/null | gzip > "${SCRIPT_DIR}/initramfs.cpio.gz"
+else
+    find . | cpio -o -H newc 2>/dev/null | gzip > "${SCRIPT_DIR}/initramfs.cpio.gz"
+fi
 
 INIT_SIZE=$(wc -c < "${INITRAMFS_DIR}/sbin/init")
 TOTAL_SIZE=$(du -h "${SCRIPT_DIR}/initramfs.cpio.gz" | cut -f1)

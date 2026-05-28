@@ -173,32 +173,55 @@ jobs:
   qemu-harness:
     name: QEMU PID-1 harness (best-effort)
     runs-on: ubuntu-latest
-    # Non-fatal: GitHub-hosted runners rarely expose /dev/kvm, and
-    # sakshi's clock_init panics under TCG (missing invariant-TSC).
-    # The job runs the harness if all prerequisites are available and
-    # surfaces a clear warning otherwise — the signal is what matters,
-    # not gating every PR on it. Run locally for the hard gate
-    # (qemu/boot-test.sh — see roadmap v1.1.4).
+    # KVM is mandatory, not optional: sakshi's clock_init hard-requires
+    # invariant TSC (CPUID 80000007h EDX bit 8), and QEMU's TCG software
+    # engine does NOT implement that bit — `+invtsc` is silently dropped
+    # under TCG and the boot panics ("Attempted to kill init"). So we must
+    # use real KVM. GitHub-hosted Linux runners DO expose /dev/kvm (Azure
+    # nested virt) but leave it root-only; this job installs qemu, opens
+    # /dev/kvm perms (the same udev rule the android-emulator-runner action
+    # uses), unlocks the host kernel image, then runs the real PID-1 boot.
+    # Kept continue-on-error because not every runner image guarantees KVM
+    # — flip it off to make the harness a hard PR gate once reliably green.
     continue-on-error: true
     needs: [build]
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install QEMU + enable KVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 cpio
+          # /dev/kvm exists on hosted runners but is root:kvm 0660 and the
+          # runner user isn't in the kvm group. Make the node world-RW.
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules || true
+          sudo udevadm trigger --name-match=kvm || true
+
       - name: Check prerequisites
         id: prereqs
         run: |
           missing=""
-          [ -r /dev/kvm ] || missing="$missing /dev/kvm"
+          [ -r /dev/kvm ] || missing="$missing /dev/kvm(no-nested-virt)"
           command -v qemu-system-x86_64 >/dev/null 2>&1 || missing="$missing qemu-system-x86_64"
           KERNEL=""
           for cand in /boot/vmlinuz-linux-lts /boot/vmlinuz-linux /boot/vmlinuz-$(uname -r) /boot/vmlinuz; do
             [ -f "$cand" ] && KERNEL="$cand" && break
           done
-          [ -n "$KERNEL" ] || missing="$missing kernel-image"
+          if [ -n "$KERNEL" ]; then
+            # Distro kernels are mode 0600 root — make readable so qemu
+            # (running as the unprivileged runner user) can load it.
+            sudo chmod +r "$KERNEL" || true
+            [ -r "$KERNEL" ] || missing="$missing kernel-unreadable"
+          else
+            missing="$missing kernel-image"
+          fi
           if [ -n "$missing" ]; then
             echo "::warning::QEMU harness skipped — missing:$missing"
             echo "skip=1" >> $GITHUB_OUTPUT
           else
+            echo "Using kernel: $KERNEL"
             echo "kernel=$KERNEL" >> $GITHUB_OUTPUT
             echo "skip=0" >> $GITHUB_OUTPUT
           fi
@@ -222,9 +245,11 @@ jobs:
       - name: Run harness
         if: steps.prereqs.outputs.skip == '0'
         env:
-          BUDGET_MS: 5000   # CI runners are slower than dev hosts — 5s buys headroom
+          # Nested KVM on Azure is slower than dev iron (local KVM boots in
+          # ~0.8s); 8s budget + 60s qemu timeout buy generous headroom.
+          BUDGET_MS: 8000
         run: |
-          bash qemu/boot-test.sh "${{ steps.prereqs.outputs.kernel }}" 30
+          bash qemu/boot-test.sh "${{ steps.prereqs.outputs.kernel }}" 60
 
   docs:
     name: Documentation
