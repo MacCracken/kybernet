@@ -78,7 +78,7 @@ Dependencies are resolved by `cyrius deps` from `cyrius.cyml` and locked in `cyr
 - **agnostik 1.2.1** — `dist/agnostik.cyr` (full bundle)
 - **libro 2.6.2** — `dist/libro.cyr` (full bundle)
 - **patra 1.9.3** — `dist/patra.cyr` (explicit pin; libro pulls transitively)
-- **argonaut 1.6.2** — selective imports (no dist bundle shipped):
+- **argonaut 1.7.0** — selective imports (no dist bundle shipped):
   - `src/types.cyr` + `src/boot.cyr` + `src/services.cyr` + `src/process_mgmt.cyr`
   - `src/resolver.cyr` + `src/health.cyr` + `src/notify.cyr` + `src/tmpfiles.cyr`
   - `src/audit.cyr` + `src/audit_ext.cyr` + `src/init.cyr`
