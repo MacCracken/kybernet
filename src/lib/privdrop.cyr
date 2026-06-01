@@ -173,16 +173,3 @@ fn secure_from_context(ctx, caps) {
 
     return privdrop_from_context(ctx);
 }
-
-# Print privilege error
-fn priv_error_print(code) {
-    switch (code) {
-        case 1: syscall(1, 2, "not running as root\n", 20);
-        case 2: syscall(1, 2, "setgroups failed\n", 17);
-        case 3: syscall(1, 2, "setgid failed\n", 14);
-        case 4: syscall(1, 2, "setuid failed\n", 14);
-        case 5: syscall(1, 2, "privilege drop verification failed\n", 35);
-        default: return 0;
-    }
-    return 0;
-}

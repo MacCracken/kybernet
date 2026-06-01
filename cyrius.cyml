@@ -5,7 +5,7 @@ description = "PID 1 init system for AGNOS"
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/kybernet"
 language = "cyrius"
-cyrius = "6.0.14"
+cyrius = "6.0.26"
 
 [build]
 entry = "src/main.cyr"
@@ -59,7 +59,7 @@ stdlib = [
 [deps.agnosys]
 git = "https://github.com/MacCracken/agnosys.git"
 path = "../agnosys"
-tag = "1.2.8"
+tag = "1.3.0"
 # Profile bundle layering (1.2.0+): kybernet pulls `agnosys-core`
 # unconditionally for syscalls/error/logging (56 fns), plus the
 # `agnosys-storage` + `agnosys-trust` profiles which back the
@@ -72,13 +72,13 @@ modules = ["dist/agnosys-core.cyr"]
 [deps.agnosys-storage]
 git = "https://github.com/MacCracken/agnosys.git"
 path = "../agnosys"
-tag = "1.2.8"
+tag = "1.3.0"
 modules = ["dist/agnosys-storage.cyr"]
 
 [deps.agnosys-trust]
 git = "https://github.com/MacCracken/agnosys.git"
 path = "../agnosys"
-tag = "1.2.8"
+tag = "1.3.0"
 modules = ["dist/agnosys-trust.cyr"]
 
 [deps.agnostik]
@@ -98,7 +98,7 @@ modules = ["dist/libro.cyr"]
 # whatever libro's tag happens to point at. Matches argonaut 1.6+.
 [deps.patra]
 git = "https://github.com/MacCracken/patra.git"
-tag = "1.9.3"
+tag = "1.10.3"
 modules = ["dist/patra.cyr"]
 
 # argonaut has no dist bundle — selective module imports remain.

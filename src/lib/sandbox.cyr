@@ -63,28 +63,26 @@ fn sandbox_builder_new() {
     return b;
 }
 
-fn sandbox_allow_read(builder, path) {
+# Push a rule (path @ access level) onto the builder and bump the count.
+# Shared body for the sandbox_allow_* presets below.
+fn _sandbox_push(builder, path, access) {
     var v = load64(builder);
-    vec_push(v, sandbox_rule_new(path, SANDBOX_READ_ONLY));
+    vec_push(v, sandbox_rule_new(path, access));
     var c = load64(builder + 8);
     store64(builder + 8, c + 1);
     return 0;
+}
+
+fn sandbox_allow_read(builder, path) {
+    return _sandbox_push(builder, path, SANDBOX_READ_ONLY);
 }
 
 fn sandbox_allow_read_write(builder, path) {
-    var v = load64(builder);
-    vec_push(v, sandbox_rule_new(path, SANDBOX_READ_WRITE));
-    var c = load64(builder + 8);
-    store64(builder + 8, c + 1);
-    return 0;
+    return _sandbox_push(builder, path, SANDBOX_READ_WRITE);
 }
 
 fn sandbox_allow_read_exec(builder, path) {
-    var v = load64(builder);
-    vec_push(v, sandbox_rule_new(path, SANDBOX_READ_EXECUTE));
-    var c = load64(builder + 8);
-    store64(builder + 8, c + 1);
-    return 0;
+    return _sandbox_push(builder, path, SANDBOX_READ_EXECUTE);
 }
 
 fn sandbox_rule_count(builder) {
@@ -103,6 +101,50 @@ fn _access_to_flags(access) {
     }
 }
 
+# Handled access: every filesystem operation we control. Both
+# sandbox_apply and sandbox_from_ruleset declare the ruleset over
+# this full mask, so it lives here once.
+fn _landlock_handled_mask() {
+    return LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_WRITE_FILE
+    | LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR
+    | LANDLOCK_ACCESS_FS_REMOVE_DIR | LANDLOCK_ACCESS_FS_REMOVE_FILE
+    | LANDLOCK_ACCESS_FS_MAKE_CHAR | LANDLOCK_ACCESS_FS_MAKE_DIR
+    | LANDLOCK_ACCESS_FS_MAKE_REG | LANDLOCK_ACCESS_FS_MAKE_SOCK
+    | LANDLOCK_ACCESS_FS_MAKE_FIFO | LANDLOCK_ACCESS_FS_MAKE_BLOCK
+    | LANDLOCK_ACCESS_FS_MAKE_SYM;
+}
+
+# Create a Landlock ruleset over the full handled-access mask.
+# Returns the ruleset fd, or a negative -errno on failure. Callers
+# map ENOSYS(38)/EOPNOTSUPP(95) to the "kernel lacks Landlock" path.
+fn _landlock_create_ruleset() {
+    # LandlockRulesetAttr: { handled_access_fs: u64 } = 8 bytes
+    var attr = alloc(8);
+    store64(attr, _landlock_handled_mask());
+    return syscall(SYS_LANDLOCK_CREATE_RULESET, attr, 8, 0);
+}
+
+# Add one PATH_BENEATH rule (path → allowed access mask) to ruleset_fd.
+# Opens the path O_PATH, adds the rule, closes the path fd.
+# Returns 0 on success, or a negative -errno on failure.
+fn _landlock_add_path(ruleset_fd, path, allowed) {
+    # sys_open() dispatches to openat(AT_FDCWD, ...) on aarch64
+    # (no SYS_OPEN syscall on that arch). Direct `syscall(SYS_OPEN, ...)`
+    # would fail to compile on `cyrius build --aarch64`.
+    var path_fd = sys_open(path, O_PATH_FLAG | O_CLOEXEC_FLAG, 0);
+    if (path_fd < 0) { return path_fd; }
+
+    # LandlockPathBeneathAttr: { allowed_access: u64, parent_fd: i32 }
+    var beneath = alloc(16);
+    memset(beneath, 0, 16);
+    store64(beneath, allowed);
+    store32(beneath + 8, path_fd);
+
+    var ret = syscall(SYS_LANDLOCK_ADD_RULE, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, beneath, 0);
+    sys_close(path_fd);
+    return ret;
+}
+
 # Apply Landlock restrictions from builder.
 # Must be called after set_no_new_privs() (from privdrop.cyr).
 # Returns: Result (Ok(0)=applied, Ok(1)=landlock unavailable, Err(errno))
@@ -111,20 +153,7 @@ fn sandbox_apply(builder) {
     var count = load64(builder + 8);
     if (count == 0) { return Ok(0); }
 
-    # Handled access: all filesystem operations we control
-    var handled = LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_WRITE_FILE
-    | LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR
-    | LANDLOCK_ACCESS_FS_REMOVE_DIR | LANDLOCK_ACCESS_FS_REMOVE_FILE
-    | LANDLOCK_ACCESS_FS_MAKE_CHAR | LANDLOCK_ACCESS_FS_MAKE_DIR
-    | LANDLOCK_ACCESS_FS_MAKE_REG | LANDLOCK_ACCESS_FS_MAKE_SOCK
-    | LANDLOCK_ACCESS_FS_MAKE_FIFO | LANDLOCK_ACCESS_FS_MAKE_BLOCK
-    | LANDLOCK_ACCESS_FS_MAKE_SYM;
-
-    # LandlockRulesetAttr: { handled_access_fs: u64 } = 8 bytes
-    var attr = alloc(8);
-    store64(attr, handled);
-
-    var ruleset_fd = syscall(SYS_LANDLOCK_CREATE_RULESET, attr, 8, 0);
+    var ruleset_fd = _landlock_create_ruleset();
     if (ruleset_fd < 0) {
         var errno = 0 - ruleset_fd;
         # ENOSYS or EOPNOTSUPP = kernel doesn't support Landlock
@@ -140,27 +169,10 @@ fn sandbox_apply(builder) {
         var allowed = _access_to_flags(access);
 
         if (allowed != 0) {
-            # sys_open() dispatches to openat(AT_FDCWD, ...) on aarch64
-            # (no SYS_OPEN syscall on that arch). Direct `syscall(SYS_OPEN, ...)`
-            # would fail to compile on `cyrius build --aarch64`.
-            var path_fd = sys_open(path, O_PATH_FLAG | O_CLOEXEC_FLAG, 0);
-            if (path_fd < 0) {
+            var rc = _landlock_add_path(ruleset_fd, path, allowed);
+            if (rc < 0) {
                 sys_close(ruleset_fd);
-                return Err(0 - path_fd);
-            }
-
-            # LandlockPathBeneathAttr: { allowed_access: u64, parent_fd: i32 }
-            var beneath = alloc(16);
-            memset(beneath, 0, 16);
-            store64(beneath, allowed);
-            store32(beneath + 8, path_fd);
-
-            var ret = syscall(SYS_LANDLOCK_ADD_RULE, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, beneath, 0);
-            sys_close(path_fd);
-
-            if (ret < 0) {
-                sys_close(ruleset_fd);
-                return Err(0 - ret);
+                return Err(0 - rc);
             }
         }
     }
@@ -211,19 +223,7 @@ fn sandbox_from_ruleset(ruleset) {
     var rlen = vec_len(fs_rules);
     if (rlen == 0) { return Ok(0); }
 
-    # Build handled access mask from all rules
-    var handled = LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_WRITE_FILE
-    | LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR
-    | LANDLOCK_ACCESS_FS_REMOVE_DIR | LANDLOCK_ACCESS_FS_REMOVE_FILE
-    | LANDLOCK_ACCESS_FS_MAKE_CHAR | LANDLOCK_ACCESS_FS_MAKE_DIR
-    | LANDLOCK_ACCESS_FS_MAKE_REG | LANDLOCK_ACCESS_FS_MAKE_SOCK
-    | LANDLOCK_ACCESS_FS_MAKE_FIFO | LANDLOCK_ACCESS_FS_MAKE_BLOCK
-    | LANDLOCK_ACCESS_FS_MAKE_SYM;
-
-    var attr = alloc(8);
-    store64(attr, handled);
-
-    var ruleset_fd = syscall(SYS_LANDLOCK_CREATE_RULESET, attr, 8, 0);
+    var ruleset_fd = _landlock_create_ruleset();
     if (ruleset_fd < 0) {
         var errno = 0 - ruleset_fd;
         if (errno == 38) { return Ok(1); }
@@ -238,26 +238,10 @@ fn sandbox_from_ruleset(ruleset) {
         var allowed = _ll_access_to_kernel(access_vec);
 
         if (allowed != 0) {
-            # sys_open() dispatches to openat(AT_FDCWD, ...) on aarch64
-            # (no SYS_OPEN syscall on that arch). Direct `syscall(SYS_OPEN, ...)`
-            # would fail to compile on `cyrius build --aarch64`.
-            var path_fd = sys_open(path, O_PATH_FLAG | O_CLOEXEC_FLAG, 0);
-            if (path_fd < 0) {
+            var rc = _landlock_add_path(ruleset_fd, path, allowed);
+            if (rc < 0) {
                 sys_close(ruleset_fd);
-                return Err(0 - path_fd);
-            }
-
-            var beneath = alloc(16);
-            memset(beneath, 0, 16);
-            store64(beneath, allowed);
-            store32(beneath + 8, path_fd);
-
-            var ret = syscall(SYS_LANDLOCK_ADD_RULE, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, beneath, 0);
-            sys_close(path_fd);
-
-            if (ret < 0) {
-                sys_close(ruleset_fd);
-                return Err(0 - ret);
+                return Err(0 - rc);
             }
         }
     }

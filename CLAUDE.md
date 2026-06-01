@@ -6,8 +6,8 @@
 
 - **Type**: Cyrius binary (PID 1 init)
 - **License**: GPL-3.0-only
-- **Version**: 1.2.3
-- **Language**: Cyrius 6.0.14 (leads the AGNOS pack — argonaut/patra still at 5.10.44, agnosys/libro at 5.11.4; via `~/.cyrius/bin/cyrius`, `cyriusly use 6.0.14`)
+- **Version**: 1.3.0
+- **Language**: Cyrius 6.0.26 (leads the AGNOS pack — agnosys at 6.0.24, argonaut/agnostik/libro at 6.0.14, patra at 6.0.3; via `~/.cyrius/bin/cyrius`, `cyriusly use 6.0.26`)
 - **Tools**: `owl` to read .cyr files, `cyim` to write/edit .cyr files
 
 ## Goal
@@ -21,6 +21,7 @@ cyrius deps                                  # Resolve deps from cyrius.cyml int
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet   # Build (DCE recommended)
 cyrius test src/test.cyr                     # Run 177 tests
 cyrius bench src/bench.cyr                   # Run benchmarks
+bash scripts/bench-history.sh                # Record bench history + ≥15% regression gate (MANDATORY on every release)
 cyrius build --aarch64 src/main.cyr build/kybernet-aarch64   # Cross-build aarch64
 bash qemu/boot-test.sh                       # QEMU PID-1 harness (1.1.4+; needs KVM)
 ```
@@ -71,13 +72,13 @@ Dependencies are resolved by `cyrius deps` from `cyrius.cyml` and locked in `cyr
 - **NOT pinned** (transitive via libro/patra): sakshi, sigil
 
 **External deps** (dist bundles where available; selective for argonaut which ships none):
-- **agnosys 1.2.8** — three profile bundles pulled at 1.2.0+:
-  - `agnosys-core` (syscall + error + logging — 56 fns) — unconditional
+- **agnosys 1.3.0** — three profile bundles pulled at 1.2.0+:
+  - `agnosys-core` (syscall + error + logging + util — 61 fns; +5 util helpers at 1.3.0) — unconditional
   - `agnosys-storage` (luks + dmverity + fuse) — for edge_boot
-  - `agnosys-trust` (tpm + ima + secureboot + certpin) — for edge_boot
+  - `agnosys-trust` (tpm + ima + secureboot + certpin) — for edge_boot; 1.3.0 carries the F-13 IMA-truncation fix (log grows to EOF, 32 MB ceiling), which reaches kybernet's edge-boot attestation
 - **agnostik 1.2.3** — `dist/agnostik.cyr` (full bundle)
 - **libro 2.6.2** — `dist/libro.cyr` (full bundle)
-- **patra 1.9.3** — `dist/patra.cyr` (explicit pin; libro pulls transitively)
+- **patra 1.10.3** — `dist/patra.cyr` (explicit pin; libro pulls transitively). 1.10.x is additive (`patra_bind_int`/`patra_bind_text`, TEXT columns) + a SQL string-escaping fix
 - **argonaut 1.7.1** — selective imports (no dist bundle shipped):
   - `src/types.cyr` + `src/boot.cyr` + `src/services.cyr` + `src/process_mgmt.cyr`
   - `src/resolver.cyr` + `src/health.cyr` + `src/notify.cyr` + `src/tmpfiles.cyr`
@@ -91,6 +92,7 @@ Dependencies are resolved by `cyrius deps` from `cyrius.cyml` and locked in `cyr
 3. Test: `cyrius test src/test.cyr` (177 tests must pass)
 4. Cross-build: `cyrius build --aarch64 src/main.cyr build/kybernet-aarch64` (verify both arches)
 5. Harness (when KVM available): `bash qemu/boot-test.sh` (asserts marker set + budget)
+5b. **On a version bump: `bash scripts/bench-history.sh`** — records per-benchmark ns/op to `benches/history.csv` and exits non-zero on a ≥15% regression vs the previous run. Review and explain (or fix) any flagged delta before cutting.
 6. All functions return `Result` or `Option` where failure is possible
 7. Use `str_builder` for path construction
 8. Use `klog` / `klog2` / `kmsg` from `src/lib/log.cyr` (1.2.0+; previously in main.cyr)
@@ -106,6 +108,7 @@ Apply on every change touching src/:
 3. **`Str` vs `cstr`.** Argonaut surface is mostly `Str` (boxed); kybernet logging + cgroup path helpers are cstr-only. Any `vec_get`-derived service/health/watchdog name needs `str_data()` before being passed to `klog2 / slog / cgroup_*`.
 4. **PID-1 exit paths must call `do_shutdown()` or log-and-continue.** Never `return 0` from `kybernet_run` directly — the kernel panics on init exit ("Attempted to kill init!").
 5. **Mount-table size and stride must stay in sync.** Update the backing array AND the per-entry stride comment together. `test_mount_required_flag` is the canary.
+6. **Benchmarks are a release gate.** Every version bump runs `bash scripts/bench-history.sh` (per-benchmark ns/op delta + ≥15% regression check; history in `benches/history.csv`). A flagged regression blocks the cut until explained or fixed. Mirrors agnosys 1.3.0's hard constraint.
 
 ## DO NOT
 

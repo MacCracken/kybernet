@@ -7,6 +7,84 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.3.0] — 2026-06-01
+
+**A real minor — toolchain 6.0.26, agnosys 1.3.0 + patra 1.10.3, and a
+refactor/optimization pass.** The cyrius pin is made true (6.0.14 → 6.0.26,
+already the active wrapper), the two sibling deps with new tags are pulled,
+four internal refactors land (cross-module dedup + a hot-path cleanup,
+mirroring agnosys 1.3.0's own pass), and **benchmarks become a mandatory,
+regression-checked release gate**. Both arches clean, 177/177 tests pass.
+
+### Security (carried)
+
+- **agnosys F-13 (IMA log truncation)** reaches kybernet via `agnosys-trust`.
+  Upstream the IMA measurement log was truncated at 64 KB, silently hiding
+  measurements from attestation; 1.3.0 grows it to EOF with a 32 MB ceiling.
+  kybernet's edge-boot pre-flight (`src/lib/edge_boot.cyr`) consumes the trust
+  bundle, so its PCR/IMA attestation now sees the full log.
+
+### Changed
+
+- **`[cyrius]` toolchain pin**: 6.0.14 → **6.0.26**. The wrapper already ran
+  6.0.26 (the manifest pin was in drift); this makes the pin true and silences
+  the drift warning. The 6.0.15–6.0.26 window required no kybernet source change.
+- **`[deps.agnosys]` / `-storage` / `-trust`**: 1.2.8 → **1.3.0**. Upstream is a
+  correctness/security + refactor minor (its own cyrius pin 6.0.14 → 6.0.24);
+  API-compatible for kybernet — additive only (+5 `agnosys_*` util helpers now
+  in `agnosys-core`, public names retained as thin wrappers). All three profile
+  bundles regenerated.
+- **`[deps.patra]`**: 1.9.3 → **1.10.3**. Additive (`patra_bind_int` /
+  `patra_bind_text`, TEXT/VARLEN columns, rowid/AUTOINCREMENT) plus a SQL
+  string-escaping fix. Aligns kybernet's explicit pin with the 1.10.3 that
+  argonaut 1.7.1 already used internally (see the 1.2.3 note) — build, tests,
+  and benches are clean against patra-1.10.3 + libro-2.6.2.
+- libro 2.6.2 / agnostik 1.2.3 / argonaut 1.7.1 **held** — those bumps land in 1.3.1.
+- **`cyrius.lock`**: regenerated — 55 locked units (count unchanged; content
+  hashes refreshed for agnosys/patra).
+
+### Refactor / optimization
+
+Mirrors agnosys 1.3.0's dedup pass; all behavior-preserving, 177/177 tests
+green on both arches.
+
+- **`src/lib/privdrop.cyr`** (188 → 175) — removed dead `priv_error_print`
+  (defined, never called), which also held the last bare-integer
+  `syscall(1, 2, ...)` in live code (audit-checklist rule #1; SYS_WRITE is 1 on
+  x86_64 but 64 on aarch64).
+- **`src/lib/sandbox.cyr`** (306 → 289) — the three `sandbox_allow_*` presets
+  collapsed onto a private `_sandbox_push` helper; the Landlock plumbing shared
+  by `sandbox_apply` and `sandbox_from_ruleset` (the 13-flag handled mask,
+  ruleset creation, and the per-rule `O_PATH`-open/add/close) extracted into
+  `_landlock_handled_mask` / `_landlock_create_ruleset` / `_landlock_add_path`.
+  Each entry point keeps its own access derivation and loop; only the syscall
+  sequence is now shared. (Note: Landlock nrs 444/445/446 are arch-identical,
+  so no `#ifdef` gating is needed.)
+- **`src/lib/reaper.cyr`** — `reap_and_log` builds each line in one stack buffer
+  and emits a single `sys_write` per pid (5 → 1), matching log.cyr's `_logbuf`
+  style.
+
+### Process
+
+- **Benchmarks are now a mandatory release gate.** `scripts/bench-history.sh`
+  was a boot-time placeholder; it now runs `cyrius bench src/bench.cyr`, records
+  per-benchmark ns/op to `benches/history.csv`, and exits non-zero on a ≥15%
+  regression vs the previous run (mirrors agnosys 1.3.0). Codified in CLAUDE.md
+  (audit checklist #6 + Development Process 5b). The prior binary-size CSV was
+  archived to `benches/history-binsize-legacy.csv` (different schema, one stale
+  cc2-era row).
+
+### Stats
+
+- x86_64 DCE binary: 1.150 MB → **1.157 MB** (1,157,312 B; +7,512 B from the
+  agnosys-1.3.0 util additions + patra-1.10.3 content)
+- aarch64 DCE binary: 1.262 MB → **1.270 MB** (1,269,968 B; +7,560 B)
+- 177 / 177 tests pass (unchanged); 51 benchmarks recorded, no regressions
+- both arches build clean; warning catalogue unchanged (pre-existing dep-bundle
+  duplicate-fn + `agnosys-core` match-arm notes)
+
+---
+
 ## [1.2.3] — 2026-05-28
 
 **Dependency refresh — agnosys 1.2.8, agnostik 1.2.3, argonaut 1.7.1.**

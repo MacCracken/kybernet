@@ -45,16 +45,22 @@ fn reaped_code(rp) { return load64(rp + 8); }
 fn reap_and_log() {
     var reaped = reap_zombies();
     var len = vec_len(reaped);
-    var numbuf[24];
+    # One buffered sys_write per process instead of five (matches the
+    # _logbuf style in log.cyr). Worst-case line is "reaped pid=" (11) +
+    # i64 pid (≤21) + " exit=" (6) + i64 code (≤21) + "\n" (1) = 60 BYTES;
+    # 72 leaves headroom. [N] is N bytes, not slots.
+    var line[72];
     for (var ri = 0; ri < len; ri = ri + 1) {
         var rp = vec_get(reaped, ri);
-        sys_write(STDERR_FD, "reaped pid=", 11);
-        var nlen = fmt_int_buf(reaped_pid(rp), &numbuf);
-        sys_write(STDERR_FD, &numbuf, nlen);
-        sys_write(STDERR_FD, " exit=", 6);
-        nlen = fmt_int_buf(reaped_code(rp), &numbuf);
-        sys_write(STDERR_FD, &numbuf, nlen);
-        sys_write(STDERR_FD, "\n", 1);
+        memcpy(&line, "reaped pid=", 11);
+        var off = 11;
+        off = off + fmt_int_buf(reaped_pid(rp), &line + off);
+        memcpy(&line + off, " exit=", 6);
+        off = off + 6;
+        off = off + fmt_int_buf(reaped_code(rp), &line + off);
+        store8(&line + off, 10);
+        off = off + 1;
+        sys_write(STDERR_FD, &line, off);
     }
     return len;
 }
