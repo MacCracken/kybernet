@@ -6,8 +6,8 @@
 
 - **Type**: Cyrius binary (PID 1 init)
 - **License**: GPL-3.0-only
-- **Version**: 1.3.0
-- **Language**: Cyrius 6.0.26 (leads the AGNOS pack — agnosys at 6.0.24, argonaut/agnostik/libro at 6.0.14, patra at 6.0.3; via `~/.cyrius/bin/cyrius`, `cyriusly use 6.0.26`)
+- **Version**: 1.3.1
+- **Language**: Cyrius 6.0.26 (at the AGNOS pack front with argonaut/agnostik, also 6.0.26; agnosys at 6.0.24, libro at 6.0.14, patra at 6.0.3; via `~/.cyrius/bin/cyrius`, `cyriusly use 6.0.26`)
 - **Tools**: `owl` to read .cyr files, `cyim` to write/edit .cyr files
 
 ## Goal
@@ -76,10 +76,10 @@ Dependencies are resolved by `cyrius deps` from `cyrius.cyml` and locked in `cyr
   - `agnosys-core` (syscall + error + logging + util — 61 fns; +5 util helpers at 1.3.0) — unconditional
   - `agnosys-storage` (luks + dmverity + fuse) — for edge_boot
   - `agnosys-trust` (tpm + ima + secureboot + certpin) — for edge_boot; 1.3.0 carries the F-13 IMA-truncation fix (log grows to EOF, 32 MB ceiling), which reaches kybernet's edge-boot attestation
-- **agnostik 1.2.3** — `dist/agnostik.cyr` (full bundle)
+- **agnostik 1.3.0** — `dist/agnostik.cyr` (full bundle); 1.3.0 is a 6.0.26 toolchain refresh + refactor closeout, type vocabulary byte-compatible
 - **libro 2.6.2** — `dist/libro.cyr` (full bundle)
 - **patra 1.10.3** — `dist/patra.cyr` (explicit pin; libro pulls transitively). 1.10.x is additive (`patra_bind_int`/`patra_bind_text`, TEXT columns) + a SQL string-escaping fix
-- **argonaut 1.7.1** — selective imports (no dist bundle shipped):
+- **argonaut 1.8.0** — selective imports (no dist bundle shipped):
   - `src/types.cyr` + `src/boot.cyr` + `src/services.cyr` + `src/process_mgmt.cyr`
   - `src/resolver.cyr` + `src/health.cyr` + `src/notify.cyr` + `src/tmpfiles.cyr`
   - `src/audit.cyr` + `src/audit_ext.cyr` + `src/init.cyr`

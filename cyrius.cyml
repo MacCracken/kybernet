@@ -84,7 +84,7 @@ modules = ["dist/agnosys-trust.cyr"]
 [deps.agnostik]
 git = "https://github.com/MacCracken/agnostik.git"
 path = "../agnostik"
-tag = "1.2.3"
+tag = "1.3.0"
 modules = ["dist/agnostik.cyr"]
 
 [deps.libro]
@@ -110,7 +110,7 @@ modules = ["dist/patra.cyr"]
 [deps.argonaut]
 git = "https://github.com/MacCracken/argonaut.git"
 path = "../argonaut"
-tag = "1.7.1"
+tag = "1.8.0"
 modules = [
     "src/types.cyr",
     "src/boot.cyr",

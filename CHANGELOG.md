@@ -7,6 +7,51 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.3.1] — 2026-06-01
+
+**Dependency refresh — agnostik 1.3.0 + argonaut 1.8.0.** The two sibling
+deps held back at 1.3.0 (pending their own cuts) are now pulled. Both are
+toolchain-refresh + refactor-closeout minors on the dep side (each advanced
+its own cyrius pin to **6.0.26**, matching kybernet) with byte-compatible
+public API / type vocabulary — no kybernet source changes. The cut is
+dependency + lock + doc only. Both arches clean, 177/177 tests pass, bench
+gate green (no regression vs 1.3.0).
+
+### Changed
+
+- **`[deps.agnostik]`**: 1.2.3 → **1.3.0**. Cyrius pin 6.0.14 → 6.0.26 plus a
+  refactor/optimization closeout (OTLP + audit hot paths, hex-decode
+  consolidation, a buffer-safety hardening); `dist/agnostik.cyr` re-bundled.
+  Type vocabulary byte-for-byte compatible — kybernet's security-config use
+  (`security_context`, `capability_set`, landlock/seccomp bridges) is unaffected.
+- **`[deps.argonaut]`**: 1.7.1 → **1.8.0**. Cyrius pin 6.0.14 → 6.0.26 +
+  closeout refactor: `src/health.cyr` consolidated its six open-coded
+  `HealthCheckResult` allocations onto a new `health_result_new` helper, and a
+  leftover `/child.marker` debug write was removed from `fork_exec_service`
+  (it touched the root fs on **every** PID-1 service spawn). Same module set as
+  1.7.1, so kybernet's selective-import list is unchanged; argonaut's internal
+  patra (1.10.3) and libro (2.6.2) pins already match kybernet's.
+- **`cyrius.lock`**: regenerated — 55 locked units (count unchanged; content
+  hashes refreshed for agnostik/argonaut).
+
+### Notes
+
+- **`[cyrius]` pin held at 6.0.26.** The local wrapper has since advanced to
+  6.0.27, but the AGNOS pack front (kybernet / argonaut / agnostik) is at
+  6.0.26 and no sibling pins 6.0.27 yet, so the pin stays at 6.0.26 (6.0.27
+  builds it cleanly — the drift warning is benign). A 6.0.27 adoption waits on
+  the pack.
+
+### Stats
+
+- x86_64 DCE binary: 1.157 MB → **1.154 MB** (1,154,224 B; −3,088 B — argonaut's
+  DRY closeout + agnostik trims slightly outweigh the refreshed content)
+- aarch64 DCE binary: 1.270 MB → **1.266 MB** (1,266,096 B; −3,872 B)
+- 177 / 177 tests pass (unchanged); 51 benchmarks recorded, no regressions vs 1.3.0
+- both arches build clean; QEMU PID-1 harness OK (all markers, 956 ms / 3000 ms budget)
+
+---
+
 ## [1.3.0] — 2026-06-01
 
 **A real minor — toolchain 6.0.26, agnosys 1.3.0 + patra 1.10.3, and a
