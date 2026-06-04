@@ -116,7 +116,7 @@ modules = ["dist/patra.cyr"]
 [deps.argonaut]
 git = "https://github.com/MacCracken/argonaut.git"
 path = "../argonaut"
-tag = "1.8.1"
+tag = "1.8.2"
 modules = [
     "src/types.cyr",
     "src/boot.cyr",
