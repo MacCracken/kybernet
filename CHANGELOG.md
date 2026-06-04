@@ -7,6 +7,30 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.3.3] — 2026-06-03
+
+**Toolchain pin alignment to cyrius 6.0.56.** The cyrius pin moves
+6.0.53 → **6.0.56** to stay on the same toolchain as the rest of the
+agnos boot pack (agnos 1.41.4 / agnoshi 1.3.5 / argonaut) now that
+6.0.55/6.0.56 landed the `CYRIUS_TARGET_AGNOS` stdlib peer that unblocked
+boot-to-agnsh. No kybernet `src/` changes and no sibling-dep version
+changes — the cut is the pin + the regenerated `lib/` snapshot + lock.
+Builds clean, **177/177 tests pass**.
+
+### Changed
+
+- **`[cyrius]` pin 6.0.53 → 6.0.56.** The vendored `lib/` stdlib snapshot
+  is regenerated against the 6.0.56 toolchain (`cyrius update`); the only
+  `cyrius.lock` movement is the `lib/*.cyr` content hashes (the 6.0.54–56
+  arc — Windows args, the agnos `args_agnos`/`process_agnos`/`io` peer,
+  chrono/exit normalization). The git-tagged sibling deps (agnosys 1.3.2,
+  libro 2.7.1, argonaut 1.8.1, sigil 3.6.0, sakshi 2.2.3, agnostik 1.3.0,
+  patra 1.10.3) are unchanged from 1.3.2 — this is a pure toolchain align.
+
+### Validated
+
+- `src/test.cyr` — **177 passed, 0 failed** on the 6.0.56 build.
+
 ## [1.3.2] — 2026-06-03
 
 **Toolchain leap to cyrius 6.0.53 + dependency refresh.** The cyrius pin jumps
