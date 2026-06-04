@@ -6,8 +6,8 @@
 
 - **Type**: Cyrius binary (PID 1 init)
 - **License**: GPL-3.0-only
-- **Version**: 1.3.1
-- **Language**: Cyrius 6.0.26 (at the AGNOS pack front with argonaut/agnostik, also 6.0.26; agnosys at 6.0.24, libro at 6.0.14, patra at 6.0.3; via `~/.cyrius/bin/cyrius`, `cyriusly use 6.0.26`)
+- **Version**: 1.3.2
+- **Language**: Cyrius 6.0.53 (at the AGNOS pack front with argonaut/libro, also 6.0.53; agnosys at 6.0.52, agnostik at 6.0.26, patra at 6.0.3; via `~/.cyrius/bin/cyrius`, `cyriusly use 6.0.53`)
 - **Tools**: `owl` to read .cyr files, `cyim` to write/edit .cyr files
 
 ## Goal
@@ -67,19 +67,20 @@ Dependencies are resolved by `cyrius deps` from `cyrius.cyml` and locked in `cyr
 
 **Stdlib pins** (from `~/.cyrius/lib/`, ordering matters — keep `syscalls` early before `io`/`process` to avoid a cyrius transitive-dedup quirk that drops it; see 1.1.0 CHANGELOG):
 - Core: string, fmt, alloc, vec, str, syscalls, io, fs, process, hashmap, tagged, json
-- Build helpers: fnptr, callback, freelist, mmap, bigint, chrono, ct, keccak, thread, random
+- Build helpers: fnptr, callback, freelist, mmap, bigint, chrono, ct, keccak, thread, thread_local, random
+  (`thread_local` added at 1.3.2 — sigil 3.6.0 via libro 2.7.1 banks per-thread crypto scratch over cyrius 6.0.52 TLS; must precede the sigil bundle or the binary links but SIGILLs at runtime)
 - Aux: slice, trait, net, result, assert, bench
 - **NOT pinned** (transitive via libro/patra): sakshi, sigil
 
 **External deps** (dist bundles where available; selective for argonaut which ships none):
-- **agnosys 1.3.0** — three profile bundles pulled at 1.2.0+:
-  - `agnosys-core` (syscall + error + logging + util — 61 fns; +5 util helpers at 1.3.0) — unconditional
+- **agnosys 1.3.2** — three profile bundles pulled at 1.2.0+:
+  - `agnosys-core` (syscall + error + logging + util — 61 fns) — unconditional
   - `agnosys-storage` (luks + dmverity + fuse) — for edge_boot
-  - `agnosys-trust` (tpm + ima + secureboot + certpin) — for edge_boot; 1.3.0 carries the F-13 IMA-truncation fix (log grows to EOF, 32 MB ceiling), which reaches kybernet's edge-boot attestation
-- **agnostik 1.3.0** — `dist/agnostik.cyr` (full bundle); 1.3.0 is a 6.0.26 toolchain refresh + refactor closeout, type vocabulary byte-compatible
-- **libro 2.6.2** — `dist/libro.cyr` (full bundle)
-- **patra 1.10.3** — `dist/patra.cyr` (explicit pin; libro pulls transitively). 1.10.x is additive (`patra_bind_int`/`patra_bind_text`, TEXT columns) + a SQL string-escaping fix
-- **argonaut 1.8.0** — selective imports (no dist bundle shipped):
+  - `agnosys-trust` (tpm + ima + secureboot + certpin) — for edge_boot; still carries the F-13 IMA-truncation fix (log grows to EOF, 32 MB ceiling) introduced at 1.3.0. 1.3.2 is a cyrius 6.0.24 → 6.0.52 toolchain refresh (broad hot-path codegen win, zero agnosys source change), API byte-compatible
+- **agnostik 1.3.0** — `dist/agnostik.cyr` (full bundle); 1.3.0 is a 6.0.26 toolchain refresh + refactor closeout, type vocabulary byte-compatible (latest tag — VERSION still 1.3.0)
+- **libro 2.7.1** — `dist/libro.cyr` (full bundle); 2.7.x is a cyrius 6.0.14 → 6.0.53 + sigil 3.5.7 → 3.6.0 + agnosys → 1.3.2 refresh. **Brings sigil 3.6.0**, whose lock-free batch-verify hot path banks per-thread crypto scratch over 6.0.52 TLS — this is why kybernet now pins the `thread_local` stdlib module (ordered before sigil)
+- **patra 1.10.3** — `dist/patra.cyr` (explicit pin; libro pulls transitively). 1.10.x is additive (`patra_bind_int`/`patra_bind_text`, TEXT columns) + a SQL string-escaping fix (latest tag)
+- **argonaut 1.8.1** — selective imports (no dist bundle shipped); 1.8.1 retires `src/compat.cyr` (the `ct_eq` shim, now redundant with libro 2.7.1) — not in kybernet's import list, so the 11 imported modules are byte-identical to 1.8.0:
   - `src/types.cyr` + `src/boot.cyr` + `src/services.cyr` + `src/process_mgmt.cyr`
   - `src/resolver.cyr` + `src/health.cyr` + `src/notify.cyr` + `src/tmpfiles.cyr`
   - `src/audit.cyr` + `src/audit_ext.cyr` + `src/init.cyr`

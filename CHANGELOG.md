@@ -7,6 +7,96 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.3.2] — 2026-06-03
+
+**Toolchain leap to cyrius 6.0.53 + dependency refresh.** The cyrius pin jumps
+6.0.26 → **6.0.53** (27 minors), and the three sibling deps with new tags are
+pulled: agnosys 1.3.0 → **1.3.2**, libro 2.6.2 → **2.7.1**, argonaut 1.8.0 →
+**1.8.1**. agnostik (1.3.0) and patra (1.10.3) are already at their latest tags
+and unchanged. No kybernet `src/` changes — the cut is dependency + lock + a
+single new stdlib pin + docs. Both arches build clean, 177/177 tests pass, QEMU
+PID-1 harness green (882 ms / 3000 ms budget), bench gate broadly improved
+(50/51 faster; the one flagged outlier is explained below).
+
+### Changed
+
+- **`[cyrius]` pin 6.0.26 → 6.0.53.** Made true — the wrapper is at 6.0.53 and
+  the pack front (kybernet / argonaut / libro) is now 6.0.53. The 6.0.25–6.0.52
+  codegen arc is a broad hot-path win (see Performance). The vendored `lib/`
+  stdlib snapshot is regenerated against the 6.0.53 toolchain (`cyrius deps`
+  from an empty `lib/`), which also pulls the new platform-peer modules below.
+- **`[deps] stdlib` — `thread_local` added** (ordered after `thread`, before the
+  external sigil bundle). **Required by sigil 3.6.0** (pulled transitively via
+  libro 2.7.1): sigil's `crypto_scratch` banks per-thread arrays over cyrius
+  6.0.52 thread-local storage and calls `thread_local_init/get/set`. Without the
+  module included before sigil the binary **links but SIGILLs at runtime**
+  (reads an uninitialised thread pointer) — it does not fail to compile. Tracked
+  in libro 2.7.1's CHANGELOG; adopted here because kybernet links sigil.
+- **`[deps.agnosys]` / `-storage` / `-trust`: 1.3.0 → 1.3.2.** Pure cyrius
+  6.0.24 → 6.0.52 toolchain refresh, **zero agnosys source change**, API
+  byte-compatible. Carries forward the 1.3.0 F-13 IMA-truncation fix that backs
+  kybernet's edge-boot attestation. Bundle module names unchanged.
+- **`[deps.libro]`: 2.6.2 → 2.7.1.** Cyrius 6.0.14 → 6.0.53, sigil 3.5.7 → 3.6.0
+  (lock-free `sv_verify_batch`), agnosys → 1.3.2; patra unchanged (1.10.3).
+  libro's own surface (tpm_seal/tpm_unseal + syscall wrappers) is unchanged. The
+  sigil 3.6.0 bump is the reason for the `thread_local` pin above.
+- **`[deps.argonaut]`: 1.8.0 → 1.8.1.** Cyrius 6.0.26 → 6.0.53; the only source
+  change is **removing `src/compat.cyr`** (the `ct_eq` shim, now redundant with
+  libro 2.7.1). `compat.cyr` is not in kybernet's selective-import list, so the
+  11 imported modules (`types`/`boot`/`services`/`process_mgmt`/`resolver`/
+  `health`/`notify`/`tmpfiles`/`audit`/`audit_ext`/`init`) are byte-identical to
+  1.8.0. argonaut's internal patra (1.10.3) + libro (2.7.1) pins now match
+  kybernet's.
+- **`cyrius.lock`** — regenerated: **60 locked units** (was 55). The net +5 is
+  the 6.0.53 snapshot's platform peers (`alloc_agnos`, `syscalls_x86_64_agnos`,
+  `syscalls_macos`, `process_win`, `thread_win`) plus `thread_local`, less the
+  retired `argonaut_compat_compat.cyr`. None of the new peers are reachable on
+  Linux x86_64/aarch64.
+
+### Unchanged (already at latest tag)
+
+- **agnostik 1.3.0** — VERSION runs ahead but the latest *tag* is 1.3.0 (pins
+  cyrius 6.0.26; builds clean under 6.0.53, drift note benign).
+- **patra 1.10.3** — latest tag; pulled explicitly + transitively via libro.
+
+### Performance
+
+The 6.0.25–6.0.52 codegen window is a broad hot-path improvement — **50 of 51
+benchmarks faster**, mirroring agnosys 1.3.2's report. Representative: `getuid`
+316 → 278 ns (−12%), `seccomp_from_profile` 283 → 243 ns (−14%), `vec(push*3…)`
+159 → 140 ns (−11%), `security_context(new+4 get)` 221 → 193 ns (−12%),
+`capability_set(new+3push)` 600 → 530 ns (−11%), `klog2_sim` 1482 → 1331 ns
+(−10%).
+
+- **One flagged regression — `strlen(52 chars)` 29 → 38 ns/op (+31%), explained,
+  not fixed.** `lib/string.cyr` is byte-identical stale-vs-6.0.53, so the strlen
+  *source* did not change. The benchmark calls `strlen()` on a string **literal
+  with the result discarded** in a hot loop; the 6.0.26 compiler elided/folded
+  that dead call (artificially fast 29 ns), 6.0.53 actually executes the 52-byte
+  scan (~38–42 ns over three raw reruns — stable, not noise). The ~40 ns is the
+  honest cost of the scan; every *real* string consumer improved (`str_builder`
+  −6%, `klog_sim` −9%, `klog2_sim` −10%). Disposition per audit rule #6:
+  explained, no stdlib/toolchain change.
+
+### Stats
+
+- x86_64 DCE binary: 1.154 MB → **1.374 MB** (1,374,208 B; **+219,984 B, +19%**)
+- aarch64 DCE binary: 1.266 MB → **1.511 MB** (1,511,104 B; **+245,008 B, +19%**)
+- **Size note:** the increase is entirely **dead, NOP-retained non-Linux code.**
+  The 6.0.53 stdlib snapshot vendors 5 new platform-peer modules (~34 KB source:
+  Windows process/thread, macOS + AGNOS-target syscalls, AGNOS allocator). They
+  are unreachable on a Linux x86_64/aarch64 PID-1 build; DCE NOPs them but
+  *keeps their bytes* (NOP ≠ strip), so the binary carries them as dead weight.
+  Functionally inert — mirrors agnosys 1.3.2's "25 → 29 files, none affect the
+  Linux build" snapshot expansion. Flagged for awareness; trimming non-target
+  peers is an upstream-toolchain matter, out of scope for this refresh.
+- 177 / 177 tests pass (unchanged); 51 benchmarks recorded, 50 improved /
+  1 explained regression vs 1.3.1
+- both arches build clean (DCE); QEMU PID-1 harness OK (all 6 markers,
+  882 ms / 3000 ms budget — faster than 1.3.1's 956 ms)
+
+---
+
 ## [1.3.1] — 2026-06-01
 
 **Dependency refresh — agnostik 1.3.0 + argonaut 1.8.0.** The two sibling

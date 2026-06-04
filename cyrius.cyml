@@ -5,7 +5,7 @@ description = "PID 1 init system for AGNOS"
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/kybernet"
 language = "cyrius"
-cyrius = "6.0.26"
+cyrius = "6.0.53"
 
 [build]
 entry = "src/main.cyr"
@@ -41,6 +41,12 @@ stdlib = [
     "ct",
     "keccak",
     "thread",
+    # thread_local pulled in for kybernet 1.3.2 (libro 2.7.1 → sigil 3.6.0):
+    # sigil's crypto_scratch banks per-thread arrays over cyrius 6.0.52 TLS and
+    # calls thread_local_init/get/set. Must be ordered before the external sigil
+    # bundle — without it the binary links but SIGILLs at runtime (uninitialised
+    # thread pointer). See libro 2.7.1 CHANGELOG.
+    "thread_local",
     "random",
     "slice",
     "trait",
@@ -59,7 +65,7 @@ stdlib = [
 [deps.agnosys]
 git = "https://github.com/MacCracken/agnosys.git"
 path = "../agnosys"
-tag = "1.3.0"
+tag = "1.3.2"
 # Profile bundle layering (1.2.0+): kybernet pulls `agnosys-core`
 # unconditionally for syscalls/error/logging (56 fns), plus the
 # `agnosys-storage` + `agnosys-trust` profiles which back the
@@ -72,13 +78,13 @@ modules = ["dist/agnosys-core.cyr"]
 [deps.agnosys-storage]
 git = "https://github.com/MacCracken/agnosys.git"
 path = "../agnosys"
-tag = "1.3.0"
+tag = "1.3.2"
 modules = ["dist/agnosys-storage.cyr"]
 
 [deps.agnosys-trust]
 git = "https://github.com/MacCracken/agnosys.git"
 path = "../agnosys"
-tag = "1.3.0"
+tag = "1.3.2"
 modules = ["dist/agnosys-trust.cyr"]
 
 [deps.agnostik]
@@ -90,7 +96,7 @@ modules = ["dist/agnostik.cyr"]
 [deps.libro]
 git = "https://github.com/MacCracken/libro.git"
 path = "../libro"
-tag = "2.6.2"
+tag = "2.7.1"
 modules = ["dist/libro.cyr"]
 
 # patra is pulled transitively by libro 2.6+; declared explicitly
@@ -110,7 +116,7 @@ modules = ["dist/patra.cyr"]
 [deps.argonaut]
 git = "https://github.com/MacCracken/argonaut.git"
 path = "../argonaut"
-tag = "1.8.0"
+tag = "1.8.1"
 modules = [
     "src/types.cyr",
     "src/boot.cyr",
