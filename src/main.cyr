@@ -13,6 +13,14 @@
 #   9. Shutdown on SIGTERM/SIGINT (coordinated via argonaut)
 
 # Kybernet modules (stdlib + deps auto-included via cyrius.toml)
+#
+# sigil (pulled transitively via libro) banks per-thread crypto scratch and
+# calls thread_local_{init,get,set}. Under cyrius 6.2.x the manifest stdlib
+# pin resolves thread_local.cyr into lib/ but no longer auto-includes it into
+# the sigil dependency chain — so include it explicitly here, ahead of the
+# module chain that pulls sigil. Without this the binary links but SIGILLs at
+# runtime on an uninitialised thread pointer (see CLAUDE.md / libro 2.7.x).
+include "lib/thread_local.cyr"
 include "src/lib/log.cyr"
 include "src/lib/console.cyr"
 include "src/lib/signals.cyr"

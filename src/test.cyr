@@ -2,6 +2,9 @@
 # Tests: Result returns, Option types, str_builder, callbacks
 
 # Kybernet modules (stdlib + deps resolved via cyrius.toml)
+# thread_local explicit include — see src/main.cyr for rationale (6.2.x no
+# longer auto-includes the stdlib-pinned module into sigil's dep chain).
+include "lib/thread_local.cyr"
 include "src/lib/log.cyr"
 include "src/lib/console.cyr"
 include "src/lib/signals.cyr"

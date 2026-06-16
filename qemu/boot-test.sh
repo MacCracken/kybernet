@@ -88,12 +88,21 @@ START_NS=$(date +%s%N)
 # phase 8. `panic=5` is the safety net if kybernet ever returns from
 # main while PID 1 — kernel triggers reboot 5s after the panic, qemu's
 # `-no-reboot` then terminates the VM cleanly.
+#
+# `-m 512M`: the cyrius 6.1.19+ allocator reserves a single 256 MB mmap
+# chunk at alloc_init() (the brk-era incremental growth this replaced is
+# gone — see lib/alloc.cyr). The mapping is virtual/overcommitted (real
+# AGNOS hardware has GBs and faults pages lazily), but a 256 MB VM left no
+# headroom over kernel+initramfs+page-tables, so the overcommit heuristic
+# rejected the mmap → alloc_init exit(1) → "Attempted to kill init". 512 M
+# gives the 256 MB heap chunk room to map. Bumped at kybernet 1.3.4 with
+# the 6.0.56 → 6.2.11 toolchain jump (brk-era → chunk-era allocator).
 timeout "$TIMEOUT" qemu-system-x86_64 \
     -kernel "$KERNEL" \
     -initrd "$INITRAMFS" \
     -append "console=ttyS0 panic=5 rdinit=/sbin/init kybernet.harness=1 loglevel=3" \
     $ACCEL_FLAGS \
-    -m 256M \
+    -m 512M \
     -nographic \
     -no-reboot \
     -serial mon:stdio 2>&1 | tee "$LOG" | grep -E "kybernet:|phase [0-9]|kernel panic|Attempted to kill init" || true

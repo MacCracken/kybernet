@@ -4,6 +4,8 @@
 # Run: cyrius bench src/bench.cyr
 
 # Kybernet modules (stdlib + deps auto-included via cyrius.cyml)
+# thread_local explicit include — see src/main.cyr for rationale (6.2.x).
+include "lib/thread_local.cyr"
 include "src/lib/log.cyr"
 include "src/lib/console.cyr"
 include "src/lib/signals.cyr"
@@ -920,6 +922,23 @@ fn bench_memset() {
 # Main
 # ================================================================
 
+# Reclaim the bench arena between cold-path benchmarks. cyrius 6.1.23+ made
+# alloc_init() idempotent and 6.0.64+ gave str_builder a cached default
+# allocator (`_default_allocator`) whose 40-byte vtable lives at the arena
+# base. A bare alloc_reset() rewinds the bump pointer past that vtable, so the
+# next default_alloc() returns a dangling pointer and the first str_builder
+# after the reset faults (SIGSEGV). Clearing `_default_allocator` forces it to
+# be rebuilt in the fresh arena before anything else allocates. Also drop the
+# arena-resident cgroup path cache for the same reason. (PID 1 never resets the
+# arena, so this hazard is bench-only — see CHANGELOG 1.3.4.)
+fn arena_reset_clean() {
+    alloc_reset();
+    alloc_init();
+    _default_allocator = 0;
+    _cg_cache_reset_all();
+    return 0;
+}
+
 fn main() {
     alloc_init();
 
@@ -957,11 +976,9 @@ fn main() {
 
     # --- Cgroup ---
     println("Cgroup management:");
-    alloc_reset();
-    alloc_init();
+    arena_reset_clean();
     bench_cgroup_path();
-    alloc_reset();
-    alloc_init();
+    arena_reset_clean();
     bench_cgroup_file();
     bench_cgroup_file_burst();
     println("");
@@ -973,24 +990,19 @@ fn main() {
 
     # --- Security (cold path) ---
     println("Security (pre_exec):");
-    alloc_reset();
-    alloc_init();
+    arena_reset_clean();
     bench_seccomp_build_small();
-    alloc_reset();
-    alloc_init();
+    arena_reset_clean();
     bench_seccomp_build_basic();
-    alloc_reset();
-    alloc_init();
+    arena_reset_clean();
     bench_sandbox_build();
     println("");
 
     # --- String building ---
     println("String operations:");
-    alloc_reset();
-    alloc_init();
+    arena_reset_clean();
     bench_str_builder();
-    alloc_reset();
-    alloc_init();
+    arena_reset_clean();
     bench_str_builder_int();
     println("");
 
@@ -1003,8 +1015,7 @@ fn main() {
 
     # --- Collections ---
     println("Collections:");
-    alloc_reset();
-    alloc_init();
+    arena_reset_clean();
     bench_vec_push_get();
     println("");
 
@@ -1015,8 +1026,7 @@ fn main() {
 
     # --- OwnedFd ---
     println("OwnedFd:");
-    alloc_reset();
-    alloc_init();
+    arena_reset_clean();
     bench_owned_fd();
     println("");
 
@@ -1024,27 +1034,21 @@ fn main() {
     println("Memory ops:");
     bench_memeq();
     bench_strlen();
-    alloc_reset();
-    alloc_init();
+    arena_reset_clean();
     bench_memcpy();
-    alloc_reset();
-    alloc_init();
+    arena_reset_clean();
     bench_memset();
     println("");
 
     # --- Epoll lifecycle ---
     println("Epoll lifecycle:");
-    alloc_reset();
-    alloc_init();
+    arena_reset_clean();
     bench_epoll_lifecycle();
-    alloc_reset();
-    alloc_init();
+    arena_reset_clean();
     bench_epoll_wait_immediate();
-    alloc_reset();
-    alloc_init();
+    arena_reset_clean();
     bench_event_accessors();
-    alloc_reset();
-    alloc_init();
+    arena_reset_clean();
     bench_timer_new();
     println("");
 
@@ -1061,14 +1065,11 @@ fn main() {
 
     # --- Security bridges ---
     println("Security bridges:");
-    alloc_reset();
-    alloc_init();
+    arena_reset_clean();
     bench_seccomp_from_profile();
-    alloc_reset();
-    alloc_init();
+    arena_reset_clean();
     bench_sandbox_rule_new();
-    alloc_reset();
-    alloc_init();
+    arena_reset_clean();
     bench_sandbox_from_ruleset();
     println("");
 
@@ -1081,35 +1082,28 @@ fn main() {
 
     # --- Hashmap ---
     println("Hashmap:");
-    alloc_reset();
-    alloc_init();
+    arena_reset_clean();
     bench_hashmap();
     println("");
 
     # --- Alloc patterns ---
     println("Alloc patterns:");
-    alloc_reset();
-    alloc_init();
+    arena_reset_clean();
     bench_alloc_burst();
     bench_alloc_reset_cycle();
     println("");
 
     # --- Agnostik types ---
     println("Agnostik types:");
-    alloc_reset();
-    alloc_init();
+    arena_reset_clean();
     bench_security_context();
-    alloc_reset();
-    alloc_init();
+    arena_reset_clean();
     bench_agent_config();
-    alloc_reset();
-    alloc_init();
+    arena_reset_clean();
     bench_cgroup_limits();
-    alloc_reset();
-    alloc_init();
+    arena_reset_clean();
     bench_resource_limits();
-    alloc_reset();
-    alloc_init();
+    arena_reset_clean();
     bench_capability_set();
     println("");
 

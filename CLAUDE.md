@@ -6,8 +6,8 @@
 
 - **Type**: Cyrius binary (PID 1 init)
 - **License**: GPL-3.0-only
-- **Version**: 1.3.2
-- **Language**: Cyrius 6.0.53 (at the AGNOS pack front with argonaut/libro, also 6.0.53; agnosys at 6.0.52, agnostik at 6.0.26, patra at 6.0.3; via `~/.cyrius/bin/cyrius`, `cyriusly use 6.0.53`)
+- **Version**: 1.3.4
+- **Language**: Cyrius 6.2.11 (the whole AGNOS pack front — kybernet/argonaut/libro/agnosys/agnostik — pins 6.2.11; patra at 6.2.1; via `~/.cyrius/bin/cyrius`, `cyriusly use 6.2.11`)
 - **Tools**: `owl` to read .cyr files, `cyim` to write/edit .cyr files
 
 ## Goal
@@ -66,21 +66,22 @@ kybernet/
 Dependencies are resolved by `cyrius deps` from `cyrius.cyml` and locked in `cyrius.lock` (sha256-pinned). `lib/` is gitignored — the contract is the lock file, not the bytes on disk. Match AGNOS-wide convention (agnosys / agnostik / libro / argonaut all do this).
 
 **Stdlib pins** (from `~/.cyrius/lib/`, ordering matters — keep `syscalls` early before `io`/`process` to avoid a cyrius transitive-dedup quirk that drops it; see 1.1.0 CHANGELOG):
-- Core: string, fmt, alloc, vec, str, syscalls, io, fs, process, hashmap, tagged, json
-- Build helpers: fnptr, callback, freelist, mmap, bigint, chrono, ct, keccak, thread, thread_local, random
-  (`thread_local` added at 1.3.2 — sigil 3.6.0 via libro 2.7.1 banks per-thread crypto scratch over cyrius 6.0.52 TLS; must precede the sigil bundle or the binary links but SIGILLs at runtime)
+- Core: string, fmt, alloc, vec, str, syscalls, io, fs, process, hashmap, tagged, **bayan**
+  (`bayan` replaced `json` at 1.3.4 — cyrius 6.1.25 retired the standalone `json` module and folded it into the `bayan` serialization bundle (base64+csv+json); `bayan` ships back-compat `json_parse`/`json_get`/`json_get_int` aliases, so `main.cyr`'s cmdline parser is unchanged)
+- Build helpers: fnptr, callback, freelist, mmap, chrono, ct, keccak, thread, thread_local, random
+  (`bigint` dropped at 1.3.4 — gone as a standalone module under 6.2.11; sigil 3.7.x self-contains it and kybernet never used `bigint_*` directly. `thread_local` added at 1.3.2 for sigil's per-thread crypto scratch; **at 1.3.4 the manifest pin alone is no longer enough** — 6.2.x stopped auto-including stdlib-pinned modules into sigil's dep chain, so `src/main.cyr`/`test.cyr`/`bench.cyr` each carry an explicit `include "lib/thread_local.cyr"` ahead of the chain or the binary SIGILLs at runtime)
 - Aux: slice, trait, net, result, assert, bench
 - **NOT pinned** (transitive via libro/patra): sakshi, sigil
 
 **External deps** (dist bundles where available; selective for argonaut which ships none):
-- **agnosys 1.3.2** — three profile bundles pulled at 1.2.0+:
-  - `agnosys-core` (syscall + error + logging + util — 61 fns) — unconditional
+- **agnosys 1.4.3** — three profile bundles pulled at 1.2.0+:
+  - `agnosys-core` (syscall + error + logging + util) — unconditional
   - `agnosys-storage` (luks + dmverity + fuse) — for edge_boot
-  - `agnosys-trust` (tpm + ima + secureboot + certpin) — for edge_boot; still carries the F-13 IMA-truncation fix (log grows to EOF, 32 MB ceiling) introduced at 1.3.0. 1.3.2 is a cyrius 6.0.24 → 6.0.52 toolchain refresh (broad hot-path codegen win, zero agnosys source change), API byte-compatible
-- **agnostik 1.3.0** — `dist/agnostik.cyr` (full bundle); 1.3.0 is a 6.0.26 toolchain refresh + refactor closeout, type vocabulary byte-compatible (latest tag — VERSION still 1.3.0)
-- **libro 2.7.1** — `dist/libro.cyr` (full bundle); 2.7.x is a cyrius 6.0.14 → 6.0.53 + sigil 3.5.7 → 3.6.0 + agnosys → 1.3.2 refresh. **Brings sigil 3.6.0**, whose lock-free batch-verify hot path banks per-thread crypto scratch over 6.0.52 TLS — this is why kybernet now pins the `thread_local` stdlib module (ordered before sigil)
-- **patra 1.10.3** — `dist/patra.cyr` (explicit pin; libro pulls transitively). 1.10.x is additive (`patra_bind_int`/`patra_bind_text`, TEXT columns) + a SQL string-escaping fix (latest tag)
-- **argonaut 1.8.2** — selective imports (no dist bundle shipped); 1.8.2 is a pure toolchain pin alignment (argonaut's own cyrius pin 6.0.53 → 6.0.56, regenerated vendored `lib/` snapshot + lock only — no `src/` changes, sibling deps unchanged). kybernet imports argonaut source modules (not its vendored `lib/`), so the 11 imported modules are byte-identical to 1.8.1 — `cyrius deps` leaves `cyrius.lock` unchanged. (kybernet stays on its own cyrius 6.0.53 pin; the argonaut toolchain move does not propagate here.) 1.8.1 had retired `src/compat.cyr` (the `ct_eq` shim, redundant with libro 2.7.1) — not in kybernet's import list:
+  - `agnosys-trust` (tpm + ima + secureboot + certpin) — for edge_boot; carries forward the F-13 IMA-truncation fix (log grows to EOF, 32 MB ceiling). 1.4.x rides the 6.2.11 toolchain; bundle module names unchanged, edge-boot API byte-compatible for kybernet
+- **agnostik 1.3.1** — `dist/agnostik.cyr` (full bundle); type vocabulary byte-compatible, security-config use unaffected
+- **libro 2.7.4** — `dist/libro.cyr` (full bundle); on cyrius 6.2.11. **Brings sigil 3.7.14** (was 3.6.0) + patra 1.11.2; libro's own tpm_seal/unseal surface unchanged. sigil 3.7.x still banks per-thread crypto scratch over TLS — the reason for the `thread_local` pin + the explicit include noted above
+- **patra 1.11.2** — `dist/patra.cyr` (explicit pin; libro pulls transitively); latest tag
+- **argonaut 1.8.3** — selective imports (no dist bundle shipped); on cyrius 6.2.11, same 11-module import list as 1.8.2 (`compat.cyr` stays retired since 1.8.1). kybernet imports argonaut source modules (not its vendored `lib/`):
   - `src/types.cyr` + `src/boot.cyr` + `src/services.cyr` + `src/process_mgmt.cyr`
   - `src/resolver.cyr` + `src/health.cyr` + `src/notify.cyr` + `src/tmpfiles.cyr`
   - `src/audit.cyr` + `src/audit_ext.cyr` + `src/init.cyr`
@@ -110,6 +111,8 @@ Apply on every change touching src/:
 4. **PID-1 exit paths must call `do_shutdown()` or log-and-continue.** Never `return 0` from `kybernet_run` directly — the kernel panics on init exit ("Attempted to kill init!").
 5. **Mount-table size and stride must stay in sync.** Update the backing array AND the per-entry stride comment together. `test_mount_required_flag` is the canary.
 6. **Benchmarks are a release gate.** Every version bump runs `bash scripts/bench-history.sh` (per-benchmark ns/op delta + ≥15% regression check; history in `benches/history.csv`). A flagged regression blocks the cut until explained or fixed. Mirrors agnosys 1.3.0's hard constraint.
+7. **Stdlib-pinned modules used only transitively (e.g. `thread_local` for sigil) need an explicit `include "lib/<m>.cyr"` in `main.cyr`/`test.cyr`/`bench.cyr`** ahead of the consumer. Cyrius 6.2.x stopped auto-including a `[deps] stdlib` pin into a dep's chain — the pin only lands the file in `lib/`. Missing include → links fine, **SIGILLs at runtime** (1.3.4). Build warns `undefined function '<sym>'` — treat that warning as a hard error, not noise.
+8. **Never `alloc_reset()` while a global caches an arena pointer.** Cyrius 6.1.19+ allocator hands out one 256 MB mmap chunk and `alloc_reset()` rewinds to its base; 6.0.64+ `str_builder` caches a default-allocator vtable AT that base. A reset under a live cache (`_default_allocator`, kybernet's cgroup path cache) leaves a dangling pointer → SIGSEGV on next use. PID 1 never resets the arena (lifetime = process), so this is a **bench/test-only** hazard — the bench's `arena_reset_clean()` is the safe wrapper (clears `_default_allocator` + `_cg_cache_reset_all()`). Also: the 256 MB chunk needs a VM with headroom — `qemu/boot-test.sh` uses `-m 512M` (a 256 MB VM fails `alloc_init`'s mmap → init exit(1) → panic).
 
 ## DO NOT
 

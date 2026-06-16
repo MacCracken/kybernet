@@ -7,6 +7,144 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.3.4] — 2026-06-15
+
+**Toolchain leap to cyrius 6.2.11 + full dependency refresh.** The cyrius pin
+jumps **6.0.56 → 6.2.11** (the 6.0.x / 6.1.x / 6.2.x arc — ~90 minors), every
+sibling dep moves to its latest tag, and the stdlib reorganization that landed
+in the 6.1.x line (the `json`→`bayan` carve, sigil self-containing bigint, and
+the end of implicit stdlib auto-include) is adopted. Four small source changes
+were required this cut — the first kybernet `src/` movement since 1.2.0 — all
+forced by toolchain behavior changes, not feature work. Both arches build
+clean, **177/177 tests pass**, QEMU PID-1 harness green (812 ms / 3000 ms), and
+the bench gate flags a broad-but-explained microbenchmark shift (below).
+
+### Changed — manifest
+
+- **`[cyrius]` pin 6.0.56 → 6.2.11.** Matches the rest of the AGNOS boot pack
+  (agnosys / agnostik / libro / argonaut all pin 6.2.11).
+- **`[deps] stdlib` — `json` → `bayan`, `bigint` removed.** The standalone
+  `json` stdlib module was retired in cyrius 6.1.25 and folded into the new
+  **`bayan`** serialization bundle (base64 + csv + json). `bayan` ships
+  back-compat `json_parse` / `json_get` / `json_get_int` aliases, which is what
+  `src/main.cyr`'s `/proc`-cmdline config parser calls — so swapping the pin is
+  enough, no caller change. **`bigint`** is gone as a standalone module (sigil
+  3.7.x bundles its own); kybernet never referenced `bigint_*` directly — it was
+  only pinned to satisfy sigil's old transitive need — so it's dropped. Mirrors
+  libro 2.7.x / argonaut 1.8.x stdlib lists.
+- **`[deps.agnosys]` / `-storage` / `-trust`: 1.3.2 → 1.4.3.** Bundle module
+  names (`agnosys-core` / `-storage` / `-trust`) unchanged; the edge-boot
+  surface (TPM/dm-verity/LUKS) and the F-13 IMA-truncation fix carry forward.
+- **`[deps.agnostik]`: 1.3.0 → 1.3.1.** Type vocabulary byte-compatible —
+  kybernet's security-config use (`security_context`, `capability_set`,
+  landlock/seccomp bridges) unaffected.
+- **`[deps.libro]`: 2.7.1 → 2.7.4.** Brings **sigil 3.7.14** (was 3.6.0) and
+  **patra 1.11.2**; libro's own tpm_seal/unseal surface unchanged.
+- **`[deps.patra]`: 1.10.3 → 1.11.2.** Aligns kybernet's explicit pin with the
+  1.11.2 libro/argonaut now pull internally.
+- **`[deps.argonaut]`: 1.8.2 → 1.8.3.** Same 11-module selective-import list
+  (`types`/`boot`/`services`/`process_mgmt`/`resolver`/`health`/`notify`/
+  `tmpfiles`/`audit`/`audit_ext`/`init`); `compat.cyr` stays retired (1.8.1).
+- **`cyrius.lock`** — regenerated: **62 locked units** (was 60), reflecting the
+  6.2.11 stdlib snapshot (`bayan`, `sys`, `ganita`, the split `tls_native_*`,
+  the `*_agnos` platform peers) less the retired `json` / `bigint`.
+
+### Changed — source (all toolchain-forced)
+
+- **Explicit `include "lib/thread_local.cyr"` in `src/main.cyr`, `src/test.cyr`,
+  `src/bench.cyr`** (ahead of the module chain that pulls sigil). Under cyrius
+  6.2.x the manifest `stdlib` pin still resolves `thread_local.cyr` into `lib/`
+  but **no longer auto-includes** it into sigil's dependency chain. sigil 3.7.x
+  banks per-thread crypto scratch via `thread_local_{init,get,set}`; without the
+  explicit include the binary links but the call sites resolve to nothing and it
+  **SIGILLs/SIGSEGVs at runtime**. Matches argonaut 1.8.3's `src/main.cyr`
+  convention. (The `thread_local` *pin* added at 1.3.2 stays; only the include
+  is new.)
+- **`src/bench.cyr` — new `arena_reset_clean()` helper; replaces the 24
+  in-`main()` `alloc_reset(); alloc_init();` pairs.** The bench reclaims its
+  arena between cold-path benchmarks. Two 6.1.x allocator changes made the bare
+  reset unsafe: (a) 6.0.64 gave `str_builder` a cached default allocator
+  (`_default_allocator`) whose 40-byte vtable lives at the arena base, and
+  (b) 6.1.19 switched the allocator from incremental `brk` to a single mmap
+  chunk that `alloc_reset()` rewinds to its base. So after a reset the next
+  allocation overwrites the still-referenced vtable and the first `str_builder`
+  faults (SIGSEGV — surfaced as a bench crash right after `cgroup_path`).
+  `arena_reset_clean()` clears `_default_allocator` (forcing a rebuild in the
+  fresh arena) and drops the cgroup path cache. **Bench-only**: PID 1 never
+  resets the arena, so the live init path was never at risk. Pre-6.2 the
+  reclaimed region stayed mapped, so the dangling read hit stale-but-mapped
+  bytes and didn't fault — which is why this only surfaced on the jump.
+- **`src/lib/cgroup.cyr` — added `_cg_cache_reset_all()`.** Zeroes all cgroup
+  path-cache globals (maps + LRU pointers, all arena-resident). Called by the
+  bench's `arena_reset_clean()`; documented as a test/bench aid (PID 1 never
+  resets the arena). No hot-path change.
+- **`qemu/boot-test.sh` — VM RAM `-m 256M` → `512M`.** The 6.1.19+ allocator
+  reserves a **256 MB** mmap chunk at `alloc_init()`. In a 256 MB VM that left
+  no headroom over kernel + initramfs + page tables, so the kernel's overcommit
+  heuristic **rejected the mapping → `alloc_init` `exit(1)` → "Attempted to kill
+  init"** before the first boot marker. The mapping is virtual/overcommitted and
+  lazily faulted — real AGNOS targets (RPi4/NUC, GBs of RAM) map it trivially;
+  only the undersized test VM was affected. 512 M restores a clean boot.
+
+### Performance — bench gate
+
+51 benchmarks recorded; **23 flagged ≥15% "regressions", 5 improvements** vs the
+1.3.2-era baseline. **Explained, not a logic regression** (disposition per audit
+rule #6, same shape as 1.3.2's `strlen` note — now broader):
+
+- The flagged set is almost entirely **allocate-and-discard microbenchmarks**
+  (`epoll_event_new` 15→60, `Ok+is_ok` 16→69, `Some+is_some+unwrap` 27→77,
+  `owned_fd_new+raw` 13→64, `alloc(4 sizes burst)` 23→213, `sigset_new+add+has`
+  23→66, the agnostik type constructors, `str_builder*`). The 6.0.56 compiler
+  dead-code-eliminated these discarded allocations down to near loop-overhead;
+  6.2.11 executes them. They **all converge on the real cost of one small
+  allocation (~40–77 ns)** — the tell that the prior numbers were folded, not
+  fast. The 6.0.64 allocator-vtable indirection (`alloc_via(default_alloc())`
+  per allocation) adds the rest.
+- Corroborated by the **improvements**: `alloc(3)+reset+init` 1142→202 (−82%,
+  idempotent `alloc_init` from 6.1.23), `strlen(52)` 38→27 (−28%), `hashmap`
+  1188→1047 (−11%), `is_mounted` 54→46 (−14%).
+- **The genuine PID-1 hot paths are unchanged or better**: `classify_signal`
+  3 ns, `is_handled_signal` 8 ns, `cgroup_path` 4 ns, `cgroup_file` warm-cache
+  best case unchanged, `knotify_classify` 17 ns, syscall baselines ~300 ns. The
+  812 ms harness boot (vs 1.3.2's 882 ms) is the real-world confirmation.
+
+### Stats
+
+- x86_64 DCE binary: 1.374 MB → **1.709 MB** (1,709,080 B; +334,872 B, +24%)
+- aarch64 DCE binary: 1.511 MB → **1.948 MB** (1,948,208 B; +437,104 B, +29%)
+- **Size note:** as at 1.3.2, the bulk is **dead, NOP-retained non-Linux code** —
+  the 6.2.11 stdlib snapshot vendors more platform peers (`*_agnos`, `*_win`,
+  `*_macos`, the split `tls_native_*`, `bayan`/`sys`/`ganita`) plus the larger
+  sigil 3.7.x. They are unreachable on a Linux x86_64/aarch64 PID-1 build; DCE
+  NOPs but keeps their bytes. Functionally inert.
+- 177 / 177 tests pass (unchanged); 51 benchmarks recorded (23 explained shifts /
+  5 improvements vs 1.3.2)
+- both arches build clean (DCE); QEMU PID-1 harness OK (all six markers,
+  812 ms / 3000 ms budget)
+
+### Verification
+
+- All five pinned sibling tags confirmed real git tags and each the highest in
+  its repo (agnosys 1.4.3, agnostik 1.3.1, libro 2.7.4, patra 1.11.2,
+  argonaut 1.8.3) — none ahead of the latest tag.
+- `cyrius deps` clean (9 deps, 62 locked); fresh-`lib/` resolve.
+- `CYRIUS_DCE=1 cyrius build` clean (x86_64 + aarch64).
+- `cyrius test src/test.cyr` — **177 passed, 0 failed**.
+- `bash scripts/bench-history.sh` — 51 recorded; flagged deltas reviewed +
+  explained above.
+- `bash qemu/boot-test.sh` (KVM) — **OK**, all six markers, 812 ms.
+
+### Audit-checklist pass
+
+Standing 1.1.5 P(-1) rules re-applied. The source touched this cut is the
+`thread_local` includes (no syscalls, no buffers), `cgroup.cyr`'s cache-reset
+helper (no syscalls, only global zeroing), and bench/harness scaffolding — none
+touch the mount table, PID-1 exit paths, or introduce literal `syscall(N, …)` in
+live boot code. `test_mount_required_flag` (mount-table canary) green.
+
+---
+
 ## [1.3.3] — 2026-06-03
 
 **Toolchain pin alignment to cyrius 6.0.56.** The cyrius pin moves
