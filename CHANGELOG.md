@@ -7,6 +7,26 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.3.5] — 2026-06-19
+
+**Re-sourced the edge-boot trust/storage primitives from sigil; dropped agnosys
+(agnosys → agnodrm decomposition).** kybernet's edge-boot path used agnosys's TPM
++ dm-verity + LUKS primitives (`tpm_detect` / `tpm_read_pcr` /
+`dmverity_supported`, …). The decomposition moved that trust+storage stack into
+**sigil** (promoted to first-class in `dist/sigil.cyr` at 3.9.0).
+
+### Changed
+- **Dropped `[deps.agnosys]` / `[deps.agnosys-storage]` / `[deps.agnosys-trust]`.**
+  agnosys-core was vestigial — kybernet references no error/syscall/logging symbol
+  from it (the old "56 fns" comment was stale; kybernet uses its own
+  `src/lib/log.cyr` + argonaut + cyrius stdlib). Storage+trust → a new
+  **`[deps.sigil]` 3.9.0**. This also fixes the broken `path = "../agnosys"` (the
+  repo folder was renamed to `../agnodrm`).
+- **`[deps.libro]` 2.7.4 → 2.7.5** (libro's own agnosys → sigil rewire; keeps the
+  transitive sigil aligned at 3.9.0).
+- Verified locally: `cyrius deps` clean, `cyrius test src/test.cyr` **177/0**.
+  (CI resolution needs the libro 2.7.5 + sigil 3.9.0 tags live.)
+
 ## [1.3.4] — 2026-06-15
 
 **Toolchain leap to cyrius 6.2.11 + full dependency refresh.** The cyrius pin

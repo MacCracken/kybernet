@@ -92,6 +92,7 @@ Hardware-in-the-loop; not CI-runnable.
 
 - **Control socket for agnoshi runtime commands** — separate transport surface; pinned until an agnoshi consumer drives the protocol shape
 - **Binary signing on release** — pinned until libro 2.6+ signing/timestamping is consumer-driven from outside kybernet's tree
+- **Remap the agnosys profile deps for the agnosys → agnodrm decomposition** — kybernet pins three agnosys profiles (`agnosys-core`, `agnosys-storage`, `agnosys-trust`). The decomposition splits them: **trust** (`tpm_detect`/`tpm_attestation`/`tpm_verify_measured_boot`/`tpm_present`, used in `src/lib/edge_boot.cyr`) + **storage** (luks/dmverity) move to **sigil** (folded in 3.8.1); **core** (error/util) survives in the renamed **agnodrm**. When the rename lands, repoint `[deps.agnosys-trust]`/`[deps.agnosys-storage]` → `[deps.sigil]` and `[deps.agnosys-core]` → `[deps.agnodrm]`. **Unblocker: ✅ satisfied** — sigil **3.9.0** promoted the trust + storage API to `dist/sigil.cyr` (exports `tpm_detect`, `tpm_verify_measured_boot`, `dmverity_verify`, `luks_*`). Note `edge_boot.cyr`'s only *external* tpm call is `tpm_detect()` (in the dist); `tpm_attestation` is an `EdgeBootConfig` field label and `tpm_present` is kybernet's own accessor (`edge_boot_tpm_present`) — neither needs an upstream symbol. The deferred 1.2.1 calls (`tpm_verify_measured_boot`/`dmverity_verify`/`luks_*`) are all in the dist. **Trigger:** the agnodrm rename.
 
 ## History
 
