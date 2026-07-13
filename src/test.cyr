@@ -312,13 +312,19 @@ fn test_agnostik_security() {
     assert_eq(fsrule_access(fsr), FS_READ_ONLY, "fsrule read-only");
     assert_eq(fsrule_readonly(fsr), 0, "fsrule readonly default 0");
 
-    # agnostik error types
-    var err = agnostik_err_new(ERR_PERMISSION_DENIED, str_from("test"));
-    assert_eq(agnostik_err_kind(err), ERR_PERMISSION_DENIED, "err kind");
+    # agnostik error types. Use agnostik's namespaced STIK_ERR_* kinds, NOT the
+    # bare ERR_* names: since the 1.4.0 dep graph those bare names collide with
+    # sigil's `ERR_PERMISSION_DENIED = 3` and sakshi's `ERR_TIMEOUT = 5`, which
+    # are the WRONG kinds for agnostik_err_new's kind->code map (they mapped
+    # PERMISSION_DENIED onto STIK_ERR_TIMEOUT=3, yielding code 1004 + inverted
+    # retriability). agnostik renamed its kinds to STIK_ERR_* to avoid exactly
+    # this cross-lib clash. CODE_PERMISSION_DENIED stays — it is unique to agnostik.
+    var err = agnostik_err_new(STIK_ERR_PERMISSION_DENIED, str_from("test"));
+    assert_eq(agnostik_err_kind(err), STIK_ERR_PERMISSION_DENIED, "err kind");
     assert_eq(agnostik_err_code(err), CODE_PERMISSION_DENIED, "err code 1002");
     assert_eq(agnostik_err_is_retriable(err), 0, "perm denied not retriable");
 
-    var terr = agnostik_err_new(ERR_TIMEOUT, 0);
+    var terr = agnostik_err_new(STIK_ERR_TIMEOUT, 0);
     assert_eq(agnostik_err_is_retriable(terr), 1, "timeout retriable");
 
     return 0;

@@ -7,6 +7,103 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.4.0] — 2026-07-13
+
+**Toolchain leap to cyrius 6.4.62 + full dependency refresh, and a THIN sigil
+surface: the PID-1 binary drops 14.35 MB → 0.96 MB (x86_64) / 1.29 MB (aarch64).**
+The cyrius pin jumps **6.2.11 → 6.4.62** (the whole AGNOS boot pack — argonaut
+1.8.4 / libro 2.8.0 — moved with it), every sibling dep advances to its latest
+tag, and kybernet stops pulling the monolithic `dist/sigil.cyr`. Two consumer-side
+source migrations were forced by the new toolchain/dep graph (both below); after
+them the binary is 93 % smaller, **177/177 tests pass**, both arches build clean,
+and the QEMU PID-1 harness is green (**951 ms** / 3000 ms budget).
+
+### Changed — manifest
+
+- **`[package].cyrius` pin `6.2.11` → `6.4.62`.** Clears the toolchain-drift
+  warning; matches argonaut 1.8.4 / libro 2.8.0.
+- **Dep tags → latest:** agnostik `1.3.1` → `1.3.4`, libro `2.7.5` → `2.8.0`,
+  patra `1.11.2` → `1.12.9`, argonaut `1.8.3` → `1.8.4`, sigil `3.9.0` → `3.11.1`
+  (transitive sakshi → 2.4.3). All 11 argonaut source modules kybernet imports
+  are unchanged.
+- **`[deps] stdlib` — added `atomic`, `sync`, `sakshi`.** patra 1.12.9's dep
+  sidecar now requires `atomic`+`sync` (its WAL/object-store locking moved onto
+  the stdlib `sync` mutex, built on `atomic`); libro 2.8.0's sidecar lists
+  `sakshi` as a stdlib leaf (previously transitive via agnosys, now gone).
+  Without these `cyrius deps` aborts resolving patra/libro. `atomic` precedes
+  `sync`; `sigil` stays an external git dep (not a stdlib pin).
+
+### Changed — THIN sigil surface (the headline)
+
+- **`[deps.sigil]`: `dist/sigil.cyr` → `dist/sigil-mldsa.cyr` + `src/sha_ni.cyr`
+  + `src/sha256.cyr` + `src/hex.cyr` + `dist/sigil-tpm.cyr`.** At 3.11.1 the full
+  bundle inlines the x509/RSA/authenticode path, whose bignum tables carry
+  **~13 MB of static `.bss` that DCE cannot strip** and kybernet never touches —
+  a full-bundle build measured **14.35 MB** (`.bss` 13,057,440 B). kybernet's
+  real sigil surface is two disjoint pieces: (1) the crypto set libro's
+  merkle/audit path needs transitively via the argonaut audit modules
+  (`sigil-mldsa` = ed25519 + ML-DSA + SHA-512 + crypto_scratch, plus `sha_ni` /
+  `sha256` / `hex`) — this **mirrors libro 2.8.0's own sigil block**, and is
+  mandatory because cyrius dedups the two same-named `sigil` deps to kybernet's
+  root list, so it must satisfy libro's `ed25519`/`hex`/`SIG_ALG_ED25519` or
+  `lib/libro.cyr` fails to compile; and (2) kybernet's own TPM surface via
+  sigil's per-primitive **`tpm` distlib profile** (`dist/sigil-tpm.cyr` =
+  `tpm_detect` / `tpm_read_pcr` / `TPM_SHA256`). Result: **0.96 MB** x86_64
+  (`.bss` 90,320 B) / **1.29 MB** aarch64, with **zero** duplicate-symbol
+  warnings from sigil (the old full-bundle `run_capture`/`_hex_nibble` warnings
+  are gone).
+- **dm-verity capability probe is now local** (`src/lib/edge_boot.cyr`,
+  `_eb_dmverity_supported`). sigil ships **no dm-verity distlib profile**, and
+  its raw `src/dmverity.cyr` cannot be pulled cross-repo (unguarded internal
+  `include "src/error.cyr"`). The probe is byte-for-byte sigil's
+  `dmverity_supported()` (sysfs `/sys/module/dm_verity`, then a `veritysetup
+  --version` fallback via `exec_vec`) — no behavior change to the
+  `readonly_rootfs` boot gate. When 1.2.1 wires real dm-verity *verify* (needs
+  sigil's `dmverity_open`/`verify` with device paths), revisit sourcing a sigil
+  dm-verity profile.
+
+### Fixed — consumer-side migrations for the new dep graph
+
+- **`src/test.cyr` agnostik error-kind clash (was 3 failing assertions).** The
+  test built errors with bare `ERR_PERMISSION_DENIED` / `ERR_TIMEOUT`. Under the
+  1.4.0 graph those bare names no longer resolve to agnostik (which namespaced
+  its kinds to `STIK_ERR_*`) — they now bind to **sigil's** `ERR_PERMISSION_DENIED
+  = 3` and **sakshi's** `ERR_TIMEOUT = 5`, the wrong kinds for
+  `agnostik_err_new`'s kind→code map (PERMISSION_DENIED mapped onto
+  `STIK_ERR_TIMEOUT` → code 1004 + inverted retriability). Switched the test to
+  agnostik's `STIK_ERR_*`; `CODE_PERMISSION_DENIED` is unique to agnostik and
+  unchanged. Test-only; no production code referenced the bare names.
+- **`src/lib/sandbox.cyr` `_ll_access_to_kernel` — cyrius 6.4.62 `switch`
+  MISCOMPILE (a PID-1 crash risk).** 6.4.62 miscompiles a `switch` of this exact
+  shape — many cases whose bodies **accumulate** (`mask = mask | CONST`) inside a
+  loop, closed by a `default: return` — into a **SIGSEGV** at the call site.
+  (A `switch` of `case N: return K` bodies compiles fine — the boot-stage switch
+  at `main.cyr:427` and the others are unaffected; only this accumulate-in-loop
+  form breaks. Verified: the switch segfaults on the first call, the if-ladder
+  is correct.) Rewrote it as an explicit `if`-ladder. This is the Landlock mask
+  kybernet applies to **every sandboxed service**, so the miscompile would have
+  crashed init on first service sandbox — not merely a bench failure. Surfaced
+  by `bench_sandbox_from_ruleset`, which the 177 tests never exercised (they
+  cover ruleset *construction*, not the `sandbox_from_ruleset` syscall path).
+
+### Benchmarks
+
+- `bash scripts/bench-history.sh`: the 6.4.62 codegen + thin binary move nearly
+  every microbench **-60 % to -82 %** (e.g. `capability_set` -72 %, `Ok+is_ok`
+  -79 %, `alloc(4 sizes burst)` -82 %, `sandbox(new+3 rules+count)` -71 %). One
+  flagged **regression: `alloc(3)+reset+init` 202 → 554 ns/op (+174 %)** — a
+  6.4.62 allocator-internals change to the `alloc_reset()`+`alloc_init()` pair.
+  **Bench/test-only, zero production impact**: PID 1 initialises the arena once
+  at boot and never resets it (audit rule #8). Explained, not fixed (the
+  allocator is cyrius stdlib; not modified from here).
+
+### Verification
+
+- `cyrius deps` clean (66 deps locked, 3 commit-pinned). x86_64 + aarch64 build
+  clean under DCE. `cyrius test src/test.cyr` **177/0**. `qemu/boot-test.sh` all
+  markers, **951 ms**. (CI resolution needs the sigil 3.11.1 / libro 2.8.0 /
+  patra 1.12.9 / agnostik 1.3.4 / argonaut 1.8.4 tags live — all confirmed.)
+
 ## [1.3.5] — 2026-06-19
 
 **Re-sourced the edge-boot trust/storage primitives from sigil; dropped agnosys

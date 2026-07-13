@@ -194,23 +194,33 @@ fn _ll_access_to_kernel(access_vec) {
     var alen = vec_len(access_vec);
     for (var ai = 0; ai < alen; ai = ai + 1) {
         var flag = vec_get(access_vec, ai);
-        # agnostik LL_ enums map 1:1 to kernel bit positions
-        switch (flag) {
-            case 0: mask = mask | LANDLOCK_ACCESS_FS_EXECUTE;
-            case 1: mask = mask | LANDLOCK_ACCESS_FS_WRITE_FILE;
-            case 2: mask = mask | LANDLOCK_ACCESS_FS_READ_FILE;
-            case 3: mask = mask | LANDLOCK_ACCESS_FS_READ_DIR;
-            case 4: mask = mask | LANDLOCK_ACCESS_FS_REMOVE_DIR;
-            case 5: mask = mask | LANDLOCK_ACCESS_FS_REMOVE_FILE;
-            case 6: mask = mask | LANDLOCK_ACCESS_FS_MAKE_CHAR;
-            case 7: mask = mask | LANDLOCK_ACCESS_FS_MAKE_DIR;
-            case 8: mask = mask | LANDLOCK_ACCESS_FS_MAKE_REG;
-            case 9: mask = mask | LANDLOCK_ACCESS_FS_MAKE_SOCK;
-            case 10: mask = mask | LANDLOCK_ACCESS_FS_MAKE_FIFO;
-            case 11: mask = mask | LANDLOCK_ACCESS_FS_MAKE_BLOCK;
-            case 12: mask = mask | LANDLOCK_ACCESS_FS_MAKE_SYM;
-            default: return mask;
-        }
+        # agnostik LL_ enums map 1:1 to kernel bit positions.
+        #
+        # Written as an if-ladder rather than a `switch`: cyrius 6.4.62
+        # MISCOMPILES a switch of exactly this shape — many cases whose bodies
+        # accumulate (`mask = mask | CONST`) inside a loop, closed by a
+        # `default: return` — into a SIGSEGV at the call site (a plain
+        # switch of `case N: return K` bodies compiles fine; the accumulate-in-
+        # loop + default-return form does not). Verified against 6.4.62: the
+        # switch form segfaults on the first call, this if-ladder is correct.
+        # This is the sandbox path kybernet applies to every service, so the
+        # miscompile is a PID-1 crash risk, not just a bench failure. See the
+        # 1.4.0 CHANGELOG. An unknown flag is skipped (the old `default: return
+        # mask` bailed early; skipping is strictly more robust and never fires
+        # on the agnostik-produced 0..12 flag set).
+        if (flag == 0)  { mask = mask | LANDLOCK_ACCESS_FS_EXECUTE; }
+        if (flag == 1)  { mask = mask | LANDLOCK_ACCESS_FS_WRITE_FILE; }
+        if (flag == 2)  { mask = mask | LANDLOCK_ACCESS_FS_READ_FILE; }
+        if (flag == 3)  { mask = mask | LANDLOCK_ACCESS_FS_READ_DIR; }
+        if (flag == 4)  { mask = mask | LANDLOCK_ACCESS_FS_REMOVE_DIR; }
+        if (flag == 5)  { mask = mask | LANDLOCK_ACCESS_FS_REMOVE_FILE; }
+        if (flag == 6)  { mask = mask | LANDLOCK_ACCESS_FS_MAKE_CHAR; }
+        if (flag == 7)  { mask = mask | LANDLOCK_ACCESS_FS_MAKE_DIR; }
+        if (flag == 8)  { mask = mask | LANDLOCK_ACCESS_FS_MAKE_REG; }
+        if (flag == 9)  { mask = mask | LANDLOCK_ACCESS_FS_MAKE_SOCK; }
+        if (flag == 10) { mask = mask | LANDLOCK_ACCESS_FS_MAKE_FIFO; }
+        if (flag == 11) { mask = mask | LANDLOCK_ACCESS_FS_MAKE_BLOCK; }
+        if (flag == 12) { mask = mask | LANDLOCK_ACCESS_FS_MAKE_SYM; }
     }
     return mask;
 }

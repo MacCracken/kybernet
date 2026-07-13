@@ -2,11 +2,16 @@
 #
 # Reads `EdgeBootConfig` from the argonaut config and gates the
 # extra trust-platform checks on `boot_mode == BOOT_EDGE` +
-# `verify_on_boot`. Backed by agnosys-trust (`tpm_*`) and
-# agnosys-storage (`dmverity_*`, `luks_*`) profile bundles.
+# `verify_on_boot`. TPM (`tpm_detect` / `tpm_read_pcr` / `TPM_SHA256`)
+# resolves from sigil's `tpm` distlib profile (dist/sigil-tpm.cyr — 1.4.0).
+# dm-verity capability detection is a LOCAL probe (`_eb_dmverity_supported`,
+# below): sigil has no dm-verity distlib profile and pulling the full bundle
+# for one syscall would drag in 13 MB of unused crypto `.bss`. The deferred
+# dm-verity *verify* + LUKS unlock (1.2.1) will source sigil's storage surface
+# when their device-path wiring lands.
 #
 # 1.2.0 SCOPE (this file):
-#   - Capability detection: tpm_detect, dmverity_supported
+#   - Capability detection: tpm_detect (sigil), dm-verity (local probe)
 #   - PCR read per `pcr_bindings` spec ("7+14" → indices 7, 14)
 #   - Honor `tpm_attestation` / `readonly_rootfs` flags as hard
 #     prerequisites — boot aborts to emergency if required-but-missing
@@ -56,6 +61,24 @@ fn _eb_parse_pcr_indices(spec) {
     return out;
 }
 
+# dm-verity kernel-capability probe. Byte-for-byte the same check sigil's
+# `dmverity_supported()` performs — kept LOCAL so kybernet's edge-boot trust
+# surface pulls only sigil's `tpm` distlib profile (dist/sigil-tpm.cyr), not
+# the full crypto bundle. sigil ships no dm-verity/LUKS distlib profile, and
+# its raw src/dmverity.cyr can't be pulled cross-repo (unguarded internal
+# `include "src/error.cyr"`). This is a 1-syscall + optional-exec probe, so
+# reproducing it here is far cheaper than dragging in 13 MB of unused x509/RSA
+# `.bss`. When 1.2.1 wires real dm-verity *verify* (which needs sigil's
+# dmverity_open/verify with device paths), revisit sourcing a sigil dm-verity
+# profile then. Semantics preserved: probe sysfs first, veritysetup fallback.
+fn _eb_dmverity_supported() {
+    if (sys_access("/sys/module/dm_verity", 0) == 0) { return 1; }
+    var args = vec_new();
+    vec_push(args, "/usr/sbin/veritysetup");
+    vec_push(args, "--version");
+    return exec_vec(args) == 0;
+}
+
 # Run the edge-boot pre-flight. Returns 1 to continue boot, 0 to
 # abort (caller should drop_to_emergency). Caller is responsible for
 # the boot_mode gate — this is a no-op if the config doesn't request
@@ -95,7 +118,7 @@ fn edge_boot_run(config) {
     }
 
     # ---- dm-verity capability ----
-    _eb_dmverity_supp = dmverity_supported();
+    _eb_dmverity_supp = _eb_dmverity_supported();
     if (_eb_dmverity_supp == 1) {
         klog("edge boot: dm-verity supported");
     } else {
