@@ -25,7 +25,7 @@ jobs:
           # truth for the toolchain version — no version is hardcoded in
           # this YAML. Read the pin and hand it to the upstream installer,
           # which fetches + lays out $HOME/.cyrius/{bin,lib}. Matches
-          # patra / sigil / agnosys CI.
+          # patra / sigil / libro CI.
           CYRIUS_VERSION="$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')"
           echo "Installing Cyrius $CYRIUS_VERSION"
           curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
@@ -36,8 +36,8 @@ jobs:
         run: cyrius deps
 
       - name: Verify dep hashes
-        # cyrius.lock pins agnosys/agnostik/libro/patra/argonaut hashes
-        # (plus sigil/sakshi pulled in transitively by libro+patra).
+        # cyrius.lock pins sigil/agnostik/libro/argonaut hashes (plus patra
+        # and sakshi pulled in transitively by libro).
         # CI fails if a resolved file's sha256 doesn't match the locked
         # entry. Skip on the first push that introduces a new dep
         # before cyrius.lock is generated and committed.
@@ -49,16 +49,20 @@ jobs:
           fi
 
       - name: Format check
-        # `cyrius fmt <file>` writes the formatted source to stdout;
-        # diff against the committed file catches drift. (`--check`
-        # became a no-op in cyrius 5.9.x — it emits nothing and
-        # exits 0 regardless, so diffing its stdout reports spurious
-        # drift on every file. Matches argonaut / agnosys CI.)
+        # `cyrius fmt <file> --check` sets the exit code (0 clean / 1 drift)
+        # and leaves the file untouched. Verified non-mutating at 6.5.35.
+        #
+        # Do NOT go back to `diff -q <(cyrius fmt "$f") "$f"`. Cyrius 6.5.28
+        # made `fmt` REWRITE IN PLACE and print nothing (flagged BREAKING
+        # upstream; `--dry` is the old stdout behaviour). Under 6.5.35 that
+        # gate diffs an empty stream against every file — reporting drift
+        # unconditionally *and* silently reformatting the CI checkout
+        # underneath the later build/test steps. Matches argonaut CI.
         run: |
           fail=0
           for f in src/main.cyr src/test.cyr src/bench.cyr src/lib/*.cyr; do
             [ -f "$f" ] || continue
-            if ! diff -q <(cyrius fmt "$f" 2>/dev/null) "$f" > /dev/null; then
+            if ! cyrius fmt "$f" --check > /dev/null 2>&1; then
               echo "needs fmt: $f"
               fail=1
             fi

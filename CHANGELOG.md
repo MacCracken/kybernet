@@ -7,6 +7,157 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.4.1] — 2026-08-24
+
+**Toolchain bump to cyrius 6.5.35, every dep to its latest tag, and a
+manifest that stopped silently downgrading its own dependencies.** The
+cyrius pin moves **6.4.62 → 6.5.35** (matching argonaut 1.8.6 / agnostik
+1.4.0 / libro 2.8.12), all four git deps advance, and two manifest defects
+are closed: kybernet's `[deps.patra]` pin was **overriding the newer
+stdlib fold with an older patra**, and `path = "../…"` fields meant local
+builds never resolved the pinned tags at all. **No functional source change was
+required** — 177/177 tests, both arches, QEMU harness green.
+
+### Fixed — the patra pin was silently downgrading the stdlib fold
+
+cyrius 6.5.20+ **folds** patra, sakshi and sigil into the stdlib snapshot.
+`cyrius deps` overlays a git dep's resolution on top of that snapshot on
+*every* build, so a `[deps.<name>]` pin that lags the fold **downgrades the
+file**, and `deps --verify` cannot catch it (the lock is written from disk,
+recording the downgraded hash). The toolchain said so out loud:
+
+```
+warning: ./lib/ shadows version-pinned .../lib — 2 bundled lib(s) differ:
+      sakshi 2.4.3 (pinned: 2.4.6), patra 1.12.9 (pinned: 1.12.10)
+```
+
+- **`[deps.patra]` git block removed; `patra` added to `[deps].stdlib`.**
+  `lib/patra.cyr` is now byte-identical to the fold *and* to patra
+  1.13.10's `dist/patra.cyr` (`7cdc24d8…`). The transitive sakshi
+  downgrade cleared with it (2.4.3 → 2.4.11, byte-identical to the fold),
+  helped by sigil 3.12.7+ dropping its own stale `deps.sakshi` block.
+  Mirrors **argonaut 1.8.5**, which retired the identical two blocks for
+  the identical reason.
+
+### Fixed — `path = "../…"` made the tag pins inert locally
+
+`[deps.agnostik]`, `[deps.libro]` and `[deps.argonaut]` each carried a
+`path` alongside `git`/`tag`. When `path` resolves, cyrius makes the
+`git`/`tag` fields **fully inert and skips commit-pin verification** — so
+local builds compiled against whatever the sibling working tree happened
+to contain, and an unreleased tag would pass every local gate then
+hard-fail CI. Measured: `cyrius.lock` carried **3** `commit` lines before,
+**5** after.
+
+All three `path` fields are dropped. Local resolution now *is* the CI
+resolution — verified in a sibling-free tree: identical lock and a
+byte-identical 1,354,272-byte binary.
+
+### Changed — dependency pins
+
+| Dep | 1.4.0 | 1.4.1 |
+|-----|-------|-------|
+| cyrius | 6.4.62 | **6.5.35** |
+| sigil | 3.11.1 | **3.12.9** |
+| agnostik | 1.3.4 | **1.4.0** |
+| libro | 2.8.0 | **2.8.12** |
+| argonaut | 1.8.4 | **1.8.6** |
+| patra | 1.12.9 (git dep) | **1.13.10** (stdlib fold) |
+| sakshi | 2.4.3 (transitive) | **2.4.11** (stdlib fold) |
+
+The thin sigil surface is unchanged in shape (`dist/sigil-mldsa.cyr` +
+`src/sha_ni.cyr` + `src/sha256.cyr` + `src/hex.cyr` + `dist/sigil-tpm.cyr`)
+and still mirrors libro's own sigil block, which it must: cyrius dedups
+both same-named `sigil` deps to kybernet's root list. Verified still thin —
+`.bss` **94,568 B** and **zero** x509/RSA/authenticode symbols in the
+binary, against the ~13 MB the monolith would add.
+
+### Changed — cyrius.cyml is documentation, not a ledger
+
+Trimmed **6,924 → 2,784 bytes**. Per-entry archaeology moved here, to the
+changelog; the manifest keeps short statements of fact and pointers.
+
+- **No `#` comments inside the `[deps].stdlib` array.** The manifest
+  parser stops collecting entries at one and silently truncates the list —
+  it does not error. The 1.4.0 array carried five such comments.
+- Every `[deps.*]` section now sits at bytes **1,746–2,438**, was
+  **5,408–6,557**. cyrius ≤ 6.5.27 read only the first **4,095** bytes of a
+  manifest and resolved a `[deps]` section past that window to *zero*
+  dependencies, silently; 6.5.28 raised the window to 65,535 and made it
+  fail-closed. The trimmed file clears it by a wide margin either way.
+
+### Fixed — CI format gate (broken by the toolchain bump)
+
+cyrius 6.5.28 made **`cyrius fmt` rewrite files in place and print
+nothing** (flagged BREAKING upstream; `--dry` is the old stdout
+behaviour). The existing gate — `diff -q <(cyrius fmt "$f") "$f"` —
+therefore diffs an **empty stream** against every file: it reports drift
+unconditionally *and* silently reformats the CI checkout underneath the
+later build/test steps. Replaced with `cyrius fmt "$f" --check`, which
+sets the exit code and is verified non-mutating at 6.5.35. Matches
+argonaut CI. Stale `agnosys` references in both workflows removed.
+
+### Upstream breaking changes — both inert for kybernet
+
+- **argonaut** `audit_log_verify_inclusion` / `audit_log_verify_consistency`
+  now take the trusted root explicitly. kybernet calls **neither**, and
+  cyrius 6.5.1 makes a wrong-arity call a hard compile error, so a stale
+  call site could not have survived the build.
+- **libro 2.8.11/2.8.12** change the audit-chain **on-disk preimage**;
+  chains written by libro ≤ 2.8.10 will not verify. Affects only
+  deployments with `config.audit_persist` enabled (default off). kybernet
+  makes zero direct `audit_*` calls — it imports argonaut's audit modules
+  only to close the compile-time symbol graph.
+
+### Security — argonaut 1.8.6 fixes that do reach PID 1
+
+argonaut's fourth P(-1) pass (0 CRITICAL / 0 HIGH / 9 MEDIUM / 6 LOW).
+Two land directly in kybernet's event loop, which calls `init_poll_health`
+→ `execute_health_check`:
+
+- **MEDIUM-2 / MEDIUM-7 — two NULL-pointer dereferences in the health
+  loop.** `execute_health_check` returned a bare `0` for a non-`http://`
+  target and dereferenced `target` with no null check for every type
+  except `HC_PROCESS_ALIVE`, while callers immediately do
+  `load64(result + 16)`. Both regression tests crashed argonaut's test
+  binary outright before the fix. In kybernet that is a PID-1 fault —
+  a kernel panic — reachable by configuring a service with an `https://`
+  health URL.
+
+argonaut's MEDIUM-1 (`notify_parse` buffer over-read) and MEDIUM-5
+(`verify_emergency_auth` failing open) do **not** reach kybernet: it uses
+its own `src/lib/notify.cyr` and its own `drop_to_emergency()`.
+
+### Changed — source (comments only)
+
+- `_ll_access_to_kernel` (`src/lib/sandbox.cyr`) keeps its explicit
+  `if`-ladder, but the comment no longer describes the `switch` miscompile
+  as live: **cyrius 6.5.20 fixed it.** Root cause was the v5.6.27 regalloc
+  NOP-harvest compactor, which deleted the register picker's 4-byte NOPs and
+  repaired jump displacements but did not know the switch jump table existed
+  — shifting every entry **+4 per preceding case body**. That is exactly why
+  bodies of `{ return N; }` were never affected (no local store ⇒ no NOP ⇒ no
+  shift) and the accumulating form always was. The ladder stays: correct on
+  every toolchain, and this is the per-service Landlock path where a
+  miscompile is a PID-1 crash.
+
+### Verification
+
+- **177/177 tests pass**; no functional source change.
+- x86_64 **1,354,272 B** (was 1,011,264); aarch64 **1,775,984 B** (was
+  1,355,160). Growth is `.text` from the newer agnostik/libro/patra;
+  `.bss` holds at 94,568 B.
+- `cyrius deps --verify`: **68 verified, 0 failed**, 5 commit-pinned.
+- **Benchmarks: no regression ≥ 15 %**; 51 recorded, 18 improved
+  (`timerspec_new` −37 %, `capability_set(new+3push)` −25 %,
+  `epoll_event_new` −27 %).
+- **QEMU PID-1 harness: OK**, all markers, **911 ms** and **673 ms** on two
+  runs against a 3000 ms budget (1.4.0 recorded 951 ms).
+- **Sibling-free reproduction**: identical `cyrius.lock`, identical binary
+  size, 177/177 — so CI resolves exactly what was built locally.
+
+---
+
 ## [1.4.0] — 2026-07-13
 
 **Toolchain leap to cyrius 6.4.62 + full dependency refresh, and a THIN sigil

@@ -5,20 +5,20 @@ description = "PID 1 init system for AGNOS"
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/kybernet"
 language = "cyrius"
-cyrius = "6.4.62"
+cyrius = "6.5.35"
 
 [build]
 entry = "src/main.cyr"
 test = "src/test.cyr"
 output = "build/kybernet"
 
-# `sigil` is NOT a stdlib pin — it stays an external git-pinned dep
-# ([deps.sigil] below) carrying the TPM/dm-verity trust surface; pinning
-# it as stdlib would duplicate-define against libro's transitive sigil.
-# `sakshi` WAS unpinned too (transitive via patra/agnosys) but is an
-# explicit stdlib pin as of 1.4.0 — libro 2.8.0's sidecar requires it as
-# a stdlib leaf and agnosys (which used to supply it) is gone. See the
-# `sakshi` entry in the stdlib list for the full rationale.
+# Cyrius-stdlib modules copied into lib/ by `cyrius deps`. Order matters:
+# `syscalls` stays ahead of `io`/`process`, and `atomic` ahead of `sync`.
+#
+# Never put a `#` comment inside the array — the manifest parser stops
+# collecting entries at one and silently truncates the list.
+#
+# Rationale for individual entries: CHANGELOG.md. Build rules: CLAUDE.md.
 [deps]
 stdlib = [
     "string",
@@ -32,48 +32,20 @@ stdlib = [
     "process",
     "hashmap",
     "tagged",
-    # `json` standalone module retired in cyrius 6.1.25 — folded into the
-    # `bayan` serialization bundle (base64 + csv + json) with back-compat
-    # `json_parse`/`json_get`/`json_get_int` aliases, which is what
-    # src/main.cyr's /proc/cmdline config parser calls. Pin `bayan`, not
-    # `json`. Mirrors libro 2.7.x / argonaut 1.8.x stdlib lists.
     "bayan",
     "fnptr",
     "callback",
     "freelist",
     "mmap",
-    # `bigint` dropped at 1.3.4: the standalone stdlib module is gone in
-    # 6.2.11 (sigil 3.7.x bundles its own bigint internally). kybernet never
-    # referenced bigint_* directly — it was only pinned to satisfy sigil's
-    # old transitive need. Removing it; sigil is self-contained now.
     "chrono",
     "ct",
     "keccak",
     "thread",
-    # thread_local pulled in for kybernet 1.3.2 (libro 2.7.1 → sigil 3.6.0):
-    # sigil's crypto_scratch banks per-thread arrays over cyrius 6.0.52 TLS and
-    # calls thread_local_init/get/set. Must be ordered before the external sigil
-    # bundle — without it the binary links but SIGILLs at runtime (uninitialised
-    # thread pointer). See libro 2.7.1 CHANGELOG.
     "thread_local",
-    # atomic + sync added at 1.4.0: patra 1.12.9's dep sidecar requires both
-    # (patra.deps lists `atomic sync thread_local`) — patra's WAL/object-store
-    # locking moved onto the stdlib `sync` mutex, itself built on `atomic`
-    # (sync.cyr calls atomic_cas/atomic_fence/atomic_store). Neither was pinned
-    # before; without them `cyrius deps` aborts resolving patra. `atomic` must
-    # precede `sync`. Mirrors libro 2.8.0's stdlib list.
-    # (NOTE: keep comment text free of the double-quote character — the cyml
-    # array parser treats one inside a # comment as opening a string token.)
     "atomic",
     "sync",
-    # sakshi promoted to an explicit stdlib pin at 1.4.0. libro 2.8.0's dep
-    # sidecar (libro.deps) now lists `sakshi` as a required stdlib leaf; under
-    # the pre-2.8 graph sakshi arrived transitively (patra/agnosys pulled it),
-    # so kybernet left it unpinned. agnosys is gone and patra 1.12.9 no longer
-    # lists sakshi, so nothing provides it transitively anymore — `cyrius deps`
-    # fails resolving libro without this pin. No duplicate-define risk: sakshi
-    # is now purely a stdlib module (no git-dep copy in the graph).
     "sakshi",
+    "patra",
     "random",
     "slice",
     "trait",
@@ -83,71 +55,37 @@ stdlib = [
     "bench",
 ]
 
-# Dist-bundle adoption (1.1.0): cc5 lifts the cc3-era 64-struct
-# ceiling that previously forced selective module imports here.
-# Bundles also insulate kybernet from upstream module renames
-# (the reason the 1.0.2 → 1.1.0 jump was forced — agnosys moved
-# `lib/syscalls_linux.cyr` → `src/syscall.cyr`).
-
-# [deps.agnosys*] dropped at the agnosys → agnodrm decomposition (2026-06-19):
-#  - agnosys-core was VESTIGIAL — kybernet references no error/syscall/logging
-#    symbol from it (the old "56 fns" comment was stale; kybernet uses its own
-#    src/lib/log.cyr + argonaut + cyrius stdlib).
-#  - agnosys-storage (LUKS / dm-verity) + agnosys-trust (TPM PCR) backed the
-#    edge-boot path; that trust+storage stack moved into sigil at 3.9.0. The
-#    ../agnosys local path also broke when the folder was renamed ../agnodrm.
-#
-# THIN sigil surface (1.4.0): kybernet does NOT pull the monolithic
-# dist/sigil.cyr. At 3.11.1 the full bundle inlines the x509/RSA/authenticode
-# path, whose bignum tables carry ~13 MB of static .bss that DCE cannot strip
-# and kybernet never touches — a full-bundle build is 14 MB vs ~1 MB thin.
-# kybernet's real sigil surface is two disjoint pieces:
-#   1. The crypto set libro's merkle/audit path needs transitively (pulled in
-#      via the argonaut audit modules): sigil-mldsa (ed25519 + ML-DSA + SHA-512
-#      + crypto_scratch) + sha_ni + sha256 + hex. This MIRRORS libro 2.8.0's
-#      own sigil block — required because cyrius dedups the two same-named
-#      sigil deps to this root list, so it must cover libro's ed25519 / hex /
-#      SIG_ALG_ED25519 or lib/libro.cyr fails to compile.
-#   2. kybernet's own TPM surface: sigil's `tpm` distlib profile
-#      (dist/sigil-tpm.cyr = tpm_detect / tpm_read_pcr / TPM_SHA256).
-# dm-verity is NOT sourced from sigil: there is no dm-verity distlib profile,
-# and raw src/dmverity.cyr has an unguarded cross-repo include. Its one-line
-# kernel capability probe lives in src/lib/edge_boot.cyr (_eb_dmverity_supported).
+# THIN sigil surface — kybernet must NOT pull the monolithic dist/sigil.cyr,
+# whose x509/RSA/authenticode bignum banks add static .bss that DCE cannot
+# strip. Two disjoint pieces:
+#   1. mldsa + sha_ni + sha256 + hex — the crypto set libro's merkle/audit
+#      path needs transitively. Mirrors libro's own `deps.sigil` block, and
+#      must stay in sync with it: cyrius dedups both same-named sigil deps to
+#      this root list, so this list has to cover libro's ed25519/hex too.
+#   2. sigil-tpm — kybernet's own TPM surface (src/lib/edge_boot.cyr).
+# dm-verity is deliberately not sourced from sigil; see CHANGELOG.md [1.4.0].
 [deps.sigil]
 git = "https://github.com/MacCracken/sigil.git"
-tag = "3.11.1"
+tag = "3.12.9"
 modules = ["dist/sigil-mldsa.cyr", "src/sha_ni.cyr", "src/sha256.cyr", "src/hex.cyr", "dist/sigil-tpm.cyr"]
 
 [deps.agnostik]
 git = "https://github.com/MacCracken/agnostik.git"
-path = "../agnostik"
-tag = "1.3.4"
+tag = "1.4.0"
 modules = ["dist/agnostik.cyr"]
 
 [deps.libro]
 git = "https://github.com/MacCracken/libro.git"
-path = "../libro"
-tag = "2.8.0"
+tag = "2.8.12"
 modules = ["dist/libro.cyr"]
 
-# patra is pulled transitively by libro 2.6+; declared explicitly
-# here to pin the version kybernet ships with rather than inheriting
-# whatever libro's tag happens to point at. Matches argonaut 1.6+.
-[deps.patra]
-git = "https://github.com/MacCracken/patra.git"
-tag = "1.12.9"
-modules = ["dist/patra.cyr"]
-
-# argonaut has no dist bundle — selective module imports remain.
-# The module list mirrors argonaut's own src/main.cyr include order.
-# resolver/notify/audit_ext were added in 1.6.x to back symbols
-# referenced from health/init/process_mgmt; pid1_harness intentionally
-# omitted (kybernet IS PID 1 — the harness is for argonaut's own
-# QEMU-driven PID-1 graduation tests, not consumer-facing).
+# argonaut ships no dist bundle, so imports stay selective. Order mirrors
+# argonaut's own src/main.cyr include order (cyrius resolves forward
+# references in a single pass). src/pid1_harness.cyr is intentionally
+# omitted — kybernet IS PID 1; that harness is argonaut's own test rig.
 [deps.argonaut]
 git = "https://github.com/MacCracken/argonaut.git"
-path = "../argonaut"
-tag = "1.8.4"
+tag = "1.8.6"
 modules = [
     "src/types.cyr",
     "src/boot.cyr",

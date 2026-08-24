@@ -196,18 +196,24 @@ fn _ll_access_to_kernel(access_vec) {
         var flag = vec_get(access_vec, ai);
         # agnostik LL_ enums map 1:1 to kernel bit positions.
         #
-        # Written as an if-ladder rather than a `switch`: cyrius 6.4.62
-        # MISCOMPILES a switch of exactly this shape — many cases whose bodies
+        # Written as an if-ladder rather than a `switch`. cyrius 6.4.62
+        # MISCOMPILED a switch of exactly this shape — cases whose bodies
         # accumulate (`mask = mask | CONST`) inside a loop, closed by a
-        # `default: return` — into a SIGSEGV at the call site (a plain
-        # switch of `case N: return K` bodies compiles fine; the accumulate-in-
-        # loop + default-return form does not). Verified against 6.4.62: the
-        # switch form segfaults on the first call, this if-ladder is correct.
-        # This is the sandbox path kybernet applies to every service, so the
-        # miscompile is a PID-1 crash risk, not just a bench failure. See the
-        # 1.4.0 CHANGELOG. An unknown flag is skipped (the old `default: return
-        # mask` bailed early; skipping is strictly more robust and never fires
-        # on the agnostik-produced 0..12 flag set).
+        # `default: return` — into a SIGSEGV at the call site, while a switch
+        # of `case N: return K` bodies compiled fine. Root cause (cyrius
+        # 6.5.20): the regalloc NOP-harvest compactor did not know the switch
+        # jump table existed and shifted every entry +4 per preceding case
+        # body — so only bodies containing a local store were affected, which
+        # is precisely the accumulate form. FIXED upstream at 6.5.20.
+        #
+        # The ladder stays: it is correct on every toolchain, this is the
+        # sandbox path applied to every service (a miscompile here is a PID-1
+        # crash), and there is nothing to gain from churning it back. See
+        # CHANGELOG 1.4.0 (discovery) and 1.4.1 (upstream fix).
+        #
+        # An unknown flag is skipped (the old `default: return mask` bailed
+        # early; skipping is strictly more robust and never fires on the
+        # agnostik-produced 0..12 flag set).
         if (flag == 0)  { mask = mask | LANDLOCK_ACCESS_FS_EXECUTE; }
         if (flag == 1)  { mask = mask | LANDLOCK_ACCESS_FS_WRITE_FILE; }
         if (flag == 2)  { mask = mask | LANDLOCK_ACCESS_FS_READ_FILE; }

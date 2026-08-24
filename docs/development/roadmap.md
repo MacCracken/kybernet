@@ -92,9 +92,11 @@ Hardware-in-the-loop; not CI-runnable.
 
 - **Control socket for agnoshi runtime commands** — separate transport surface; pinned until an agnoshi consumer drives the protocol shape
 - **Binary signing on release** — pinned until libro 2.6+ signing/timestamping is consumer-driven from outside kybernet's tree
-- **Remap the agnosys profile deps for the agnosys → agnodrm decomposition** — kybernet pins three agnosys profiles (`agnosys-core`, `agnosys-storage`, `agnosys-trust`). The decomposition splits them: **trust** (`tpm_detect`/`tpm_attestation`/`tpm_verify_measured_boot`/`tpm_present`, used in `src/lib/edge_boot.cyr`) + **storage** (luks/dmverity) move to **sigil** (folded in 3.8.1); **core** (error/util) survives in the renamed **agnodrm**. When the rename lands, repoint `[deps.agnosys-trust]`/`[deps.agnosys-storage]` → `[deps.sigil]` and `[deps.agnosys-core]` → `[deps.agnodrm]`. **Unblocker: ✅ satisfied** — sigil **3.9.0** promoted the trust + storage API to `dist/sigil.cyr` (exports `tpm_detect`, `tpm_verify_measured_boot`, `dmverity_verify`, `luks_*`). Note `edge_boot.cyr`'s only *external* tpm call is `tpm_detect()` (in the dist); `tpm_attestation` is an `EdgeBootConfig` field label and `tpm_present` is kybernet's own accessor (`edge_boot_tpm_present`) — neither needs an upstream symbol. The deferred 1.2.1 calls (`tpm_verify_measured_boot`/`dmverity_verify`/`luks_*`) are all in the dist. **Trigger:** the agnodrm rename.
 
 ## History
+
+### v1.4.1 — Toolchain 6.5.35 + dependency refresh (2026-08-24)
+cyrius 6.4.62 → 6.5.35; sigil 3.12.9 / agnostik 1.4.0 / libro 2.8.12 / argonaut 1.8.6. Retired the `[deps.patra]` git block (it was downgrading the newer stdlib fold) and the `path = "../…"` fields (they made the tag pins inert locally). Manifest trimmed 6,924 → 2,784 bytes. CI format gate repaired for `cyrius fmt`'s in-place rewrite. No functional source change; 177 tests, harness green (673–911 ms of a 3000 ms budget).
 
 ### v1.0.2 — Toolchain rebase (2026-04-27)
 cyrius 4.5.0 → 5.7.12, manifest renamed `cyrius.toml` → `cyrius.cyml`, agnosys 1.0.2 / agnostik 1.0.0 / libro 2.0.5 / argonaut 1.5.0. 140 tests.

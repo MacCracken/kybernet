@@ -23,20 +23,20 @@
 │                                                  │
 │  argonaut  — service lifecycle, boot stages,     │
 │              health checks, audit logging         │
-│  agnosys   — Linux syscall bindings              │
 │  agnostik  — shared AGNOS types                  │
 │  libro     — cryptographic audit chain           │
+│  sigil     — TPM / crypto trust surface (thin)   │
 └──────────────────────────────────────────────────┘
 ```
 
 ## Build
 
-Requires Cyrius 5.7.12 (`cyriusly install 5.7.12 && cyriusly use 5.7.12`).
+Requires Cyrius 6.5.35 (`cyriusly install 6.5.35 && cyriusly use 6.5.35`).
 
 ```sh
 cyrius deps                                # Resolve deps from cyrius.cyml into lib/
-cyrius build src/main.cyr build/kybernet   # Build
-cyrius test src/test.cyr                   # Run 140 tests
+CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet   # Build (DCE recommended)
+cyrius test src/test.cyr                   # Run 177 tests
 cyrius bench src/bench.cyr                 # Run benchmarks
 ```
 
@@ -44,19 +44,21 @@ cyrius bench src/bench.cyr                 # Run benchmarks
 
 | Module | Lines | What |
 |--------|-------|------|
-| main | 434 | Boot sequence, argonaut init, event loop, shutdown |
-| sandbox | 299 | Landlock filesystem sandboxing (builder pattern) |
+| main | 738 | Boot sequence, argonaut init, event loop, shutdown |
+| cgroup | 355 | Cgroup v2 paths, move PID, kill, limits, path cache |
+| sandbox | 305 | Landlock filesystem sandboxing (builder pattern) |
 | seccomp | 206 | Seccomp BPF filter builder + loader |
-| cgroup | 204 | Cgroup v2 paths, move PID, kill, limits |
-| privdrop | 184 | Capability dropping + no_new_privs + agnostik bridge |
-| eventloop | 123 | OwnedFd, epoll, timerfd, structured events |
-| notify | 96 | sd_notify socket (READY, STOPPING, WATCHDOG, STATUS) |
-| mount | 89 | Data-driven essential mount table |
+| privdrop | 175 | Capability dropping + no_new_privs + agnostik bridge |
+| edge_boot | 174 | Verified-and-sealed boot pre-flight (TPM PCR, dm-verity) |
+| mount | 154 | Data-driven essential mount table |
+| eventloop | 124 | OwnedFd, epoll, timerfd, structured events |
+| notify | 110 | sd_notify socket (READY, STOPPING, WATCHDOG, STATUS) |
+| log | 107 | klog / klog2 / kmsg / slog |
 | signals | 83 | Block 5 signals, create signalfd, classify |
-| reaper | 63 | Non-blocking waitpid loop, structured results |
-| console | 36 | Redirect stdin/stdout/stderr for PID 1 |
+| reaper | 75 | Non-blocking waitpid loop, structured results |
+| console | 42 | Redirect stdin/stdout/stderr for PID 1 |
 
-**1,817 lines of Cyrius** across 11 modules + main (was 1,649 lines of Rust).
+**2,648 lines of Cyrius** across main + 12 modules (was 1,649 lines of Rust).
 
 ## Features
 
@@ -67,7 +69,7 @@ cyrius bench src/bench.cyr                 # Run benchmarks
 - **Data-driven mount table** — not hardcoded per-mount calls
 - **sd_notify compatible** — READY, STOPPING, WATCHDOG, STATUS messages via epoll
 - **String builder** for path construction and logging
-- **140 tests**, 46 benchmarks
+- **177 tests**, 51 benchmarks
 
 ## Dependencies
 
@@ -75,19 +77,24 @@ Resolved via `cyrius.cyml` (locked in `cyrius.lock`):
 
 | Dep | Version | What |
 |-----|---------|------|
-| agnosys | 1.0.2 | Linux syscall bindings |
-| agnostik | 1.0.0 | Shared AGNOS types (security, agent, error) |
-| libro | 2.0.5 | Cryptographic audit chain |
-| argonaut | 1.5.0 | Service lifecycle, boot stages, health, audit |
+| sigil | 3.12.9 | TPM / crypto trust surface (thin sub-bundles only) |
+| agnostik | 1.4.0 | Shared AGNOS types (security, agent, error) |
+| libro | 2.8.12 | Cryptographic audit chain |
+| argonaut | 1.8.6 | Service lifecycle, boot stages, health, audit |
 
-Plus 21 stdlib modules from `~/.cyrius/lib/`. Selective `src/<module>.cyr`
-imports (not `dist/` bundles) keep the combined unit under the 64-struct
-compiler ceiling.
+`patra` and `sakshi` are **not** declared as git deps — cyrius 6.5.20+ ships
+them in the stdlib snapshot, and a git pin would silently downgrade the
+folded copy. They are listed in `[deps].stdlib` alongside 30 other stdlib
+modules from `~/.cyrius/lib/`.
+
+sigil is pulled as a **thin** set of capability sub-bundles rather than the
+monolithic `dist/sigil.cyr`, whose x509/RSA bignum banks add static `.bss`
+that dead-code elimination cannot strip.
 
 ## Requirements
 
 - Linux x86_64
-- Cyrius 5.7.12 (`~/.cyrius/bin/cyrius`)
+- Cyrius 6.5.35 (`~/.cyrius/bin/cyrius`)
 - No C, no Rust, no libc
 
 ## Legacy

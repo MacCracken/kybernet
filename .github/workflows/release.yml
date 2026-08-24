@@ -51,7 +51,7 @@ jobs:
           # truth for the toolchain version — no version is hardcoded in
           # this YAML. Read the pin and hand it to the upstream installer,
           # which fetches + lays out $HOME/.cyrius/{bin,lib}. Matches
-          # patra / sigil / agnosys CI.
+          # patra / sigil / libro CI.
           CYRIUS_VERSION="$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')"
           echo "Installing Cyrius $CYRIUS_VERSION"
           curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
