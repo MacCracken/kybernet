@@ -73,6 +73,56 @@ else
     echo "  WARNING: busybox not found — boot-shutdown/boot-crash tests unavailable (harness mode unaffected)"
 fi
 
+# Stage a real kybernet config with real services (1.5.0).
+#
+# This is what makes the harness prove the v1.5.0 property end to end:
+# before 1.5.0 `load_config` never parsed the services array, so
+# config_services() was always empty, resolve_service_waves short-circuited
+# and start_services()'s wave-loop body had never once executed in a real
+# boot. With this file present the harness boots, parses two services out
+# of JSON, resolves them into dependency waves, and actually forks+execs
+# them as PID 1 — and boot-test.sh asserts on the per-service markers.
+#
+# Both services are /bin/true oneshots so they start, exit 0 immediately,
+# and get reaped through the normal SIGCHLD path. kyb-dep is a dependency
+# of kyb-svc, so a correct wave resolution must start kyb-dep first.
+#
+# shutdown_timeout_ms is deliberately short. Now that services actually
+# run, shutdown really does SIGTERM them and poll in 50 ms steps up to the
+# timeout — the mode defaults include a long-lived shell (agnoshi -> busybox
+# sh) that does not exit instantly. The pre-1.5.0 boot started nothing, so
+# the 3000 ms budget was calibrated against a shutdown with no work to do.
+# 400 ms keeps the graceful-stop path exercised without spending the budget
+# waiting for it.
+if [ -n "$BUSYBOX" ]; then
+    mkdir -p "${INITRAMFS_DIR}/etc/kybernet"
+    cat > "${INITRAMFS_DIR}/etc/kybernet/config.json" << 'CFGEOF'
+{
+  "boot_mode": "minimal",
+  "log_to_console": true,
+  "shutdown_timeout_ms": 400,
+  "services": [
+    {
+      "name": "kyb-svc",
+      "description": "harness service",
+      "binary": "/bin/true",
+      "type": "oneshot",
+      "restart": "never",
+      "depends_on": ["kyb-dep"]
+    },
+    {
+      "name": "kyb-dep",
+      "description": "harness dependency",
+      "binary": "/bin/true",
+      "type": "oneshot",
+      "restart": "never"
+    }
+  ]
+}
+CFGEOF
+    echo "  staged /etc/kybernet/config.json (2 services, 1.5.0 harness)"
+fi
+
 # Minimal /etc/hosts so any resolver lookups during boot don't fail
 # on missing localhost.
 cat > "${INITRAMFS_DIR}/etc/hosts" << 'EOF'

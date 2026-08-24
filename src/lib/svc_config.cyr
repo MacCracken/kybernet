@@ -1,0 +1,179 @@
+# kybernet/svc_config.cyr — build argonaut ServiceDefinitions from JSON
+# Requires: bayan (json_v_*), argonaut types, log.cyr
+#
+# Before 1.5.0 `load_config()` parsed four scalar fields and left the
+# services array alone — the comment in main.cyr said so outright. So
+# `config_services(cfg)` was always the empty vec argonaut's default
+# returns, `resolve_service_waves` short-circuited on it, and
+# **start_services() was a no-op on every real boot**: the wave loop body
+# had never executed in production. Everything downstream of it was
+# untested by construction. That is v1.5.0's whole subject.
+#
+# This module owns the JSON -> ServiceDefinition mapping. It is separate
+# from main.cyr so test.cyr can drive it directly with literal documents
+# rather than needing a config file on disk.
+#
+# Schema (unknown keys are ignored; only `name` and `binary` are required):
+#
+#   "services": [
+#     {
+#       "name":         "daimon",
+#       "description":  "agent runtime",
+#       "binary":       "/usr/bin/daimon",
+#       "args":         ["--port", "8090"],
+#       "depends_on":   ["postgres"],
+#       "type":         "simple" | "forking" | "oneshot",
+#       "restart":      "always" | "on-failure" | "never",
+#       "enabled":      true,
+#       "pid_file":     "/run/daimon.pid",
+#       "health_check": { "type": "tcp", "target": "127.0.0.1", "port": 8090,
+#                         "interval_ms": 5000, "timeout_ms": 2000, "retries": 3 }
+#     }
+#   ]
+#
+# Enum-valued fields go through argonaut's `*_parse` inverses (1.10.0), NOT
+# a hand-rolled mapping here — that is the whole point of those functions
+# existing, and it is what stops kybernet and argonaut drifting apart about
+# what "on-failure" means. An unrecognised value is rejected rather than
+# defaulted, so a typo in config surfaces at boot instead of silently
+# becoming a different restart policy.
+
+# Field-level accessors. Each returns the requested type, or the supplied
+# fallback when the key is absent or holds the wrong JSON type. Being
+# type-strict matters: `"enabled": "false"` is a string, and treating it as
+# truthy because the key merely exists would enable a service the operator
+# disabled.
+fn _cfg_str(obj, key, fallback) {
+    var v = json_v_obj_get(obj, key);
+    if (v == 0) { return fallback; }
+    if (json_v_is_str(v) == 0) { return fallback; }
+    return json_v_str(v);
+}
+
+fn _cfg_int(obj, key, fallback) {
+    var v = json_v_obj_get(obj, key);
+    if (v == 0) { return fallback; }
+    if (json_v_is_int(v) == 0) { return fallback; }
+    return json_v_int(v);
+}
+
+fn _cfg_bool(obj, key, fallback) {
+    var v = json_v_obj_get(obj, key);
+    if (v == 0) { return fallback; }
+    if (json_v_is_bool(v) == 1) { return json_v_bool(v); }
+    return fallback;
+}
+
+# Append every string element of the array at `key` into `out` (a vec of
+# Str). Non-string elements are skipped rather than aborting the whole
+# service — a stray number in an args list should not cost you the service.
+fn _cfg_str_array_into(obj, key, out) {
+    var v = json_v_obj_get(obj, key);
+    if (v == 0) { return 0; }
+    if (json_v_is_arr(v) == 0) { return 0; }
+    var n = json_v_arr_len(v);
+    for (var i = 0; i < n; i = i + 1) {
+        var e = json_v_arr_get(v, i);
+        if (e != 0 && json_v_is_str(e) == 1) { vec_push(out, json_v_str(e)); }
+    }
+    return 0;
+}
+
+# Build a HealthCheck from a "health_check" object, or 0 when absent.
+# Returns 0-1 when present but malformed, so the caller can reject the
+# service instead of silently starting it unmonitored.
+fn _cfg_health_check(svc_obj) {
+    var hc = json_v_obj_get(svc_obj, "health_check");
+    if (hc == 0) { return 0; }
+    if (json_v_is_obj(hc) == 0) { return 0 - 1; }
+
+    var type_s = _cfg_str(hc, "type", 0);
+    if (type_s == 0) { return 0 - 1; }
+    var tr = health_check_type_parse(type_s);
+    if (is_err_result(tr) == 1) { return 0 - 1; }
+
+    var target = _cfg_str(hc, "target", str_from(""));
+    return health_check_new(result_unwrap(tr), target,
+      _cfg_int(hc, "port", 0),
+      _cfg_int(hc, "interval_ms", 10000),
+      _cfg_int(hc, "timeout_ms", 2000),
+      _cfg_int(hc, "retries", 3));
+}
+
+# Build one ServiceDefinition from a JSON object.
+# Returns 0 when the entry is unusable — the caller logs and skips it.
+fn svc_def_from_json(obj) {
+    if (obj == 0) { return 0; }
+    if (json_v_is_obj(obj) == 0) { return 0; }
+
+    # name and binary are the two fields with no sane default: a service
+    # without them cannot be registered or executed.
+    var name = _cfg_str(obj, "name", 0);
+    if (name == 0) { return 0; }
+    if (str_len(name) == 0) { return 0; }
+    var binary = _cfg_str(obj, "binary", 0);
+    if (binary == 0) { return 0; }
+    if (str_len(binary) == 0) { return 0; }
+
+    var sd = svc_def_new(name, _cfg_str(obj, "description", str_from("")), binary);
+
+    _cfg_str_array_into(obj, "args", svc_def_args(sd));
+    _cfg_str_array_into(obj, "depends_on", svc_def_deps(sd));
+
+    # Enum fields: reject an unrecognised value rather than defaulting.
+    var type_s = _cfg_str(obj, "type", 0);
+    if (type_s != 0) {
+        var tr = service_type_parse(type_s);
+        if (is_err_result(tr) == 1) { return 0; }
+        svc_def_set_service_type(sd, result_unwrap(tr));
+    }
+
+    var restart_s = _cfg_str(obj, "restart", 0);
+    if (restart_s != 0) {
+        var rr = restart_policy_parse(restart_s);
+        if (is_err_result(rr) == 1) { return 0; }
+        svc_def_set_restart_policy(sd, result_unwrap(rr));
+    }
+
+    svc_def_set_enabled(sd, _cfg_bool(obj, "enabled", 1));
+
+    var pid_file = _cfg_str(obj, "pid_file", 0);
+    if (pid_file != 0) { svc_def_set_pid_file(sd, pid_file); }
+
+    var hc = _cfg_health_check(obj);
+    if (hc == 0 - 1) { return 0; }
+    if (hc != 0) { svc_def_set_health_check(sd, hc); }
+
+    return sd;
+}
+
+# Parse the "services" array of an already-parsed config document into a
+# vec of ServiceDefinition. Always returns a vec (possibly empty) so the
+# caller never has to null-check.
+#
+# A malformed entry is skipped with a log line rather than aborting the
+# whole config: losing one misconfigured service is recoverable, losing
+# every service because of one typo is a dead boot.
+fn svc_defs_from_json(root) {
+    var out = vec_new();
+    if (root == 0) { return out; }
+    if (json_v_is_obj(root) == 0) { return out; }
+
+    var arr = json_v_obj_get(root, "services");
+    if (arr == 0) { return out; }
+    if (json_v_is_arr(arr) == 0) {
+        klog("config: \"services\" is not an array — ignoring");
+        return out;
+    }
+
+    var n = json_v_arr_len(arr);
+    for (var i = 0; i < n; i = i + 1) {
+        var sd = svc_def_from_json(json_v_arr_get(arr, i));
+        if (sd == 0) {
+            klog("config: skipping malformed service entry");
+        } else {
+            vec_push(out, sd);
+        }
+    }
+    return out;
+}

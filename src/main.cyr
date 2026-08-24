@@ -33,6 +33,7 @@ include "src/lib/notify.cyr"
 include "src/lib/seccomp.cyr"
 include "src/lib/sandbox.cyr"
 include "src/lib/edge_boot.cyr"
+include "src/lib/svc_config.cyr"
 include "src/lib/service_sandbox.cyr"
 
 # ================================================================
@@ -68,45 +69,65 @@ fn load_config() {
     }
 
     klog("loaded config: /etc/kybernet/config.json");
-    var pairs = json_parse(str_new(buf, n));
-    if (pairs == 0) {
+
+    # 1.5.0: parse the full VALUE TREE, not the flat key/value pairs.
+    # `json_parse` only yields top-level scalars, which is why services
+    # could never be read — the array was structurally out of reach. bayan
+    # has had `json_v_parse` + arr/obj accessors the whole time.
+    var root = json_v_parse_buf(buf, n);
+    if (root == 0) {
         klog("config parse failed, using defaults");
+        return argonaut_config_default();
+    }
+    if (json_v_is_obj(root) == 0) {
+        klog("config root is not an object, using defaults");
         return argonaut_config_default();
     }
 
     var cfg = argonaut_config_default();
 
-    # Parse boot_mode
-    var mode_str = json_get(pairs, "boot_mode");
+    # boot_mode — via argonaut's parser (1.10.0) rather than a hand-rolled
+    # if-ladder. An unrecognised mode keeps the default instead of silently
+    # landing on whichever branch happens to fall through.
+    var mode_str = _cfg_str(root, "boot_mode", 0);
     if (mode_str != 0) {
-        if (str_eq(mode_str, str_from("minimal")) == 1) {
-            store64(cfg, BOOT_MINIMAL);
-        } elif (str_eq(mode_str, str_from("server")) == 1) {
-            store64(cfg, BOOT_SERVER);
-        } elif (str_eq(mode_str, str_from("desktop")) == 1) {
-            store64(cfg, BOOT_DESKTOP);
-        } elif (str_eq(mode_str, str_from("edge")) == 1) {
-            store64(cfg, BOOT_EDGE);
+        var mr = boot_mode_parse(mode_str);
+        if (is_ok(mr) == 1) {
+            store64(cfg, result_unwrap(mr));
+        } else {
+            klog("config: unrecognised boot_mode — keeping default");
         }
     }
 
-    # Parse timeouts
-    var bt = json_get_int(pairs, "boot_timeout_ms");
+    var bt = _cfg_int(root, "boot_timeout_ms", 0);
     if (bt > 0) { store64(cfg + 16, bt); }
-    var st = json_get_int(pairs, "shutdown_timeout_ms");
+    var st = _cfg_int(root, "shutdown_timeout_ms", 0);
     if (st > 0) { store64(cfg + 24, st); }
 
-    # Parse log_to_console
-    var ltc = json_get(pairs, "log_to_console");
-    if (ltc != 0) {
-        if (str_eq(ltc, str_from("false")) == 1) { store64(cfg + 32, 0); }
+    # log_to_console is a real JSON bool now. The old code compared it
+    # against the STRING "false", so `"log_to_console": false` — the
+    # spelling any operator would actually write — was ignored entirely.
+    store64(cfg + 32, _cfg_bool(root, "log_to_console", 1));
+
+    # Services (the v1.5.0 headline). See src/lib/svc_config.cyr.
+    var svcs = svc_defs_from_json(root);
+    var scount = vec_len(svcs);
+    if (scount > 0) {
+        var dst = config_services(cfg);
+        for (var i = 0; i < scount; i = i + 1) { vec_push(dst, vec_get(svcs, i)); }
+        klog2("config: services parsed: ", _u64_str(scount));
     }
 
-    # Parse services array — each service is {name, binary, ...}
-    # For now, services are registered via argonaut's default_services()
-    # Full JSON service parsing would require a JSON array parser
-
     return cfg;
+}
+
+# Small decimal formatter for log lines — fmt_int_buf writes digits without
+# a NUL, and every cstr logging path here calls strlen.
+fn _u64_str(n) {
+    var b = alloc(24);
+    var l = fmt_int_buf(n, b);
+    store8(b + l, 0);
+    return b;
 }
 
 fn reload_config() {
@@ -402,7 +423,8 @@ fn handle_sigchld() {
                 # silently escaped its cgroup for the rest of uptime: no
                 # memory/CPU limit, and cgroup.kill at shutdown misses it.
                 # 1.4.2 audit MEDIUM-5.
-                var rpid = init_restart_service(g_init, name, delay);
+                # cstr, not the Str box — same seam as start_services.
+                var rpid = init_restart_service(g_init, name_cs, delay);
                 if (rpid > 0) {
                     create_service_cgroup(name_cs);
                     move_to_cgroup(name_cs, rpid);
@@ -503,8 +525,12 @@ fn execute_boot_stage(stage) {
 fn start_services() {
     if (g_init == 0) { return 0; }
 
-    var config = load64(g_init);
-    var svc_defs = config_services(config);
+    # Resolve waves over EVERY registered service, not just the config
+    # half. argonaut_init_new registers default_services(mode) AND the
+    # config services; walking `config_services(config)` alone meant the
+    # defaults argonaut had just registered were never started. Needs
+    # argonaut 1.10.0's init_service_defs. 1.5.0.
+    var svc_defs = init_service_defs(g_init);
     var waves = resolve_service_waves(svc_defs);
     if (waves == 0) {
         klog("ERROR: circular dependency in services");
@@ -527,11 +553,29 @@ fn start_services() {
             var name_cs = str_data(name);
             klog2("  starting: ", name_cs);
 
-            var pid = init_start_service(g_init, name);
+            # name_cs, NOT name. resolve_service_waves returns waves of
+            # boxed Str, but argonaut's service map is keyed by cstr
+            # (`str_data(svc_def_name(sd))` in argonaut_init_new), so
+            # passing the Str box makes map_get miss and EVERY start
+            # returns -1. Latent until 1.5.0 only because the wave list was
+            # always empty. See argonaut's note on init_get_service.
+            # init_start_service's return is TRI-STATE, not a plain pid:
+            #   > 0  a live process (SVC_SIMPLE / SVC_FORKING)
+            #   == 0 a SVC_ONESHOT that ran to completion with exit 0
+            #        (init_start_oneshot waits, then returns 0 — there is no
+            #        surviving process to place in a cgroup)
+            #   < 0  failed to start
+            # Treating this as `pid > 0` logged every SUCCESSFUL oneshot as
+            # "FAILED to start". Found the first time this loop body ever
+            # executed in a real boot — it was unreachable before 1.5.0
+            # because the wave list was always empty. 1.5.0.
+            var pid = init_start_service(g_init, name_cs);
             if (pid > 0) {
                 klog2("  started: ", name_cs);
                 create_service_cgroup(name_cs);
                 move_to_cgroup(name_cs, pid);
+            } elif (pid == 0) {
+                klog2("  completed (oneshot): ", name_cs);
             } else {
                 klog2("  FAILED to start: ", name_cs);
             }

@@ -97,28 +97,22 @@ do and what it actually does on a booted system.
 
 Ordered by what unblocks what.
 
-### v1.5.0 — services actually come from config
+### v1.5.0 — services actually come from config ✅ (2026-08-24)
 
-The single biggest gap. `load_config()` parses four scalar fields and never
-populates the services array (`main.cyr` says so in a comment), so
-`config_services(cfg)` is always the empty vec argonaut's default returns.
-`resolve_service_waves` short-circuits on empty, so **`start_services()` is a
-no-op on every real boot** — the wave loop body has never executed in
-production. Everything downstream of it is therefore untested-by-construction.
-
-- [ ] JSON array/object parsing for `services` in `load_config` (bayan has the
-      parser; kybernet only ever calls `json_get`/`json_get_int`)
-- [ ] Populate `svc_def` from each entry: binary, args, deps, restart policy,
-      health check, type
-- [ ] **Fix the latent `Str`/cstr mismatch this will expose.**
-      `start_services` passes `vec_get(wave, si)` — a boxed `Str` pushed by
-      argonaut's `resolve_service_waves` — straight into
-      `init_start_service(init, name)`, which treats it as a cstr
-      (`sakshi_span_enter(name, strlen(name))`). Latent only because the wave
-      list is always empty today; it becomes reachable the moment services
-      are configured. 1.4.2 audit, filed HIGH / corrected LOW *on current
-      reachability*, not on correctness
-- [ ] Regression test that a config with N services yields N started services
+- [x] JSON array/object parsing for `services` in `load_config` — via bayan's
+      value tree (`json_v_parse_buf`), in `src/lib/svc_config.cyr`
+- [x] Populate `svc_def` from each entry: binary, args, deps, restart policy,
+      health check, type, enabled, pid_file
+- [x] Fixed the latent `Str`/cstr mismatch — `init_start_service` /
+      `init_restart_service` now get `str_data(name)`
+- [x] Fixed: waves resolved over `config_services` only, so the boot-mode
+      defaults were never started — now `init_service_defs(init)`
+- [x] Fixed: `init_start_service` is tri-state, so every successful oneshot
+      was logged as "FAILED to start"
+- [x] Regression tests + a QEMU harness that stages a real config and asserts
+      both a config service and its dependent actually ran
+- [x] argonaut 1.10.0: enum `*_parse` inverses, `init_service_defs`,
+      `svc_def_set_*`, `svc_hc_*`, and the oneshot-dependency fix
 
 ### v1.5.1 — boot stages that do something
 
@@ -201,6 +195,9 @@ v1.2.1 above; now that argonaut is in scope for edits, that is unblocked.
 - **Binary signing on release** — pinned until libro 2.6+ signing/timestamping is consumer-driven from outside kybernet's tree
 
 ## History
+
+### v1.5.0 — Config-driven services (2026-08-24)
+services parsed from JSON; three defects fixed in the start path that had never executed; argonaut 1.10.0 for the enum parsers, service-set accessors and the oneshot-dependency fix. Harness now boots real services. 235 tests.
 
 ### v1.4.2 — P(-1) audit pass (2026-08-24)
 Fifth P(-1) sweep; first since 1.1.5. 2 CRITICAL / 5 HIGH / 7 MEDIUM / 6 LOW, 19 of 20 closed. Both CRITICALs were gate-invisible: undrained level-triggered timerfds (PID 1 spinning at 100% CPU ~10s after every boot, then a kernel panic) and an x86_64-only `struct epoll_event` layout (kernel-written heap overflow + signals never handled on aarch64). Added the `kybernet.harness=loop` reactor gate — verified to fail on the unfixed tree — because no release gate had ever executed an event-loop iteration. 194 tests.

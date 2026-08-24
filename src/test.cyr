@@ -17,6 +17,7 @@ include "src/lib/notify.cyr"
 include "src/lib/seccomp.cyr"
 include "src/lib/sandbox.cyr"
 include "src/lib/edge_boot.cyr"
+include "src/lib/svc_config.cyr"
 include "src/lib/service_sandbox.cyr"
 
 # log.cyr's slog() short-circuits on g_log_fd <= 0; we never call
@@ -189,6 +190,155 @@ fn test_sandbox_from_config_fail_closed() {
     var br = filesystem_rule_new("/etc", 99);
     vec_push(sandbox_fs_rules(bogus), br);
     assert(is_err_result(sandbox_from_config(bogus)) == 1, "sbx: unknown access fails closed");
+    return 0;
+}
+
+# Assemble a JSON document from short fragments. The service documents
+# below would otherwise be single 150-260 character lines, which trips
+# cyrlint's 120-column rule (and is unreadable besides).
+fn _json_doc(parts) {
+    var sb = str_builder_new();
+    for (var i = 0; i < vec_len(parts); i = i + 1) {
+        str_builder_add_cstr(sb, vec_get(parts, i));
+    }
+    return str_builder_build(sb);
+}
+
+fn _doc2(a, b) {
+    var v = vec_new(); vec_push(v, a); vec_push(v, b);
+    return _json_doc(v);
+}
+
+fn _doc3(a, b, c) {
+    var v = vec_new(); vec_push(v, a); vec_push(v, b); vec_push(v, c);
+    return _json_doc(v);
+}
+
+# ---------------------------------------------------------------------
+# v1.5.0 — services actually come from config.
+#
+# Before 1.5.0 `load_config` never populated the services array, so
+# `config_services(cfg)` was always empty, `resolve_service_waves`
+# short-circuited, and start_services() was a no-op on every real boot.
+# These assertions are the regression wall for that.
+fn test_svc_config_parse() {
+    println("--- svc config parse (1.5.0) ---");
+
+    var doc = _doc3(
+      "{\"services\":[{\"name\":\"alpha\",\"binary\":\"/bin/a\",",
+      "\"args\":[\"-x\",\"1\"],\"depends_on\":[\"beta\"],\"type\":\"oneshot\",",
+      "\"restart\":\"never\",\"enabled\":false,\"description\":\"A\"},{\"name\":\"beta\",\"binary\":\"/bin/b\"}]}");
+    var root = json_v_parse(doc);
+    assert(root != 0, "cfg: doc parses");
+
+    var defs = svc_defs_from_json(root);
+    assert_eq(vec_len(defs), 2, "cfg: two services parsed");
+
+    var a = vec_get(defs, 0);
+    assert(str_eq(svc_def_name(a), str_from("alpha")) == 1, "cfg: name");
+    assert(str_eq(svc_def_binary(a), str_from("/bin/a")) == 1, "cfg: binary");
+    assert(str_eq(svc_def_desc(a), str_from("A")) == 1, "cfg: description");
+    assert_eq(vec_len(svc_def_args(a)), 2, "cfg: two args");
+    assert(str_eq(vec_get(svc_def_args(a), 0), str_from("-x")) == 1, "cfg: arg0");
+    assert_eq(vec_len(svc_def_deps(a)), 1, "cfg: one dep");
+    assert_eq(svc_def_service_type(a), SVC_ONESHOT, "cfg: type parsed");
+    assert_eq(svc_def_restart_policy(a), RESTART_NEVER, "cfg: restart parsed");
+    # A real JSON `false` must disable the service. The pre-1.5.0 config
+    # path compared against the STRING "false", so the spelling an operator
+    # would actually write was ignored.
+    assert_eq(svc_def_enabled(a), 0, "cfg: enabled:false honoured");
+
+    # Defaults for the minimal entry.
+    var b = vec_get(defs, 1);
+    assert_eq(svc_def_enabled(b), 1, "cfg: enabled defaults on");
+    assert_eq(vec_len(svc_def_args(b)), 0, "cfg: no args");
+    assert_eq(svc_def_health_check(b), 0, "cfg: no health check");
+
+    # --- rejection: entries that cannot be run must be skipped, not
+    # --- silently registered half-built.
+    var bad = json_v_parse(_doc2(
+        "{\"services\":[{\"binary\":\"/bin/x\"},{\"name\":\"n\"},",
+        "{\"name\":\"\",\"binary\":\"/bin/y\"},{\"name\":\"ok\",\"binary\":\"/bin/ok\"}]}"));
+    assert_eq(vec_len(svc_defs_from_json(bad)), 1, "cfg: malformed entries skipped");
+
+    # An unrecognised enum must reject the SERVICE, not default it — a typo
+    # in `restart` should not silently become RESTART_ALWAYS.
+    var typo = json_v_parse(_doc2(
+        "{\"services\":[{\"name\":\"t\",\"binary\":\"/bin/t\",",
+        "\"restart\":\"on_failure\"}]}"));
+    assert_eq(vec_len(svc_defs_from_json(typo)), 0, "cfg: bad restart rejects service");
+    var typo2 = json_v_parse(_doc2(
+        "{\"services\":[{\"name\":\"t\",\"binary\":\"/bin/t\",",
+        "\"type\":\"Simple\"}]}"));
+    assert_eq(vec_len(svc_defs_from_json(typo2)), 0, "cfg: bad type rejects service");
+
+    # Absent / wrong-typed services key yields an empty vec, never a crash.
+    assert_eq(vec_len(svc_defs_from_json(json_v_parse(str_from("{}")))), 0, "cfg: no services key");
+    assert_eq(vec_len(svc_defs_from_json(json_v_parse(str_from("{\"services\":5}")))), 0, "cfg: services not an array");
+    assert_eq(vec_len(svc_defs_from_json(0)), 0, "cfg: null root safe");
+    return 0;
+}
+
+fn test_svc_config_health_check() {
+    println("--- svc config health check (1.5.0) ---");
+    var doc = json_v_parse(_doc3(
+        "{\"services\":[{\"name\":\"h\",\"binary\":\"/bin/h\",\"health_check\":{",
+        "\"type\":\"tcp\",\"target\":\"127.0.0.1\",\"port\":8090,",
+        "\"interval_ms\":5000,\"timeout_ms\":2000,\"retries\":4}}]}"));
+    var defs = svc_defs_from_json(doc);
+    assert_eq(vec_len(defs), 1, "hc: service parsed");
+    var hc = svc_def_health_check(vec_get(defs, 0));
+    assert(hc != 0, "hc: health check built");
+    assert_eq(svc_hc_type(hc), HC_TCP_CONNECT, "hc: type");
+    assert_eq(svc_hc_port(hc), 8090, "hc: port");
+    assert_eq(svc_hc_retries(hc), 4, "hc: retries");
+
+    # A malformed health_check must reject the service rather than start it
+    # silently unmonitored.
+    var badhc = json_v_parse(_doc2(
+        "{\"services\":[{\"name\":\"h\",\"binary\":\"/bin/h\",",
+        "\"health_check\":{\"type\":\"https\"}}]}"));
+    assert_eq(vec_len(svc_defs_from_json(badhc)), 0, "hc: unknown type rejects service");
+    return 0;
+}
+
+# The end-to-end property v1.5.0 exists to deliver: N services in config
+# become N services argonaut has registered and can start by name.
+fn test_config_services_reach_argonaut() {
+    println("--- config -> argonaut registration (1.5.0) ---");
+    var root = json_v_parse(_doc2(
+        "{\"services\":[{\"name\":\"kyb-t1\",\"binary\":\"/bin/true\"},",
+        "{\"name\":\"kyb-t2\",\"binary\":\"/bin/true\"}]}"));
+    var cfg = argonaut_config_default();
+    var dst = config_services(cfg);
+    var parsed = svc_defs_from_json(root);
+    for (var i = 0; i < vec_len(parsed); i = i + 1) { vec_push(dst, vec_get(parsed, i)); }
+    assert_eq(vec_len(config_services(cfg)), 2, "e2e: config carries 2 services");
+
+    var init = argonaut_init_new(cfg);
+
+    # Registered set must include BOTH our config services and the mode
+    # defaults — start_services resolves waves over this, and walking
+    # config_services alone is what dropped every default before 1.5.0.
+    var all = init_service_defs(init);
+    assert(vec_len(all) >= 2, "e2e: registered set includes config services");
+
+    # Lookup by cstr must resolve — this is the Str/cstr seam that made
+    # every init_start_service return -1.
+    assert(init_get_service(init, "kyb-t1") != 0, "e2e: t1 resolves by cstr");
+    assert(init_get_service(init, "kyb-t2") != 0, "e2e: t2 resolves by cstr");
+
+    # And the waves argonaut hands back must convert cleanly to those keys.
+    var waves = resolve_service_waves(all);
+    assert(waves != 0, "e2e: waves resolve (no dependency cycle)");
+    var found = 0;
+    for (var wi = 0; wi < vec_len(waves); wi = wi + 1) {
+        var wave = vec_get(waves, wi);
+        for (var si = 0; si < vec_len(wave); si = si + 1) {
+            if (init_get_service(init, str_data(vec_get(wave, si))) != 0) { found = found + 1; }
+        }
+    }
+    assert_eq(found, vec_len(all), "e2e: every wave name resolves via str_data");
     return 0;
 }
 
@@ -910,6 +1060,9 @@ fn main() {
     test_timerfd_drain_clears_readiness();
     test_pre_exec_hook();
     test_sandbox_from_config_fail_closed();
+    test_svc_config_parse();
+    test_svc_config_health_check();
+    test_config_services_reach_argonaut();
     test_eventloop_setup_full();
     test_reaper_macros();
     test_signal_buffer();

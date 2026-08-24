@@ -7,6 +7,108 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.5.0] — 2026-08-24
+
+**Services actually come from config.** Requires **argonaut 1.10.0**. Suite
+203 → 235 assertions, 0 failures; both arches clean; the QEMU harness now
+boots with real services and asserts on them.
+
+This is the largest gap the 1.4.2 audit surfaced. `load_config()` parsed four
+scalar fields and never touched the services array — main.cyr said so in a
+comment — so `config_services(cfg)` was always the empty vec argonaut's
+default returns, `resolve_service_waves` short-circuited on it, and
+**`start_services()`'s wave-loop body had never executed in a real boot.**
+Everything downstream of it was untested by construction, and three separate
+defects were hiding there. Running the code for the first time found all
+three.
+
+### Added — JSON service definitions
+
+- **`src/lib/svc_config.cyr`** (new) — `svc_defs_from_json` /
+  `svc_def_from_json`, mapping a config document to argonaut
+  `ServiceDefinition`s: `name`, `description`, `binary`, `args`,
+  `depends_on`, `type`, `restart`, `enabled`, `pid_file`, and a nested
+  `health_check`. In its own module so `test.cyr` can drive it with literal
+  documents instead of needing a file on disk.
+- `load_config` now parses the **value tree** (`json_v_parse_buf`) rather
+  than the flat `json_parse` pair list. The array was structurally out of
+  reach of the old call — bayan has had `json_v_*` the whole time.
+- Enum fields go through argonaut 1.10.0's `*_parse` inverses rather than a
+  hand-rolled mapping, and an unrecognised value **rejects the service**
+  rather than defaulting it. A typo in `restart` should not silently become
+  `RESTART_ALWAYS`.
+- Type-strict accessors: `"enabled": "false"` is a *string*, and treating it
+  as truthy because the key exists would enable a service the operator
+  disabled. Relatedly, `log_to_console` is now read as a real JSON bool —
+  the old code compared it against the **string** `"false"`, so `false`, the
+  spelling any operator would actually write, was ignored.
+- A malformed service entry is skipped with a log line rather than aborting
+  the whole config: losing one misconfigured service is recoverable, losing
+  every service to one typo is a dead boot.
+
+### Fixed — three defects in the never-executed start path
+
+- **Every `init_start_service` call would have returned -1.**
+  `resolve_service_waves` returns waves of boxed `Str`, but argonaut keys its
+  service map by cstr (`str_data(svc_def_name(sd))`), so passing the box made
+  `map_get` miss silently. kybernet already computed `name_cs` one line
+  above and passed `name` anyway. Same fix on the restart path in
+  `handle_sigchld`. Filed in the 1.4.2 audit as reachable-only-in-theory;
+  1.5.0 is when it became reachable.
+- **The boot-mode default services were never started.** `start_services`
+  resolved waves over `config_services(config)` — the config half only —
+  while `argonaut_init_new` registers the defaults *and* the config
+  services. Now resolves over argonaut 1.10.0's `init_service_defs(init)`,
+  which returns the full registered set.
+- **Every successful oneshot was logged as "FAILED to start".**
+  `init_start_service` is tri-state, not a pid: `>0` a live process, `==0` a
+  `SVC_ONESHOT` that ran to completion with exit 0 (there is no surviving
+  process to place in a cgroup), `<0` failure. The `pid > 0` test collapsed
+  the middle case into the failure arm.
+
+### Changed — the QEMU harness starts real services
+
+`build-initramfs.sh` stages an actual `/etc/kybernet/config.json` with two
+oneshots where `kyb-svc` depends on `kyb-dep`, and `boot-test.sh` asserts
+three new markers: `config: services parsed: 2`, and
+`completed (oneshot):` for **both** services. The dependent's marker is the
+load-bearing one — it only appears if wave ordering worked *and* a completed
+oneshot satisfied a dependency.
+
+**Boot budget raised 3000 → 6000 ms, and it is not a regression.** This is
+the first release where the harness forks anything at all. Measured: ~2000 ms
+of the new cost is `daimon`, a `BOOT_MINIMAL` default whose ready check is
+10 retries × 200 ms of TCP connects against port 8090, which nothing listens
+on because its binary is not staged in the initramfs. That is argonaut
+behaving correctly for a service that fails to come up. Typical run is now
+~2700 ms; a spin or hang still blows well past 6000 ms.
+
+### Upstream — argonaut 1.10.0
+
+Driven entirely by this release; see argonaut's changelog. Headline: a
+**completed oneshot could never satisfy a dependency**, because the check
+required `STATE_RUNNING` and a oneshot ends `STATE_STOPPED` — so nothing
+could depend on a oneshot, which is exactly how you express "run this setup
+step before X". Found by this harness on its first boot with a real
+dependency. Plus the enum `*_parse` inverses, `init_service_defs`, the
+`svc_def_set_*` setters, and `svc_hc_*` HealthCheck accessors (prefixed to
+avoid a silent collision with agnostik's same-named `hc_*` for a different
+struct layout).
+
+### Tests
+
+- `test_svc_config_parse` — field mapping, arg/dep arrays, `enabled: false`
+  honoured, defaults for a minimal entry, malformed entries skipped, and an
+  unrecognised enum rejecting the service rather than defaulting it.
+- `test_svc_config_health_check` — nested health-check construction, and a
+  malformed one rejecting the service rather than starting it unmonitored.
+- `test_config_services_reach_argonaut` — the end-to-end property: N services
+  in config become N registered with argonaut, the registered set includes
+  the defaults, names resolve by cstr, and every wave name resolves via
+  `str_data` (the seam that made every start return -1).
+
+---
+
 ## [1.4.3] — 2026-08-24
 
 **Closes the one finding 1.4.2 deferred, and turns the rest of the codebase's
