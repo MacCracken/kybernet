@@ -18,6 +18,7 @@ include "src/lib/notify.cyr"
 include "src/lib/seccomp.cyr"
 include "src/lib/sandbox.cyr"
 include "src/lib/edge_boot.cyr"
+include "src/lib/service_sandbox.cyr"
 
 var g_log_fd = 0;
 

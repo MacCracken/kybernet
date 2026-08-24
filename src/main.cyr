@@ -33,6 +33,7 @@ include "src/lib/notify.cyr"
 include "src/lib/seccomp.cyr"
 include "src/lib/sandbox.cyr"
 include "src/lib/edge_boot.cyr"
+include "src/lib/service_sandbox.cyr"
 
 # ================================================================
 # Globals
@@ -698,6 +699,12 @@ fn kybernet_run() {
     g_config = load_config();
     g_init = argonaut_init_new(g_config);
     g_health_tracker = health_tracker_new();
+
+    # Register the per-service sandbox before ANY service can be spawned.
+    # argonaut invokes this in the child between fork and exec; see
+    # kyb_pre_exec. Must precede run_boot_stages/start_services below —
+    # a hook registered after the first spawn confines nothing.
+    argonaut_set_pre_exec_hook(&kyb_pre_exec);
     klog("argonaut initialized");
     kmsg("phase 6: argonaut ready");
 

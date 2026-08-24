@@ -1,0 +1,65 @@
+# kybernet/service_sandbox.cyr — per-service sandbox applied at pre_exec
+# Requires: privdrop.cyr, sandbox.cyr, seccomp.cyr, argonaut types
+#
+# This is the payload of the 2026-08-24 audit's HIGH-1. seccomp, Landlock
+# and capability drops can only be installed between fork and exec, argonaut
+# owns that window, and until 1.9.0 it exposed no seam — so kybernet's 686
+# lines of security code were reachable from nothing. argonaut 1.9.0 added
+# `argonaut_set_pre_exec_hook`; this is the hook.
+#
+# It runs IN THE CHILD, after fork, after the signal-mask reset, immediately
+# before execve. Returning non-zero aborts the child with exit 126 and the
+# service never runs — the sandbox failing is not a reason to launch the
+# service unconfined.
+#
+# ORDER IS LOAD-BEARING:
+#   1. no_new_privs   — precondition for both Landlock and seccomp, and it
+#                       is what stops a setuid binary handing the privileges
+#                       back on exec.
+#   2. capabilities   — bounding set + the live effective/permitted sets.
+#   3. Landlock       — filesystem confinement.
+#   4. seccomp        — LAST. An installed filter would otherwise kill the
+#                       prctl/capset/landlock calls above unless every one
+#                       of them were allowlisted.
+#
+# POLICY IS OPT-IN PER SERVICE. argonaut's ServiceDefinition carries
+# `seccomp` / `landlock` / `capabilities`, all 0 by default, and argonaut
+# treats them as opaque — kybernet defines them as agnostik
+# seccomp_profile / sandbox_config / capability_set pointers. A service
+# with no policy gets a no-op hook and behaves exactly as before 1.4.3.
+# That is deliberate: a uniform allowlist applied to every service is an
+# excellent way to make a system unbootable, and PID 1 is the wrong place
+# to discover that. Wiring the default AGNOS services to real profiles is
+# the 1.5.x arc.
+fn kyb_pre_exec(svc_def) {
+    if (svc_def == 0) { return 0; }
+
+    var caps = svc_def_capabilities(svc_def);
+    var ll   = svc_def_landlock(svc_def);
+    var sc   = svc_def_seccomp(svc_def);
+
+    # No policy at all — nothing to enforce, and no_new_privs is not
+    # imposed on services that never asked to be confined.
+    if (caps == 0 && ll == 0 && sc == 0) { return 0; }
+
+    # 1. no_new_privs
+    if (is_err_result(set_no_new_privs()) == 1) { return 1; }
+
+    # 2. capabilities
+    if (caps != 0) {
+        if (is_err_result(drop_caps_from_set(caps)) == 1) { return 1; }
+    }
+
+    # 3. Landlock
+    if (ll != 0) {
+        if (is_err_result(sandbox_from_config(ll)) == 1) { return 1; }
+    }
+
+    # 4. seccomp — last
+    if (sc != 0) {
+        if (is_err_result(seccomp_apply_profile(sc)) == 1) { return 1; }
+    }
+
+    return 0;
+}
+

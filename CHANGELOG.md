@@ -7,6 +7,117 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.4.3] — 2026-08-24
+
+**Closes the one finding 1.4.2 deferred, and turns the rest of the codebase's
+deferrals into a roadmap.** Requires **argonaut 1.9.0**. Suite 194 → 203
+assertions, 0 failures; both arches clean; harness green including the reactor
+gate (21 wakeups of a 500 ceiling).
+
+1.4.2 filed audit **HIGH-1** — 686 lines of seccomp / Landlock / privilege-drop
+code, ~26 % of kybernet's source, reachable from no production path — and
+deferred it as *"not source-fixable in this repo"*. That was wrong. argonaut is
+first-party; the correct fix was to add the missing seam rather than wait for
+one. **All 20 findings from the 2026-08-24 audit are now closed.**
+
+### Added — per-service sandbox at pre_exec (audit HIGH-1, closed)
+
+- **argonaut 1.9.0** contributes the seam: `argonaut_set_pre_exec_hook(fp)`,
+  invoked in the **child** after the signal-mask reset and immediately before
+  `execve`, receiving the `ServiceDefinition`. It **fails closed** — a non-zero
+  return aborts the child with **exit 126** (distinct from 127, "exec failed")
+  instead of exec'ing the service unconfined. argonaut does not interpret the
+  policy; it supplies the window and the definition.
+- argonaut also exposes `svc_def_seccomp` / `svc_def_landlock` /
+  `svc_def_capabilities` (+ setters). These three fields had been sitting in
+  `ServiceDefinition` at offsets 144/152/160, zero-initialised, since the struct
+  was written — with no accessors, so no consumer could reach them. Adding them
+  is **layout-neutral and additive**.
+- **`src/lib/service_sandbox.cyr`** (new) — `kyb_pre_exec`, registered in phase 6
+  before any service can spawn. Applies, in this order:
+  **no_new_privs → capabilities → Landlock → seccomp.** The order is
+  load-bearing: seccomp goes last because an installed filter would otherwise
+  kill the prctl/capset/landlock calls above it unless every one were
+  allowlisted.
+
+  **Policy is opt-in per service.** All three fields default to 0; a service with
+  no policy gets a strict no-op and behaves exactly as it did in 1.4.2. This is
+  deliberate — a uniform allowlist applied to every service is an efficient way
+  to make a system unbootable, and PID 1 is the wrong place to discover that.
+  Authoring profiles for the default AGNOS services is the **v1.5.2** roadmap
+  item.
+
+  The hook was factored into its own module rather than left in `main.cyr` so
+  `test.cyr` can exercise it directly.
+
+### Fixed — `sandbox_from_config` was fail-open (MEDIUM-1)
+
+Found while making this function load-bearing. It returned a **bare `0`** — not
+a `Result` — for `case 0` and `default`, and `return` exits the whole function
+rather than the iteration. So a single `FS_NO_ACCESS` rule (0 is a legitimate
+agnostik `FsAccess` value) **silently discarded the entire sandbox**: every other
+rule in the config went unapplied, `sandbox_apply` was never reached, and the
+caller got `0`, which `is_err_result` reports as success.
+
+Now: access 0 skips only its own rule (fail-closed — a path absent from a
+Landlock ruleset is denied), 1/2 map as before, 3 (read+exec) is wired to the
+handler `_access_to_flags` already supported, and anything unrecognised returns
+`Err(EINVAL)`.
+
+### Tests
+
+- `test_pre_exec_hook` — no-policy service is a strict no-op; null `svc_def` is
+  safe (this runs in a forked child of PID 1, where a fault is a dead service);
+  and a capability policy while unprivileged **fails closed**, so argonaut aborts
+  the child rather than exec'ing unconfined.
+- `test_sandbox_from_config_fail_closed` — empty config is `Ok`, an
+  `FS_NO_ACCESS` rule returns a real `Result`, and an unrecognised access fails
+  closed.
+- argonaut side: `tests/tcyr/pre_exec_hook.tcyr` (18 assertions) covers field
+  defaults, setter round-trips, neighbour fields provably undisturbed, hook
+  registration returning the prior value, the hook running with exec still
+  happening (child exits 0), the fail-closed path (child exits 126, binary never
+  runs), and clearing the hook.
+
+### Added — v1.5.x roadmap arc
+
+A sweep of the source and of the 1.4.2 audit's survived-but-unfixed findings,
+organised into an arc. The through-line: kybernet's *mechanisms* are now correct
+and gated, but several are wired to nothing.
+
+- **v1.5.0 — services actually come from config.** `load_config()` never
+  populates the services array, so `config_services()` is always empty,
+  `resolve_service_waves` short-circuits, and **`start_services()` is a no-op on
+  every real boot**. Everything downstream is untested-by-construction —
+  including a latent `Str`/cstr mismatch where `init_start_service` receives a
+  boxed `Str` and treats it as a cstr.
+- **v1.5.1 — boot stages that do something.** `execute_boot_stage` is
+  `return 1` for all 11 arms plus `default`, so `init_mark_step_failed` is
+  unreachable and the emergency path can never fire.
+- **v1.5.2 — per-service security profiles.** Completes HIGH-1 by authoring real
+  profiles; also the two validations 1.4.2 flagged (`capset` on privileged
+  hardware, the eight asm-generic aarch64 seccomp numbers on real hardware).
+- **v1.5.3 — lifecycle cleanup and observability.** Service cgroups never
+  removed; `reload_config` leaving argonaut half-updated on SIGHUP; edge-boot
+  refusal reasons never reaching `/dev/kmsg`; the edge-boot time budget measured
+  after the work it is meant to bound; the cgroup path cache having no production
+  hits.
+- **v1.5.4 — close the remaining edge-boot deferrals.** Folds in the stalled
+  v1.2.1 scope — `edge_boot.cyr` still detects TPM and dm-verity but verifies
+  neither. Unblocked now that argonaut is in scope for edits.
+
+### Changed
+
+- `[deps.argonaut]` `1.8.6` → **`1.9.0`**.
+- README.md and CLAUDE.md no longer describe the security stack as unwired;
+  they now state that the mechanism is delivered and the profiles are v1.5.2.
+- CLAUDE.md's "do not modify dep repos" rule is corrected: every AGNOS dep is
+  first-party and editable — **only the cyrius language repo is off-limits**.
+  Deferring a fix as "blocked upstream" when the upstream is first-party is the
+  mistake this release exists to correct.
+
+---
+
 ## [1.4.2] — 2026-08-24
 
 **P(-1) security / correctness / hardening pass — the fifth, and the first

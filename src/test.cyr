@@ -17,6 +17,7 @@ include "src/lib/notify.cyr"
 include "src/lib/seccomp.cyr"
 include "src/lib/sandbox.cyr"
 include "src/lib/edge_boot.cyr"
+include "src/lib/service_sandbox.cyr"
 
 # log.cyr's slog() short-circuits on g_log_fd <= 0; we never call
 # slog_init() in tests so the default 0 is the right starting state.
@@ -132,6 +133,62 @@ fn test_timerfd_drain_clears_readiness() {
 
     sys_close(tfd);
     owned_fd_close(epfd);
+    return 0;
+}
+
+# ---------------------------------------------------------------------
+# 1.4.3 — per-service sandbox hook (audit HIGH-1) + the sandbox_from_config
+# fail-open it depends on (audit MEDIUM-1).
+fn test_pre_exec_hook() {
+    println("--- pre_exec hook (HIGH-1) ---");
+
+    # A service with NO policy must be a strict no-op: return 0 (proceed to
+    # exec) without imposing no_new_privs on something that never asked to
+    # be confined. This is what keeps 1.4.3 behaviour-identical for every
+    # service that has not opted in.
+    var plain = svc_def_new(str_from("plain"), str_from("t"), str_from("/bin/true"));
+    assert_eq(svc_def_seccomp(plain), 0, "hook: no seccomp by default");
+    assert_eq(svc_def_landlock(plain), 0, "hook: no landlock by default");
+    assert_eq(svc_def_capabilities(plain), 0, "hook: no caps by default");
+    assert_eq(kyb_pre_exec(plain), 0, "hook: no policy is a no-op");
+
+    # A null definition must not fault — the hook runs in a forked child of
+    # PID 1, where a fault is a dead service, not an exception.
+    assert_eq(kyb_pre_exec(0), 0, "hook: null svc_def safe");
+
+    # Capability policy while unprivileged must FAIL CLOSED. drop_caps_from_set
+    # returns Err(PRIV_NOT_ROOT) off-root, and the hook must turn that into a
+    # non-zero return so argonaut aborts the child (exit 126) rather than
+    # exec'ing the service unconfined.
+    if (is_root() == 0) {
+        var confined = svc_def_new(str_from("confined"), str_from("t"), str_from("/bin/true"));
+        svc_def_set_capabilities(confined, capability_set_new());
+        assert_eq(kyb_pre_exec(confined), 1, "hook: cap drop failure fails closed");
+    }
+    return 0;
+}
+
+fn test_sandbox_from_config_fail_closed() {
+    println("--- sandbox_from_config (MEDIUM-1) ---");
+
+    # Empty config: nothing to confine, Ok.
+    var empty = sandbox_config_new();
+    assert(is_ok(sandbox_from_config(empty)) == 1, "sbx: empty is Ok");
+
+    # An FS_NO_ACCESS rule used to `return 0` — a bare non-Result that
+    # aborted the whole loop, so every LATER rule went unapplied and the
+    # caller read 0 as success. Assert it is a Result now.
+    var withnone = sandbox_config_new();
+    vec_push(sandbox_fs_rules(withnone), filesystem_rule_new("/etc", FS_NO_ACCESS));
+    var r_none = sandbox_from_config(withnone);
+    assert(is_ok(r_none) == 1 || is_err_result(r_none) == 1, "sbx: NO_ACCESS returns a Result");
+
+    # An unrecognised access must fail CLOSED with a real Err, never a bare 0
+    # that reads as success.
+    var bogus = sandbox_config_new();
+    var br = filesystem_rule_new("/etc", 99);
+    vec_push(sandbox_fs_rules(bogus), br);
+    assert(is_err_result(sandbox_from_config(bogus)) == 1, "sbx: unknown access fails closed");
     return 0;
 }
 
@@ -851,6 +908,8 @@ fn main() {
     test_owned_fd();
     test_eventloop_lifecycle();
     test_timerfd_drain_clears_readiness();
+    test_pre_exec_hook();
+    test_sandbox_from_config_fail_closed();
     test_eventloop_setup_full();
     test_reaper_macros();
     test_signal_buffer();

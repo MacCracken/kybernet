@@ -281,11 +281,31 @@ fn sandbox_from_config(config) {
         var rule = vec_get(fs_rules, ri);
         var path = fsrule_path(rule);
         var access = fsrule_access(rule);
-        switch (access) {
-            case 0: return 0;
-            case 1: sandbox_allow_read(b, path);
-            case 2: sandbox_allow_read_write(b, path);
-            default: return 0;
+        # Pre-1.4.3 this switch returned a BARE 0 — not a Result — for
+        # `case 0` and for `default`, and `return` exits the whole function,
+        # not the iteration. So a single FS_NO_ACCESS rule (0 is a legitimate
+        # agnostik FsAccess value) silently discarded the ENTIRE sandbox:
+        # every other rule in the config went unapplied, sandbox_apply was
+        # never reached, and the caller got 0 — which `is_err_result` reports
+        # as success. Fail-open, and it became load-bearing at 1.4.3 when the
+        # pre-exec hook started applying these per service.
+        #
+        # Now: 0 skips just its own rule, 1/2 map as before, 3 (read+exec) is
+        # wired to the handler `_access_to_flags` already supported, and
+        # anything unrecognised fails CLOSED with a real Err.
+        # agnostik's FsAccess is currently {0,1,2}; 3 is forward-compat for
+        # kybernet's own read-exec mapping. 1.4.3 audit MEDIUM-1.
+        if (access == 0) {
+            # Grants nothing. Skipping is fail-closed: a path absent from the
+            # ruleset is denied for every handled access.
+        } elif (access == 1) {
+            sandbox_allow_read(b, path);
+        } elif (access == 2) {
+            sandbox_allow_read_write(b, path);
+        } elif (access == 3) {
+            sandbox_allow_read_exec(b, path);
+        } else {
+            return Err(EINVAL);
         }
     }
     return sandbox_apply(b);
