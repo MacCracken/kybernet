@@ -6,24 +6,26 @@
 
 - **Type**: Cyrius binary (PID 1 init)
 - **License**: GPL-3.0-only
-- **Version**: 1.4.1
+- **Version**: 1.4.2
 - **Language**: Cyrius 6.5.35 (the whole AGNOS pack front — kybernet/argonaut/libro/agnostik — pins 6.5.35; via `~/.cyrius/bin/cyrius`, `cyriusly use 6.5.35`)
 - **Tools**: `owl` to read .cyr files, `cyim` to write/edit .cyr files
 
 ## Goal
 
-The helmsman that steers the Argo. Manages system boot, essential mounts, signal handling, zombie reaping, cgroup isolation, security enforcement, orderly shutdown, and (1.2.0+) edge-boot pre-flight verification. Delegates service lifecycle to argonaut. All in Cyrius — no Rust, no C, no libc.
+The helmsman that steers the Argo. Manages system boot, essential mounts, signal handling, zombie reaping, cgroup isolation, orderly shutdown, and (1.2.0+) edge-boot pre-flight verification. Delegates service lifecycle to argonaut. All in Cyrius — no Rust, no C, no libc.
+
+**Security enforcement is a stated goal, not yet a delivered one.** `seccomp.cyr`, `sandbox.cyr` and `privdrop.cyr` are implemented and unit-tested but are called from **no production path** — seccomp/Landlock have to be installed in the child between fork and exec, and argonaut (which owns spawning) exposes no pre_exec hook. Do not describe kybernet as sandboxing services until that hook exists. See `docs/audit/2026-08-24-audit.md` HIGH-1.
 
 ## Build
 
 ```sh
 cyrius deps                                  # Resolve deps from cyrius.cyml into lib/
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet   # Build (DCE recommended)
-cyrius test src/test.cyr                     # Run 177 tests
+cyrius test src/test.cyr                     # Run 194 tests
 cyrius bench src/bench.cyr                   # Run benchmarks
 bash scripts/bench-history.sh                # Record bench history + ≥15% regression gate (MANDATORY on every release)
 cyrius build --aarch64 src/main.cyr build/kybernet-aarch64   # Cross-build aarch64
-bash qemu/boot-test.sh                       # QEMU PID-1 harness (1.1.4+; needs KVM)
+bash qemu/boot-test.sh                       # QEMU PID-1 harness + reactor gate (needs KVM)
 ```
 
 ## Project Structure
@@ -35,7 +37,7 @@ kybernet/
 ├── VERSION, CLAUDE.md, README.md, CHANGELOG.md, LICENSE
 ├── src/
 │   ├── main.cyr           # Globals + boot sequence + event loop + harness gate
-│   ├── test.cyr           # Integration tests (177 assertions)
+│   ├── test.cyr           # Integration tests (194 assertions)
 │   ├── bench.cyr          # Microbenchmarks
 │   └── lib/
 │       ├── log.cyr        # klog / klog2 / kmsg / slog (factored out at 1.2.0)
@@ -92,7 +94,7 @@ Do **not** add a `path = "../<dep>"` alongside `git`/`tag`. When `path` resolves
 
 1. Make changes to `src/main.cyr` or `src/lib/*.cyr`
 2. Build: `CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet`
-3. Test: `cyrius test src/test.cyr` (177 tests must pass)
+3. Test: `cyrius test src/test.cyr` (194 tests must pass)
 4. Cross-build: `cyrius build --aarch64 src/main.cyr build/kybernet-aarch64` (verify both arches)
 5. Harness (when KVM available): `bash qemu/boot-test.sh` (asserts marker set + budget)
 5b. **On a version bump: `bash scripts/bench-history.sh`** — records per-benchmark ns/op to `benches/history.csv` and exits non-zero on a ≥15% regression vs the previous run. Review and explain (or fix) any flagged delta before cutting.
@@ -117,6 +119,10 @@ Apply on every change touching src/:
 9. **The accumulate-in-loop `switch` miscompile is FIXED (cyrius 6.5.20) — but keep the if-ladders.** cyrius 6.4.62 miscompiled a `switch` whose cases accumulate (`x = x | CONST`) inside a loop closed by a `default: return`, SIGSEGVing at the call site; a `switch` of `case N: return K` bodies was unaffected. Root cause: the regalloc NOP-harvest compactor did not know the switch jump table existed and shifted each entry +4 per preceding case body, so only bodies containing a local store were hit. `_ll_access_to_kernel` (`src/lib/sandbox.cyr`) keeps its explicit `if`-ladder — correct on every toolchain, and it is the per-service Landlock path where a miscompile is a PID-1 crash. Do not convert it back.
 10. **`cyrius.cyml` is a manifest, not a changelog.** Short statements of fact plus pointers; rationale and archaeology go in `CHANGELOG.md`. Three parser hazards make this load-bearing, not stylistic: (a) a `#` comment **inside** an array literal makes the parser stop collecting and silently truncate the list — no error; (b) never write a bracketed `deps.NAME` section header inside comment prose (backtick it) — `cyrius distlib` scans for that bracket sequence unanchored and drops NAME from the sidecar; (c) keep the file small — cyrius ≤ 6.5.27 read only the first 4,095 bytes of a manifest and resolved a `[deps]` section past that window to *zero* deps, silently (raised to 65,535 and fail-closed at 6.5.28). The 1.4.0 manifest tripped (a) and had every `[deps.*]` block past byte 5,400.
 11. **`cyrius fmt` REWRITES IN PLACE as of 6.5.28** and prints nothing (`--dry` is the old stdout behaviour). Any CI gate of the form `diff -q <(cyrius fmt "$f") "$f"` now diffs an empty stream — it reports drift unconditionally *and* silently reformats the checkout underneath later steps. Use `cyrius fmt "$f" --check`, which sets the exit code and does not mutate.
+12. **Kernel struct LAYOUT is as arch-specific as the syscall number.** `struct epoll_event` is packed on x86_64 (stride 12, `data` at +4) and natural everywhere else including aarch64 (stride 16, `data` at +8). Any hand-parsed kernel struct needs the same `#ifdef CYRIUS_ARCH_*` treatment rule 1 demands for syscall numbers, and must agree with whatever the stdlib does on the *write* side — `epoll_event_new` already dispatches per-arch. Cost of getting it wrong (1.4.2 CRITICAL-2): a kernel-written buffer overflow plus every epoll token decoded from the wrong offset, so SIGCHLD/SIGTERM are never handled on aarch64.
+13. **Every level-triggered epoll registration needs a drain.** A timerfd / signalfd / eventfd stays readable until its counter is `read()`. Register the fd, *retain* the fd, and drain it in the handler **before any early return**. 1.4.2 CRITICAL-1 was two timer fds consumed inline as call arguments — nothing could drain them, so PID 1 span at 100 % CPU ~10 s after every boot and eventually panicked the kernel.
+14. **A release gate that stops before the event loop does not test the event loop.** `kybernet.harness=1` shuts down at phase 9; `kybernet.harness=loop` runs the real reactor for 5 s and asserts a bounded wakeup count (ceiling 500, observed 21). Keep it green and keep it in CI — it is the only gate that executes a reactor iteration, and it is verified to FAIL on the unfixed 1.4.1 shape.
+
 
 ## Release gates
 
@@ -126,7 +132,7 @@ Every version bump runs all of these, in this order, and they must all be green 
 rm -rf lib && cyrius deps && cyrius deps --verify   # expect: N verified, 0 failed
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet
 cyrius build --aarch64 src/main.cyr build/kybernet-aarch64
-cyrius test src/test.cyr                            # 177 tests, 0 failed
+cyrius test src/test.cyr                            # 194 tests, 0 failed
 bash scripts/bench-history.sh                       # ≥15% regression gate
 bash qemu/boot-test.sh                              # needs KVM
 ```
@@ -142,4 +148,4 @@ Plus a **sibling-free reproduction** — the only gate that catches a tag which 
 - Do not add C, Rust, or assembly files — everything is Cyrius
 - Do not reference `../cyrius/` repo — use installed toolchain at `~/.cyrius/`
 - Do not bump a dep tag to a value > the highest existing git tag (CI clones from `git + tag`; an unreleased VERSION-file value fails resolution — see 1.1.0 CHANGELOG note)
-- Test after every change (177 tests + harness when KVM available)
+- Test after every change (194 tests + harness when KVM available)

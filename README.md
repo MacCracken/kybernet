@@ -36,7 +36,7 @@ Requires Cyrius 6.5.35 (`cyriusly install 6.5.35 && cyriusly use 6.5.35`).
 ```sh
 cyrius deps                                # Resolve deps from cyrius.cyml into lib/
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet   # Build (DCE recommended)
-cyrius test src/test.cyr                   # Run 177 tests
+cyrius test src/test.cyr                   # Run 194 tests
 cyrius bench src/bench.cyr                 # Run benchmarks
 ```
 
@@ -63,13 +63,20 @@ cyrius bench src/bench.cyr                 # Run benchmarks
 ## Features
 
 - **Full argonaut integration** — boot stages, wave-based service startup, health checks, watchdog, crash recovery, coordinated shutdown
-- **Security stack** — seccomp BPF filters, Landlock filesystem sandbox, capability dropping, no_new_privs
+- **cgroup v2 isolation** — per-service slice, PID move, limits, kill
+- **Security stack (built, not yet applied)** — seccomp BPF filters, Landlock
+  filesystem sandbox, capability dropping, no_new_privs. These modules are
+  implemented and unit-tested, but they are **not currently applied to spawned
+  services**: seccomp and Landlock must be installed in the child between fork
+  and exec, and service spawning is delegated to argonaut, which exposes no
+  pre_exec hook. Tracked in the roadmap; see `docs/audit/2026-08-24-audit.md`
+  (HIGH-1).
 - **Audit logging** — cryptographic audit chain via libro (SHA-256 hash-linked)
 - **Result/Option everywhere** — proper error handling via tagged unions
 - **Data-driven mount table** — not hardcoded per-mount calls
 - **sd_notify compatible** — READY, STOPPING, WATCHDOG, STATUS messages via epoll
 - **String builder** for path construction and logging
-- **177 tests**, 51 benchmarks
+- **194 tests**, 51 benchmarks
 
 ## Dependencies
 

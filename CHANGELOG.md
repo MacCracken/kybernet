@@ -7,6 +7,183 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.4.2] — 2026-08-24
+
+**P(-1) security / correctness / hardening pass — the fifth, and the first
+since 1.1.5.** Full report in
+[`docs/audit/2026-08-24-audit.md`](docs/audit/2026-08-24-audit.md).
+
+**2 CRITICAL / 5 HIGH / 7 MEDIUM / 6 LOW — 19 of 20 closed**, one deferred on an
+upstream blocker. Eight independent audit lenses swept the full source; every
+finding was then handed to a separate pass instructed to **refute** it, and 13 of
+39 candidates did not survive (listed in the report so they are not re-filed).
+Suite **177 → 194 assertions**, 0 failures, both arches clean, QEMU harness green.
+
+Both CRITICALs were invisible to every existing gate, and that — not the code —
+is the real finding. Fixed structurally, not just patched.
+
+### Security / correctness — CRITICAL
+
+- **CRITICAL-1 — the health and watchdog timerfds were never drained, so PID 1
+  span at 100 % CPU ~10 seconds after every boot and eventually panicked the
+  kernel.** `epoll_add_read` registers with plain `EPOLLIN` (level-triggered) and
+  a timerfd stays readable until its 8-byte expiration counter is `read()` — but
+  both fds were consumed inline as call arguments (`epoll_add_read(epfd,
+  result_unwrap(hfd_r), TOKEN_HEALTH)`) and bound to nothing, so nothing in the
+  tree *could* drain them. **Measured** against the real reactor: 1,019,588
+  iterations with `epoll_wait` never blocking once, and 269,171,480 bytes of heap
+  consumed, in 3 seconds (~90 MB/s of unreclaimable bump-arena growth). PID 1 is
+  exempt from the OOM killer, so the kernel kills every other process first; when
+  mmap finally fails `alloc()` returns 0 and the next `store64` writes to address
+  0 → SIGSEGV in PID 1 → *"Attempted to kill init!"*. Fixed by retaining both fds
+  and draining via the stdlib's `timerfd_drain()` as the **first** statement of
+  each handler, ahead of the `g_init == 0` early return.
+- **CRITICAL-2 — `struct epoll_event` layout was hardcoded to x86_64.** x86_64 is
+  the only arch that packs it (stride 12, `data` at +4); aarch64 uses the natural
+  layout (stride 16, `data` at +8). The cyrius stdlib already dispatches on this
+  when *building* an event, so the read side was provably inconsistent with the
+  write side. On aarch64 the kernel filled 128 bytes into a 96-byte buffer — a
+  kernel-written heap overflow — and every token decoded from the wrong offset,
+  so all events fell through to "unknown epoll token": **SIGCHLD and SIGTERM were
+  never processed**, meaning no reaping and no shutdown. Now `#ifdef
+  CYRIUS_ARCH_*`-gated, matching the notify.cyr precedent.
+
+### Security — HIGH
+
+- **HIGH-2 — the edge-boot trust gate fell through to a full boot.**
+  `edge_boot_run()` is fail-closed internally, but `drop_to_emergency()` *returns*
+  when the shell exits, and the caller then continued into phases 7 and 8. On a
+  device demanding `tpm_attestation`, removing the TPM produced a FATAL log, a
+  root recovery shell, and then a completely normal boot of every service. Now
+  powers off after the recovery shell rather than continuing.
+- **HIGH-3 — the seccomp filter had no architecture check.** It loaded
+  `seccomp_data.nr` as instruction 0 and never examined `seccomp_data.arch`.
+  Syscall numbers are per-ABI (x86_64 nr 11 is `munmap`; i386 nr 11 is `execve`),
+  so a process switching ABI via `int 0x80` or x32 was matched against an
+  allowlist built for different numbering — the textbook seccomp bypass. The
+  filter now emits `LD arch` / `JEQ AUDIT_ARCH → else KILL` / `LD nr` ahead of the
+  allowlist, and `test_seccomp_builder` asserts each of those three instructions.
+- **HIGH-4 — seccomp jump offsets truncated past 254 syscalls.** BPF `jt`/`jf` are
+  u8; the only guard was against `BPF_MAXINSNS` (4096), so larger filters had
+  offsets silently truncated by `store8` and jumped to arbitrary instructions.
+  Capped at `SECCOMP_MAX_ALLOW = 254` with boundary tests both ways.
+- **HIGH-5 — `seccomp_basic_service()` hardcoded x86_64 syscall numbers.** On
+  aarch64 those numbers name unrelated calls, so the filter denied `read`/`write`/
+  `exit` (killing every sandboxed service on its first `read()`) while allowing
+  calls nobody intended. Now a per-arch table that also handles the real ABI
+  differences — no `dup2`, no `arch_prctl`, `epoll_pwait` not `epoll_wait`.
+
+### Deferred — HIGH-1: the advertised security stack is applied to nothing
+
+`seccomp.cyr` + `sandbox.cyr` + `privdrop.cyr` — **686 lines, ~26 % of kybernet's
+source** — are referenced from `test.cyr` and `bench.cyr` only. seccomp and
+Landlock must be installed in the child between `fork` and `exec`, and argonaut
+(which owns spawning) exposes **no pre_exec hook**, so there is no seam for
+kybernet to run code in the child. Not fixable in this repo.
+
+README.md and CLAUDE.md previously advertised this as delivered; both now state
+plainly that the modules are built and tested but **not applied**. The defects
+found *inside* that code (HIGH-3/4/5, MEDIUM-1) are fixed now so it is correct
+whenever the hook lands.
+
+### Security / correctness — MEDIUM
+
+- **MEDIUM-1 — `drop_capabilities()` dropped only the bounding set.**
+  `PR_CAPBSET_DROP` bounds what can be *regained* on exec; it takes away nothing
+  the process holds. `secure_pre_exec(0, 0, 0)` therefore returned `Ok` while
+  leaving the caller fully privileged. Now also issues `capset(2)` to clear
+  effective/permitted/inheritable, and stops swallowing drop failures.
+- **MEDIUM-2 — TPM PCR read failed open.** sigil's `exec_capture` returns the
+  captured byte count and discards the child's wait status, so a missing
+  `/usr/bin/tpm2_pcrread` surfaces as `Ok(0)` and PCRs come back zero-filled — an
+  attestation "pass" from a tool that never ran. Checked consumer-side.
+- **MEDIUM-3 — service names were interpolated raw into the cgroup path**, so
+  `/` or `..` walked out of the slice into an arbitrary cgroup directory that
+  kybernet then created and wrote `cgroup.procs` into. Same defect argonaut closed
+  at 1.8.6; `cgroup_name_is_safe()` now gates both entry points.
+- **MEDIUM-4 — the emergency shell inherited PID 1's blocked signal mask**
+  (inherited across fork, preserved across execve), so Ctrl-C was inert in the one
+  shell where an operator most needs it.
+- **MEDIUM-5 — crash-restarted services escaped their cgroup.**
+  `init_restart_service()` returns a live PID and it was discarded, so the first
+  restart left the service outside its cgroup for the rest of uptime — no limits,
+  and `cgroup.kill` misses it at shutdown.
+- **MEDIUM-6 — `slog()` did no JSON escaping**, so a service name containing a
+  quote or newline produced malformed JSON and could forge log fields.
+- **MEDIUM-7 — unbounded arena growth in the reactor and logging hot paths.** The
+  allocator is a bump arena with no free; `epoll_wait_events` allocated on every
+  wakeup and `klog2` built two `str_builder`s per call *even with slog disabled*.
+  Reactor scratch moved to BSS with a `vec_truncate`-reused result vec; the
+  structured-log line is now built in a static buffer with zero allocation.
+
+### Fixed — LOW
+
+- `_log_write`'s `copylen = 254 - plen` went **negative** for a prefix longer than
+  254 (a negative memcpy length from PID 1). Latent; now clamped. The 1.1.5 audit
+  bounded `msg` but not `plen`.
+- The literal `syscall(26, 0x30)` boot checkpoint documented only its x86_64
+  fallback; on aarch64 it lands on `inotify_init1(0x30)`. Equally inert, now
+  equally documented.
+- `timer_new` ignored `timerfd_settime`'s result (an armed-looking fd that never
+  fires — health/watchdog silently dead), and `eventloop_setup` discarded
+  `epoll_add_read`'s Result, leaking the fd. Both checked, closed and logged.
+- `do_shutdown` closed `g_log_fd` without zeroing it; since that global doubles as
+  slog's open-flag, the following `klog` wrote to a closed, eventually recycled
+  descriptor.
+- `_mount_table[288]` sat at **exact** capacity — the 1.1.5 audit's deferred LOW-2.
+  Grown to `[480]`; the next entry added would have overflowed BSS silently.
+- **The benchmark regression gate had a blind spot**: it split CSV rows on comma,
+  so the two benchmark labels containing a comma never matched their history row
+  and were silently exempt — 2 of 51.
+
+### Added — the reactor gate (`kybernet.harness=loop`)
+
+The root cause behind CRITICAL-1 surviving four audits: **no release gate had ever
+executed a single event-loop iteration.** `kybernet.harness=1` shuts down at
+phase 9, before the reactor starts, so the entire defect lived past the gate's
+last instruction.
+
+`qemu/boot-test.sh` now runs a second QEMU pass with `kybernet.harness=loop`,
+which runs the real loop for 5 s with shortened timer intervals and prints its
+wakeup count. A reactor that sleeps between ticks wakes ~21 times; the ceiling is
+500. **Verified to fail on the unfixed shape** — with the drains commented out the
+gate reports `FAIL: reactor gate produced no wakeup count` followed by `FAIL:
+kernel panicked in reactor mode`, reproducing the full predicted chain in a real
+PID-1 environment.
+
+Also added: `test_timerfd_drain_clears_readiness`, which asserts an undrained
+timerfd *stays* ready (proving the test exercises the real condition) and that a
+drain clears it.
+
+### Verification
+
+- **194/194 tests pass** (was 177; +17 assertions, all regression coverage for
+  findings above).
+- x86_64 and aarch64 both build clean under `CYRIUS_DCE=1`.
+- `cyrius deps --verify`: 68 verified, 0 failed.
+- **QEMU harness OK** — all markers, 682 ms of a 3000 ms budget, **reactor
+  wakeups 21** of a 500 ceiling.
+- **Benchmarks: 25 improved, 0 real regressions.** `epoll_wait(timeout=0)`
+  **365 → 302 ns/op (−17 %)** from removing the per-wakeup allocations;
+  `event_token+flags` −20 %; `klog2_sim` −8 %. The gate flagged two items which
+  were confirmed as **noise, not regressions**: `cgroup_file (best case, same
+  pair)` measured 3/3/4 ns across three re-runs against a flagged 5 (at 3–5 ns/op
+  a single nanosecond exceeds the 15 % threshold, and its code path is untouched
+  — this was also the first run it was ever compared, the comma bug having
+  exempted it), and `is_mounted(/proc)` measured 55/57/56 against a flagged 60,
+  dominated by `/proc/self/mounts` read variance.
+
+### Standing rules added to the audit checklist
+
+1. **Kernel struct *layout* is as arch-specific as the syscall number** — rule 1's
+   sibling, and the class behind CRITICAL-2.
+2. **Every level-triggered epoll registration needs a drain** — register the fd,
+   *retain* the fd, drain it before any early return.
+3. **A release gate that stops before the event loop does not test the event
+   loop** — keep `kybernet.harness=loop` green and in CI.
+
+---
+
 ## [1.4.1] — 2026-08-24
 
 **Toolchain bump to cyrius 6.5.35, every dep to its latest tag, and a

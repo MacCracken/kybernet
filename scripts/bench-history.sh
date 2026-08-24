@@ -56,7 +56,14 @@ while IFS= read -r line; do
             # Previous value for this benchmark = last matching row already
             # in the file (rows from this run are appended below, after the
             # lookup, so we always compare against the prior run).
-            PREV=$(awk -F, -v n="$NAME" '$4==n {v=$5} END {print v}' "$HISTORY_FILE")
+            # Reconstruct the label across commas: two benchmark names
+            # contain one ("cgroup_file (best case, same pair)"), which
+            # split into $4/$5 and made `$4==n` never match — so those two
+            # were silently exempt from the regression gate. Rejoin fields
+            # 4..NF-1 and read ns/op from $NF. Comma-free rows (NF=5) hit
+            # the loop zero times and behave exactly as before.
+            # 1.4.2 audit LOW-6.
+            PREV=$(awk -F, -v n="$NAME" '{ nm=$4; for (i=5; i<NF; i++) nm=nm "," $i; if (nm==n) v=$NF } END {print v}' "$HISTORY_FILE")
             echo "${TIMESTAMP},${COMMIT},${BRANCH},${NAME},${NS}" >> "$HISTORY_FILE"
             RECORDED=$((RECORDED + 1))
             if [ -n "$PREV" ] && [ "$PREV" -gt 0 ] 2>/dev/null; then

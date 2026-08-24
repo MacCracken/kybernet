@@ -135,6 +135,18 @@ fn edge_boot_run(config) {
         _eb_pcr_count = vec_len(indices);
         if (_eb_pcr_count > 0) {
             klog2("edge boot: reading PCRs ", "(measurement only — baseline compare lands in 1.2.1)");
+            # sigil cannot report tool failure here, so check consumer-side.
+            # tpm_read_pcr shells out to /usr/bin/tpm2_pcrread via
+            # exec_capture, which returns the captured BYTE COUNT and
+            # discards the child's wait status — so a missing or failing
+            # tpm2_pcrread comes back as Ok(0) and sigil zero-fills every
+            # unparsed PCR. On a box that asked for tpm_attestation, that
+            # is an attestation "pass" derived from a tool that never ran.
+            # Fail closed on a missing binary. 1.4.2 audit MEDIUM-2.
+            if (sys_access("/usr/bin/tpm2_pcrread", 0) != 0) {
+                klog("FATAL: tpm_attestation required but /usr/bin/tpm2_pcrread missing");
+                return 0;
+            }
             var pcr_res = tpm_read_pcr(TPM_SHA256, indices);
             if (is_err_result(pcr_res) == 1) {
                 klog("FATAL: tpm_read_pcr failed");

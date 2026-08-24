@@ -90,10 +90,16 @@ Hardware-in-the-loop; not CI-runnable.
 
 ## Deferred (no movement until trigger surfaces)
 
+- **Apply the security stack to spawned services** — `seccomp.cyr`, `sandbox.cyr` and `privdrop.cyr` (686 lines, ~26% of kybernet's source) are implemented and unit-tested but called from no production path. seccomp and Landlock must be installed in the child between `fork` and `exec`; argonaut owns spawning and exposes **no pre_exec hook**, so there is no seam to run code in the child. **Trigger:** an argonaut pre_exec/child-callback hook. Until then kybernet must not be described as sandboxing services. See `docs/audit/2026-08-24-audit.md` HIGH-1. The defects inside those modules (missing seccomp arch check, u8 jump truncation, x86-only syscall table, bounding-set-only capability drop) were all fixed at 1.4.2 so the code is correct whenever the hook lands.
+- **Validate `drop_cap_sets()` on privileged hardware** — the `capset(2)` path added at 1.4.2 cannot be exercised by the suite (it runs unprivileged, where every path short-circuits on the euid check). Gates enabling the security stack, not a release.
+
 - **Control socket for agnoshi runtime commands** — separate transport surface; pinned until an agnoshi consumer drives the protocol shape
 - **Binary signing on release** — pinned until libro 2.6+ signing/timestamping is consumer-driven from outside kybernet's tree
 
 ## History
+
+### v1.4.2 — P(-1) audit pass (2026-08-24)
+Fifth P(-1) sweep; first since 1.1.5. 2 CRITICAL / 5 HIGH / 7 MEDIUM / 6 LOW, 19 of 20 closed. Both CRITICALs were gate-invisible: undrained level-triggered timerfds (PID 1 spinning at 100% CPU ~10s after every boot, then a kernel panic) and an x86_64-only `struct epoll_event` layout (kernel-written heap overflow + signals never handled on aarch64). Added the `kybernet.harness=loop` reactor gate — verified to fail on the unfixed tree — because no release gate had ever executed an event-loop iteration. 194 tests.
 
 ### v1.4.1 — Toolchain 6.5.35 + dependency refresh (2026-08-24)
 cyrius 6.4.62 → 6.5.35; sigil 3.12.9 / agnostik 1.4.0 / libro 2.8.12 / argonaut 1.8.6. Retired the `[deps.patra]` git block (it was downgrading the newer stdlib fold) and the `path = "../…"` fields (they made the tag pins inert locally). Manifest trimmed 6,924 → 2,784 bytes. CI format gate repaired for `cyrius fmt`'s in-place rewrite. No functional source change; 177 tests, harness green (673–911 ms of a 3000 ms budget).

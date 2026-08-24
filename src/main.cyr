@@ -45,6 +45,9 @@ var g_nfd = 0;
 var g_sfd = 0;
 var g_config = 0;
 var g_log_fd = 0;
+# `kybernet.harness=loop` — set once at phase 5 so the timer intervals and
+# the reactor's epoll timeout agree. See kybernet_harness_loop_requested().
+var g_loop_harness = 0;
 
 # ================================================================
 # Logging is factored into src/lib/log.cyr (since 1.2.0). klog,
@@ -191,6 +194,13 @@ fn drop_to_emergency() {
     # Fork and exec the shell
     var pid = sys_fork();
     if (pid == 0) {
+        # Drop PID 1's blocked mask before exec. setup_signals blocks
+        # SIGCHLD/SIGTERM/SIGINT/SIGHUP/SIGPWR so they can be read from the
+        # signalfd; fork inherits that mask and execve preserves it, so
+        # without this reset Ctrl-C is inert in the recovery shell and in
+        # everything launched from it — the one shell where an operator
+        # most needs job control. 1.4.2 audit MEDIUM-4.
+        reset_child_signal_mask();
         # Child — exec the emergency shell. The raw syscall(59/60,...)
         # this replaces was x86_64-only; sys_execve / sys_exit dispatch
         # per-arch (SYS_EXECVE 59→221, SYS_EXIT 60→93 on aarch64).
@@ -230,15 +240,16 @@ fn drop_to_emergency() {
 # `kybernet.harness=11` or `nokybernet.harness=1` don't accidentally
 # trigger harness mode.
 
-fn kybernet_harness_requested() {
+# Scan /proc/cmdline for `needle` as a whitespace-delimited token.
+# Boundary-checked so `kybernet.harness=11` or `nokybernet.harness=1`
+# do not match `kybernet.harness=1`.
+fn _cmdline_has(needle, nlen) {
     var fd = sys_open("/proc/cmdline", O_RDONLY | O_CLOEXEC, 0);
     if (fd < 0) { return 0; }
     var buf = alloc(1024);
     var n = sys_read(fd, buf, 1024);
     sys_close(fd);
     if (n <= 0) { return 0; }
-    var needle = "kybernet.harness=1";
-    var nlen = 18;
     var i = 0;
     while (i <= n - nlen) {
         var matched = 1;
@@ -277,6 +288,27 @@ fn kybernet_harness_requested() {
     return 0;
 }
 
+fn kybernet_harness_requested() {
+    return _cmdline_has("kybernet.harness=1", 18);
+}
+
+# `kybernet.harness=loop` — the REACTOR gate (1.4.2).
+#
+# The boot-only harness above shuts down at phase 9 without ever entering
+# the event loop, so for four audits no release gate executed a single
+# reactor iteration. That is precisely how CRITICAL-1 (level-triggered
+# timerfds never drained -> PID 1 spinning at 100% CPU forever, ~10 s
+# after every boot) reached production and survived: the defect lives
+# entirely past the boot-only gate's shutdown point.
+#
+# Loop mode runs the real event loop with short timer intervals for a
+# bounded wall time, then prints the wakeup count and shuts down. A
+# correct reactor sleeps between ticks, so the count is single digits; a
+# spinning one reports hundreds of thousands. boot-test.sh asserts on it.
+fn kybernet_harness_loop_requested() {
+    return _cmdline_has("kybernet.harness=loop", 21);
+}
+
 # ================================================================
 # Shutdown (coordinated via argonaut)
 # ================================================================
@@ -298,9 +330,15 @@ fn do_shutdown(shutdown_type) {
     sys_sync();
 
     slog("info", "shutdown complete");
-    if (g_log_fd > 0) { sys_close(g_log_fd); }
 
     klog("shutdown");
+    # Clear the global along with the close. g_log_fd doubles as slog2's
+    # open-flag (src/lib/log.cyr), so a closed-but-nonzero value makes
+    # every later klog write to a dead — and eventually recycled —
+    # descriptor, and makes the `> 0` guard meaningless. Also note the
+    # final klog now lands in the file before the fd goes away.
+    # 1.4.2 audit LOW-4.
+    if (g_log_fd > 0) { sys_close(g_log_fd); g_log_fd = 0; }
     if (shutdown_type == SHUTDOWN_REBOOT) {
         sys_reboot(RB_AUTOBOOT);
     } else {
@@ -357,7 +395,19 @@ fn handle_sigchld() {
             if (action_type == CRASH_RESTART) {
                 var delay = load64(action + 8);
                 klog2("  restarting (backoff): ", name_cs);
-                init_restart_service(g_init, name, delay);
+                # init_restart_service is synchronous and hands back a live
+                # PID — it does NOT re-place that PID in the service cgroup.
+                # Discarding it (pre-1.4.2) meant the first crash-restart
+                # silently escaped its cgroup for the rest of uptime: no
+                # memory/CPU limit, and cgroup.kill at shutdown misses it.
+                # 1.4.2 audit MEDIUM-5.
+                var rpid = init_restart_service(g_init, name, delay);
+                if (rpid > 0) {
+                    create_service_cgroup(name_cs);
+                    move_to_cgroup(name_cs, rpid);
+                } else {
+                    klog2("  FAILED to restart: ", name_cs);
+                }
             } elif (action_type == CRASH_GIVE_UP) {
                 var reason = load64(action + 16);
                 klog2("  giving up on: ", name_cs);
@@ -400,8 +450,13 @@ fn run_boot_stages() {
 
         # argonaut returns description as a Str (boxed) — klog2/kmsg
         # need a cstr. str_data() reads the underlying buffer ptr.
-        klog2("boot: ", str_data(desc));
-        kmsg(str_data(desc));
+        # Resolve ONCE here so every use below (including the failure
+        # arms) is a cstr; passing the raw Str to klog2 makes strlen()
+        # walk the {data,len} box instead of the text. See 1.4.2 audit
+        # MEDIUM-2 — the two failure arms had exactly that bug.
+        var desc_cs = str_data(desc);
+        klog2("boot: ", desc_cs);
+        kmsg(desc_cs);
 
         var ok = execute_boot_stage(stage);
         if (ok == 1) {
@@ -409,11 +464,11 @@ fn run_boot_stages() {
         } else {
             var required = load64(step + 16);
             if (required == 1) {
-                klog2("FATAL: required boot stage failed: ", desc);
+                klog2("FATAL: required boot stage failed: ", desc_cs);
                 init_mark_step_failed(g_init, stage, "stage execution failed");
                 return 0 - 1;
             }
-            klog2("WARNING: optional boot stage failed: ", desc);
+            klog2("WARNING: optional boot stage failed: ", desc_cs);
             init_mark_step_failed(g_init, stage, "stage execution failed");
         }
 
@@ -490,6 +545,12 @@ fn start_services() {
 # ================================================================
 
 fn handle_health_tick() {
+    # Drain FIRST, and unconditionally — before the g_init guard. The
+    # timerfd is level-triggered, so until its expiration counter is read
+    # epoll reports it ready forever and the reactor spins at 100% CPU.
+    # Returning early without draining is exactly how that happens.
+    # 1.4.2 audit CRITICAL-1.
+    eventloop_drain_health();
     if (g_init == 0) { return 0; }
 
     var results = init_poll_health(g_init, g_health_tracker);
@@ -508,6 +569,8 @@ fn handle_health_tick() {
 }
 
 fn handle_watchdog_tick() {
+    # See handle_health_tick — drain before any early return.
+    eventloop_drain_watchdog();
     if (g_init == 0) { return 0; }
 
     var killed = init_enforce_watchdog(g_init);
@@ -597,8 +660,14 @@ fn kybernet_run() {
     g_sfd = result_unwrap(sfd_r);
     kmsg("phase 4: signals ready");
 
-    # Phase 5: Event loop
-    var epfd_r = eventloop_setup(g_sfd, 30, 10);
+    # Phase 5: Event loop. Production intervals are health 30s / watchdog
+    # 10s; the reactor harness shortens them so ticks occur inside its 5s
+    # window (and so the gate exercises real timer drains, not just idle).
+    g_loop_harness = kybernet_harness_loop_requested();
+    var health_iv = 30;
+    var wdog_iv = 10;
+    if (g_loop_harness == 1) { health_iv = 2; wdog_iv = 1; }
+    var epfd_r = eventloop_setup(g_sfd, health_iv, wdog_iv);
     if (is_err_result(epfd_r) == 1) {
         kmsg("phase 5: FATAL eventloop setup failed");
         klog("FATAL: eventloop setup failed — entering shutdown");
@@ -638,14 +707,30 @@ fn kybernet_run() {
     # Phase 6c: Edge boot pre-flight (capability detect + PCR read).
     # No-op unless config_boot_mode == BOOT_EDGE && config_verify_boot.
     # Returns 0 only when a hard prerequisite is missing (TPM required
-    # but absent, or dm-verity required but unsupported) — in that
-    # case drop straight to emergency shell since boot stages may
-    # need the verified rootfs.
+    # but absent, or dm-verity required but unsupported).
+    #
+    # This gate is FAIL-CLOSED and must stay that way. Pre-1.4.2 it
+    # dropped to the emergency shell and then — because drop_to_emergency()
+    # RETURNS once the shell exits — fell straight through to phases 7/8
+    # and booted every service normally. On a device that asked for
+    # tpm_attestation, pulling the TPM therefore yielded a root shell
+    # followed by a fully booted, unverified system: the exact outcome
+    # verified boot exists to prevent. 1.4.2 audit HIGH-2.
+    #
+    # The operator still gets the recovery shell; when it exits we power
+    # off rather than continue. Contrast phase 7 below, where continuing
+    # after a failed *boot stage* is deliberate — that is a availability
+    # decision about ordinary services, not a trust decision about the
+    # rootfs.
     var edge_ok = edge_boot_run(g_config);
     if (edge_ok == 0) {
         kmsg("phase 6c: FATAL edge-boot prerequisite missing");
         klog("FATAL: edge-boot prerequisite missing — emergency shell");
         drop_to_emergency();
+        klog("FATAL: refusing to continue boot without edge prerequisites");
+        kmsg("phase 6c: powering off — edge prerequisites unmet");
+        do_shutdown(SHUTDOWN_POWEROFF);
+        sys_pause();
     } else {
         kmsg("phase 6c: edge boot pre-flight complete");
     }
@@ -681,10 +766,34 @@ fn kybernet_run() {
     kmsg("phase 9: ready — entering event loop");
     klog("ready — entering event loop");
 
+    # 1.4.2 reactor gate — see kybernet_harness_loop_requested(). In loop
+    # mode the epoll timeout is bounded so the deadline is actually checked
+    # (a blocking wait would never reach it), and the timers were armed
+    # short back at phase 5 so several ticks land inside the window.
+    var loop_deadline = 0;
+    var ep_timeout = 0 - 1;
+    var wakeups = 0;
+    if (g_loop_harness == 1) {
+        loop_deadline = monotonic_ms() + 5000;
+        ep_timeout = 250;
+        klog("harness: reactor mode — 5s bounded loop");
+    }
+
     # Phase 9: Event loop
     var running = 1;
     while (running == 1) {
-        var events = epoll_wait_events(g_epfd, 8, 0 - 1);
+        if (g_loop_harness == 1 && monotonic_ms() >= loop_deadline) {
+            var wbuf = alloc(24);
+            var wlen = fmt_int_buf(wakeups, wbuf);
+            store8(wbuf + wlen, 0);
+            klog2("harness: reactor wakeups=", wbuf);
+            kmsg("phase 9: harness reactor done");
+            klog("harness done — shutting down clean");
+            do_shutdown(SHUTDOWN_POWEROFF);
+            return 0;
+        }
+        wakeups = wakeups + 1;
+        var events = epoll_wait_events(g_epfd, 8, ep_timeout);
         var elen = vec_len(events);
         for (var ei = 0; ei < elen; ei = ei + 1) {
             var ev = vec_get(events, ei);
@@ -717,10 +826,22 @@ fn kybernet_run() {
 
 fn main() {
     # CMOS CP 0x30: kybernet entry. AGNOS syscall 26 = write_boot_checkpoint,
-    # writes CMOS[0x50] = 0x30. On Linux this invokes a different syscall
-    # (msync) with garbage args and silently fails — harmless. Iron-boot
-    # diagnostic: if CMOS[0x50] reaches 0x30, kybernet's main() executed
-    # at least one syscall after the ring-3 transition.
+    # writes CMOS[0x50] = 0x30. Iron-boot diagnostic: if CMOS[0x50] reaches
+    # 0x30, kybernet's main() executed at least one syscall after the ring-3
+    # transition.
+    #
+    # This is a deliberate, documented exception to standing rule 1 (no
+    # literal syscall numbers) — the number is an AGNOS ABI constant, not a
+    # Linux one, so there is no stdlib wrapper to route it through. What the
+    # number lands on when kybernet runs under Linux instead differs by arch,
+    # and BOTH are inert, which is what makes the exception safe:
+    #   x86_64  26 = msync(0x30, 0, 0)        -> EINVAL, 0x30 is unaligned
+    #   aarch64 26 = inotify_init1(0x30)      -> EINVAL, 0x30 is not a valid
+    #                                            flag set (IN_NONBLOCK|IN_CLOEXEC)
+    # The aarch64 half was undocumented before 1.4.2; had 0x30 been a valid
+    # flag combination it would have leaked an inotify fd on every boot.
+    # Re-check both columns if this checkpoint value ever changes.
+    # 1.4.2 audit LOW-2.
     syscall(26, 0x30);
 
     alloc_init();

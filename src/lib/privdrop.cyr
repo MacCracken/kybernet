@@ -66,6 +66,64 @@ enum PrctlConst {
     CAP_LAST_CAP = 40;
 }
 
+# capset(2). Not exported by the cyrius stdlib, so dispatched per-arch
+# here — same pattern and same reason as notify.cyr's socket numbers.
+#ifdef CYRIUS_ARCH_X86
+enum CapSysNr { SYS_CAPSET = 126; }
+#endif
+#ifdef CYRIUS_ARCH_AARCH64
+enum CapSysNr { SYS_CAPSET = 91; }
+#endif
+
+enum CapConst {
+    LINUX_CAPABILITY_VERSION_3 = 0x20080522;
+}
+
+# Clear the EFFECTIVE / PERMITTED / INHERITABLE capability sets, keeping
+# only `keep_mask`.
+#
+# This is the half that was missing before 1.4.2. PR_CAPBSET_DROP — the
+# only thing drop_capabilities used to do — removes a capability from the
+# BOUNDING set, which bounds what a process can *regain* through file
+# capabilities on exec. It does not take away anything the process
+# currently holds. A root process that drops its whole bounding set still
+# has CAP_SYS_ADMIN effective and can still do everything.
+#
+# So `secure_pre_exec(0, 0, 0)` used to report Ok while leaving the caller
+# fully privileged: the bounding set was empty, the effective set was
+# untouched, and with uid/gid 0 meaning "no change" the setuid that would
+# otherwise have cleared the sets never ran. 1.4.2 audit MEDIUM-1.
+#
+# Ordering: bounding-set drops need CAP_SETPCAP, so callers must drop the
+# bounding set BEFORE calling this. drop_capabilities does exactly that.
+#
+# NOTE: unvalidated on privileged hardware — the test suite runs
+# unprivileged, where every path here short-circuits on the euid check.
+# Validate before the security stack is wired into service spawn (see the
+# 1.4.2 audit report, HIGH-1).
+fn drop_cap_sets(keep_mask) {
+    var hdr = alloc(8);
+    store32(hdr, LINUX_CAPABILITY_VERSION_3);
+    store32(hdr + 4, 0);                 # pid 0 == self
+
+    # _LINUX_CAPABILITY_VERSION_3 takes two __user_cap_data_structs of
+    # {effective, permitted, inheritable} u32s — 24 bytes total.
+    var data = alloc(24);
+    memset(data, 0, 24);
+    var lo = keep_mask & 0xFFFFFFFF;
+    var hi = (keep_mask >> 32) & 0xFFFFFFFF;
+    store32(data, lo);                   # effective  [0..31]
+    store32(data + 4, lo);               # permitted  [0..31]
+    store32(data + 8, 0);                # inheritable[0..31] — never kept
+    store32(data + 12, hi);              # effective  [32..63]
+    store32(data + 16, hi);              # permitted  [32..63]
+    store32(data + 20, 0);               # inheritable[32..63]
+
+    var r = syscall(SYS_CAPSET, hdr, data);
+    if (r < 0) { return Err(0 - r); }
+    return Ok(0);
+}
+
 # Drop a single capability from the bounding set.
 # Returns: Result
 fn drop_cap(cap) {
@@ -80,9 +138,9 @@ fn has_cap(cap) {
     return syscall(SYS_PRCTL, PR_CAPBSET_READ, cap, 0, 0, 0) > 0;
 }
 
-# Drop all capabilities from the bounding set except those in the
-# keep_set bitmask. Bit N set = keep CAP_N.
-# keep_set=0 means drop everything.
+# Drop every capability outside `keep_set` — from the bounding set AND
+# from the live effective/permitted/inheritable sets. Bit N set = keep
+# CAP_N; keep_set=0 means drop everything.
 # Returns: Result (Ok(dropped_count) or Err(errno))
 fn drop_capabilities(keep_set) {
     if (sys_geteuid() != 0) { return Err(PRIV_NOT_ROOT); }
@@ -92,9 +150,23 @@ fn drop_capabilities(keep_set) {
             var r = drop_cap(cap);
             if (is_ok(r) == 1) {
                 dropped = dropped + 1;
+            } else {
+                # Do NOT swallow this. Pre-1.4.2 a failing PR_CAPBSET_DROP
+                # was counted as "not dropped" and the function still
+                # returned Ok, so a caller could not tell a full drop from
+                # a total no-op — a security primitive reporting success it
+                # did not achieve. EINVAL means the cap does not exist on
+                # this kernel (we walk a fixed 0..CAP_LAST_CAP range), which
+                # is benign; anything else is a real failure.
+                if (err_code_of(r) != EINVAL) { return r; }
             }
         }
     }
+
+    # Bounding set is done; now actually surrender the live sets.
+    var cr = drop_cap_sets(keep_set);
+    if (is_err_result(cr) == 1) { return cr; }
+
     return Ok(dropped);
 }
 

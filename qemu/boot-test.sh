@@ -35,6 +35,10 @@ PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 KERNEL="${1:-}"
 TIMEOUT="${2:-15}"
 BUDGET_MS="${BUDGET_MS:-3000}"
+# Reactor-gate ceiling: a sleeping reactor wakes ~20-30 times in the 5s
+# window; the unfixed spin measured ~340,000/sec. 500 separates them by
+# three orders of magnitude without being flaky on a loaded runner.
+WAKEUP_CEILING="${WAKEUP_CEILING:-500}"
 INITRAMFS="${SCRIPT_DIR}/initramfs.cpio.gz"
 
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
@@ -148,9 +152,61 @@ if [ "$WALL_MS" -gt "$BUDGET_MS" ]; then
     fail=1
 fi
 
+# ---------------------------------------------------------------------
+# Reactor gate (1.4.2) — the pass above NEVER enters the event loop.
+#
+# `kybernet.harness=1` shuts down at phase 9 before the reactor starts, so
+# for four audits no release gate executed a single loop iteration. That is
+# exactly how CRITICAL-1 shipped: health/watchdog timerfds were registered
+# level-triggered and never drained, so ~10 s after every real boot PID 1
+# span at 100% CPU forever — invisible to a gate that stops at phase 9.
+#
+# This second pass boots with `kybernet.harness=loop`, which runs the real
+# loop for 5 s with short timer intervals and prints its wakeup count. A
+# reactor that sleeps between ticks wakes a handful of times; a spinning
+# one reported ~340,000/sec when measured against the unfixed tree.
 if [ $fail -eq 0 ]; then
     echo ""
-    echo "=== HARNESS TEST: OK (all markers, within budget) ==="
+    echo "=== reactor gate (kybernet.harness=loop) ==="
+    LOOP_LOG=$(mktemp /tmp/kybernet-reactor.XXXXXX.log)
+    timeout "$TIMEOUT" qemu-system-x86_64 \
+        -kernel "$KERNEL" \
+        -initrd "$INITRAMFS" \
+        -append "console=ttyS0 panic=5 rdinit=/sbin/init kybernet.harness=loop loglevel=3" \
+        $ACCEL_FLAGS \
+        -m 512M \
+        -nographic \
+        -no-reboot \
+        -serial mon:stdio 2>&1 | tee "$LOOP_LOG" | grep -E "reactor|kybernet: shutdown|Attempted to kill init" || true
+
+    LOOP_OUT=$(cat -v "$LOOP_LOG" | tr '\r' '\n')
+    WAKEUPS=$(echo "$LOOP_OUT" | sed -n 's/.*reactor wakeups=\([0-9][0-9]*\).*/\1/p' | tail -1)
+
+    if [ -z "$WAKEUPS" ]; then
+        echo "  FAIL: reactor gate produced no wakeup count"
+        fail=1
+    else
+        # 5s window, 250ms epoll timeout, 1s watchdog + 2s health ticks.
+        # Correct behaviour is ~20-30 wakeups. Anything in the thousands
+        # means the reactor is spinning instead of sleeping.
+        echo "  reactor wakeups: ${WAKEUPS} (ceiling: ${WAKEUP_CEILING})"
+        if [ "$WAKEUPS" -gt "$WAKEUP_CEILING" ]; then
+            echo "  FAIL: reactor is spinning — a timerfd is not being drained"
+            fail=1
+        else
+            echo "  OK: reactor sleeps between ticks"
+        fi
+    fi
+    if grep -aqE "Attempted to kill init|Kernel panic" "$LOOP_LOG"; then
+        echo "  FAIL: kernel panicked in reactor mode"
+        fail=1
+    fi
+    rm -f "$LOOP_LOG"
+fi
+
+if [ $fail -eq 0 ]; then
+    echo ""
+    echo "=== HARNESS TEST: OK (all markers, within budget, reactor sleeps) ==="
     exit 0
 else
     echo ""

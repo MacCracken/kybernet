@@ -64,12 +64,13 @@ fn mount_devtmpfs() {
 # `required` = 0 → failure is logged + skipped, boot continues
 #
 # Sizing: array is BYTES, not slots. 6 entries × 48 bytes/entry =
-# 288 bytes exactly — at the limit. Adding a 7th entry (e.g. bpf,
-# tracefs) requires growing this. Use _mount_table[480] (10 entries
-# × 48) for the next bump; the BSS cost is negligible and headroom
+# 288 bytes used of 480 (10 entries) — headroom taken at 1.4.2, closing
+# the 1.1.5 audit's deferred LOW-2. Sitting at exact capacity meant the
+# next entry added (bpf, tracefs) would overflow BSS silently, which is
+# the same shape as that audit's HIGH-2. The BSS cost is negligible and headroom
 # kills a class of regression. The 0.95.0 `_mount_table[8]→[240]`
 # fix and 1.1.5 `_mount_skipped[16]→[128]` fix both came from this.
-var _mount_table[288];
+var _mount_table[480];
 var _mount_count = 0;
 
 # Skipped-mount tracking — populated by mount_essential() when an

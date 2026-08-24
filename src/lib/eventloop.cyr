@@ -13,6 +13,73 @@ enum EventToken {
     TOKEN_NOTIFY = 5;
 }
 
+# struct epoll_event is one of the very few kernel structs whose layout
+# is NOT the same on every arch. x86_64 marks it __attribute__((packed)):
+# u32 events at +0, u64 data at +4, sizeof 12. Every other arch — aarch64
+# included — uses the natural layout: u32 events at +0, 4 bytes of
+# padding, u64 data at +8, sizeof 16.
+#
+# The stdlib already dispatches on this when BUILDING an event
+# (syscalls_x86_64_linux.cyr stores data at +4, syscalls_aarch64_linux.cyr
+# at +8), so the READ side here has to match or the reactor (a) hands
+# epoll_wait a buffer sized 12/entry that the kernel fills 16/entry —
+# writing past the end — and (b) parses every token from the wrong offset.
+# Pre-1.4.2 this file hardcoded the x86_64 numbers, so on aarch64 every
+# token decoded to garbage, every event fell to the `default` arm, and
+# SIGCHLD/SIGTERM were never processed. Standing rule 1's sibling: layout
+# is as arch-specific as the syscall number.
+#ifdef CYRIUS_ARCH_X86
+enum EpollEventAbi {
+    EPOLL_EVENT_SIZE = 12;
+    EPOLL_EVENT_DATA_OFF = 4;
+}
+#endif
+#ifdef CYRIUS_ARCH_AARCH64
+enum EpollEventAbi {
+    EPOLL_EVENT_SIZE = 16;
+    EPOLL_EVENT_DATA_OFF = 8;
+}
+#endif
+
+# Reactor scratch — deliberately static, never allocated.
+#
+# epoll_wait_events runs on EVERY event-loop wakeup, and PID 1 stays up
+# for months. The cyrius allocator is a bump arena with no free, so the
+# pre-1.4.2 shape (alloc the raw buffer + alloc(16) per event + vec_new
+# per call) grew the process without bound for the life of the system.
+# Health/watchdog timers alone wake the loop ~8×/min, so it was a
+# monotonic leak measured in MB/day with no ceiling.
+#
+# Everything below lives in BSS and is reused. `_ep_results` is built
+# once and rewound with vec_truncate, which preserves capacity — the
+# stdlib's documented bounded-memory reset primitive.
+#
+# CONTRACT: the EpollEvent pointers returned by epoll_wait_events alias
+# this pool and are valid only until the next call. Callers must consume
+# them within the current iteration (main.cyr's loop does).
+enum EpollLimits { EPOLL_MAX_EVENTS = 32; }
+
+var _ep_raw[512];      # EPOLL_MAX_EVENTS * 16 — worst-case (aarch64) stride
+var _ep_slots[512];    # EPOLL_MAX_EVENTS * 16 — {token, flags} pairs
+var _ep_results = 0;   # reusable vec of _ep_slots pointers
+
+# The two interval timerfds registered by eventloop_setup.
+#
+# These MUST be retained. epoll_add_read registers with plain EPOLLIN,
+# i.e. LEVEL-triggered, and a timerfd stays readable until its 8-byte
+# expiration counter is read(). Pre-1.4.2 the fds were consumed inline as
+# call arguments and bound to nothing, so nothing could ever drain them:
+# ten seconds after boot the watchdog timer fired, went permanently
+# readable, and epoll_wait returned immediately on every subsequent call
+# for the life of the system — PID 1 pinned a core at 100% forever and
+# ran init_enforce_watchdog hundreds of thousands of times per second.
+#
+# The QEMU harness never saw it because the harness gate shuts down at
+# phase 9 BEFORE entering the event loop, and the benches call
+# epoll_wait with an unarmed epoll set. 1.4.2 audit CRITICAL-1.
+var _ep_health_tfd = 0 - 1;
+var _ep_watchdog_tfd = 0 - 1;
+
 # OwnedFd — wraps a file descriptor, must be explicitly closed
 # (Cyrius has no Drop trait, so caller must call owned_fd_close)
 struct OwnedFd { fd; }
@@ -56,7 +123,15 @@ fn timer_new(interval_sec) {
     var tfd = sys_timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
     if (tfd < 0) { return Err(0 - tfd); }
     var ts = timerspec_new(interval_sec, interval_sec);
-    sys_timerfd_settime(tfd, 0, ts, 0);
+    # An unchecked settime yields an armed-looking fd that never fires:
+    # the health or watchdog tick then silently never runs for the life
+    # of the system, and nothing logs it. Close and report instead.
+    # 1.4.2 audit LOW-3.
+    var sr = sys_timerfd_settime(tfd, 0, ts, 0);
+    if (sr < 0) {
+        sys_close(tfd);
+        return Err(0 - sr);
+    }
     return Ok(tfd);
 }
 
@@ -65,23 +140,35 @@ struct EpollEvent { token; flags; }
 
 # Wait for events. Returns vec of EpollEvent pointers.
 fn epoll_wait_events(epfd, maxevents, timeout_ms) {
-    var events_buf = alloc(maxevents * 12);
-    var results = vec_new();
+    # Clamp into the static pool. A caller asking for more than the pool
+    # holds gets the pool's worth rather than a kernel write past its end.
+    if (maxevents < 1) { maxevents = 1; }
+    if (maxevents > EPOLL_MAX_EVENTS) { maxevents = EPOLL_MAX_EVENTS; }
+
+    if (_ep_results == 0) { _ep_results = vec_new(); }
+    vec_truncate(_ep_results, 0);
+
     var n = 0;
     while (1 == 1) {
-        n = sys_epoll_wait(owned_fd_raw(epfd), events_buf, maxevents, timeout_ms);
+        n = sys_epoll_wait(owned_fd_raw(epfd), &_ep_raw, maxevents, timeout_ms);
         if (n >= 0) { break; }
         if (err_code(n) == EINTR) { continue; }
         break;
     }
-    # Parse events into structured results
+    # A hard epoll error (n < 0, not EINTR) yields an empty batch. The
+    # caller's loop then simply finds nothing to dispatch — it must NOT
+    # be treated as an exit condition; PID 1 has nowhere to exit to.
+    if (n < 0) { return _ep_results; }
+    if (n > maxevents) { n = maxevents; }
+
+    # Parse events into structured results, arch-correct stride/offset.
     for (var ei = 0; ei < n; ei = ei + 1) {
-        var ev = alloc(16);
-        store64(ev, load64(events_buf + ei * 12 + 4));
-        store64(ev + 8, load32(events_buf + ei * 12));
-        vec_push(results, ev);
+        var ev = &_ep_slots + ei * 16;
+        store64(ev, load64(&_ep_raw + ei * EPOLL_EVENT_SIZE + EPOLL_EVENT_DATA_OFF));
+        store64(ev + 8, load32(&_ep_raw + ei * EPOLL_EVENT_SIZE));
+        vec_push(_ep_results, ev);
     }
-    return results;
+    return _ep_results;
 }
 
 fn event_token(ev) { return load64(ev); }
@@ -98,23 +185,56 @@ fn eventloop_setup(signal_fd, health_sec, watchdog_sec) {
     var sig_r = epoll_add_read(epfd, signal_fd, TOKEN_SIGNAL);
     if (is_err_result(sig_r) == 1) { return sig_r; }
 
-    # Health check timer
+    # Health check timer. Non-fatal — boot proceeds without health polling
+    # rather than refusing to come up — but it must not fail SILENTLY, and
+    # a timer we cannot register must not leak its fd for the life of PID 1.
+    # 1.4.2 audit LOW-3.
     if (health_sec > 0) {
         var hfd_r = timer_new(health_sec);
         if (is_ok(hfd_r) == 1) {
-            epoll_add_read(epfd, result_unwrap(hfd_r), TOKEN_HEALTH);
+            _ep_health_tfd = result_unwrap(hfd_r);
+            if (is_err_result(epoll_add_read(epfd, _ep_health_tfd, TOKEN_HEALTH)) == 1) {
+                klog("WARNING: health timer epoll registration failed — health polling disabled");
+                sys_close(_ep_health_tfd);
+                _ep_health_tfd = 0 - 1;
+            }
+        } else {
+            klog("WARNING: health timer creation failed — health polling disabled");
         }
     }
 
-    # Watchdog timer
+    # Watchdog timer — same contract.
     if (watchdog_sec > 0) {
         var wfd_r = timer_new(watchdog_sec);
         if (is_ok(wfd_r) == 1) {
-            epoll_add_read(epfd, result_unwrap(wfd_r), TOKEN_WATCHDOG);
+            _ep_watchdog_tfd = result_unwrap(wfd_r);
+            if (is_err_result(epoll_add_read(epfd, _ep_watchdog_tfd, TOKEN_WATCHDOG)) == 1) {
+                klog("WARNING: watchdog timer epoll registration failed — watchdog disabled");
+                sys_close(_ep_watchdog_tfd);
+                _ep_watchdog_tfd = 0 - 1;
+            }
+        } else {
+            klog("WARNING: watchdog timer creation failed — watchdog disabled");
         }
     }
 
     return Ok(epfd);
+}
+
+# Drain the health / watchdog timerfd expiration counters.
+#
+# Call these from the corresponding tick handlers, BEFORE doing the tick's
+# work. Reading the 8-byte counter is what clears epoll readiness on a
+# level-triggered timerfd; skip it and the reactor spins. Returns the
+# number of expirations since the last drain (0 if the fd is not armed).
+fn eventloop_drain_health() {
+    if (_ep_health_tfd < 0) { return 0; }
+    return timerfd_drain(_ep_health_tfd);
+}
+
+fn eventloop_drain_watchdog() {
+    if (_ep_watchdog_tfd < 0) { return 0; }
+    return timerfd_drain(_ep_watchdog_tfd);
 }
 
 # Register a notify socket fd with an existing epoll instance.

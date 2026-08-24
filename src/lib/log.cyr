@@ -26,12 +26,18 @@
 var _logbuf[256];
 
 fn _log_write(fd, prefix, plen, msg) {
+    # Clamp the prefix first. 1.1.5 LOW-1 bounded `msg` but left `plen`
+    # unchecked, and `copylen = 254 - plen` goes NEGATIVE once plen > 254
+    # — a negative memcpy length is an unbounded write from PID 1. Every
+    # in-tree caller passes a short literal, so this was latent; clamping
+    # is two comparisons and removes the class. 1.4.2 audit LOW-1.
+    if (plen < 0) { plen = 0; }
+    if (plen > 254) { plen = 254; }
     var mlen = strlen(msg);
-    var total = plen + mlen + 1;
-    if (total > 255) { total = 255; }
-    memcpy(&_logbuf, prefix, plen);
     var copylen = mlen;
     if (plen + mlen > 254) { copylen = 254 - plen; }
+    if (copylen < 0) { copylen = 0; }
+    memcpy(&_logbuf, prefix, plen);
     memcpy(&_logbuf + plen, msg, copylen);
     store8(&_logbuf + plen + copylen, 10);
     sys_write(fd, &_logbuf, plen + copylen + 1);
@@ -73,11 +79,11 @@ fn klog2(prefix, msg) {
         sys_write(STDERR_FD, msg, mlen);
         sys_write(STDERR_FD, "\n", 1);
     }
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, prefix);
-    str_builder_add_cstr(sb, msg);
-    var combined = str_builder_build(sb);
-    slog("info", str_data(combined));
+    # Only pay for the structured line when there is somewhere to put it.
+    # Pre-1.4.2 this built two str_builders per call even with slog
+    # disabled — and str_builder allocations are never reclaimed under
+    # the bump arena, so every log line grew PID 1 permanently.
+    if (g_log_fd > 0) { slog2("info", prefix, msg); }
     return 0;
 }
 
@@ -93,15 +99,84 @@ fn slog_init() {
     return 0;
 }
 
-fn slog(level, msg) {
+# Structured-log line buffer. Static for the same reason the reactor
+# scratch is: slog runs on every klog/klog2, PID 1 runs for months, and
+# the bump arena never gives memory back. SLOG_CAP leaves 8 bytes of
+# tail room so the closing `"}\n` always fits.
+var _slogbuf[1024];
+enum SlogLimits { SLOG_CAP = 1016; }
+
+# Append a cstr literal verbatim (callers pass only trusted literals).
+fn _slog_lit(pos, s) {
+    var i = 0;
+    while (1 == 1) {
+        var c = load8(s + i);
+        if (c == 0) { break; }
+        if (pos >= 1024) { break; }
+        store8(&_slogbuf + pos, c);
+        pos = pos + 1;
+        i = i + 1;
+    }
+    return pos;
+}
+
+fn _hexdig(n) {
+    if (n < 10) { return 48 + n; }
+    return 97 + (n - 10);
+}
+
+# Append `s` JSON-escaped. Pre-1.4.2 slog interpolated values raw, so a
+# service name containing a quote or newline produced malformed JSON and
+# let an attacker-influenced name forge log fields. Service names reach
+# here from config via handle_health_tick / handle_watchdog_tick, so this
+# was reachable log injection. 1.4.2 audit MEDIUM-4.
+fn _slog_esc(pos, s) {
+    var i = 0;
+    while (1 == 1) {
+        var c = load8(s + i);
+        if (c == 0) { break; }
+        # Worst case below is a 6-byte \u00XX escape.
+        if (pos + 6 > SLOG_CAP) { break; }
+        if (c == 34) {
+            store8(&_slogbuf + pos, 92); store8(&_slogbuf + pos + 1, 34); pos = pos + 2;
+        } elif (c == 92) {
+            store8(&_slogbuf + pos, 92); store8(&_slogbuf + pos + 1, 92); pos = pos + 2;
+        } elif (c == 10) {
+            store8(&_slogbuf + pos, 92); store8(&_slogbuf + pos + 1, 110); pos = pos + 2;
+        } elif (c == 13) {
+            store8(&_slogbuf + pos, 92); store8(&_slogbuf + pos + 1, 114); pos = pos + 2;
+        } elif (c == 9) {
+            store8(&_slogbuf + pos, 92); store8(&_slogbuf + pos + 1, 116); pos = pos + 2;
+        } elif (c > 0 && c < 32) {
+            store8(&_slogbuf + pos, 92);       store8(&_slogbuf + pos + 1, 117);
+            store8(&_slogbuf + pos + 2, 48);   store8(&_slogbuf + pos + 3, 48);
+            store8(&_slogbuf + pos + 4, _hexdig((c / 16) & 15));
+            store8(&_slogbuf + pos + 5, _hexdig(c & 15));
+            pos = pos + 6;
+        } else {
+            store8(&_slogbuf + pos, c);
+            pos = pos + 1;
+        }
+        i = i + 1;
+    }
+    return pos;
+}
+
+# Two-part variant so klog2 doesn't have to concatenate prefix+msg into
+# a throwaway allocation just to log them.
+fn slog2(level, part1, part2) {
     if (g_log_fd <= 0) { return 0; }
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"level\":\"");
-    str_builder_add_cstr(sb, level);
-    str_builder_add_cstr(sb, "\",\"msg\":\"");
-    str_builder_add_cstr(sb, msg);
-    str_builder_add_cstr(sb, "\"}\n");
-    var line = str_builder_build(sb);
-    sys_write(g_log_fd, str_data(line), str_len(line));
+    var pos = 0;
+    pos = _slog_lit(pos, "{\"level\":\"");
+    pos = _slog_esc(pos, level);
+    pos = _slog_lit(pos, "\",\"msg\":\"");
+    pos = _slog_esc(pos, part1);
+    if (part2 != 0) { pos = _slog_esc(pos, part2); }
+    pos = _slog_lit(pos, "\"}\n");
+    sys_write(g_log_fd, &_slogbuf, pos);
     return 0;
+}
+
+fn slog(level, msg) {
+    return slog2(level, msg, 0);
 }

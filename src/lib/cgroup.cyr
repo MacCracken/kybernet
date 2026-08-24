@@ -53,6 +53,40 @@ fn _cg_cache_init() {
     return 0;
 }
 
+# Is `service` safe to interpolate as ONE path component?
+#
+# cgroup_path() builds /sys/fs/cgroup/kybernet.slice/{service} and the
+# result is handed to mkdir and to control-file writes. Interpolating the
+# name raw let `/` or `..` walk out of the slice — a name like
+# "../../evil" targets an arbitrary cgroup directory, and kybernet then
+# creates it and writes cgroup.procs into it. Names come from config, so
+# this needs config-write access to reach, which is why it is MEDIUM and
+# not HIGH — but it is the same defect argonaut closed at 1.8.6 (MEDIUM-8,
+# `sanitize_unit_name`), and the fix is equally cheap. 1.4.2 audit MEDIUM-3.
+#
+# Accepts [A-Za-z0-9._-] only, rejects empty, "." and "..".
+# Returns 1 when safe, 0 otherwise.
+fn cgroup_name_is_safe(service) {
+    if (service == 0) { return 0; }
+    var n = strlen(service);
+    if (n == 0) { return 0; }
+    if (n > 200) { return 0; }
+    # Reject "." and ".." outright — they are valid component chars but
+    # never a valid cgroup name.
+    if (n == 1 && load8(service) == 46) { return 0; }
+    if (n == 2 && load8(service) == 46 && load8(service + 1) == 46) { return 0; }
+    for (var i = 0; i < n; i = i + 1) {
+        var c = load8(service + i);
+        var ok = 0;
+        if (c >= 97 && c <= 122) { ok = 1; }        # a-z
+        if (c >= 65 && c <= 90)  { ok = 1; }        # A-Z
+        if (c >= 48 && c <= 57)  { ok = 1; }        # 0-9
+        if (c == 46 || c == 95 || c == 45) { ok = 1; }  # . _ -
+        if (ok == 0) { return 0; }
+    }
+    return 1;
+}
+
 # Build cgroup path as Str: /sys/fs/cgroup/kybernet.slice/{service}
 fn cgroup_path(service) {
     # 1-slot LRU: same burst pattern as cgroup_file — skip the
@@ -172,6 +206,9 @@ fn _cg_cache_reset_all() {
 # Create the cgroup directory for a service
 # Returns: Result (Ok(0) or Err(errno))
 fn create_service_cgroup(service) {
+    # Reject a name that would escape the slice before any mkdir. See
+    # cgroup_name_is_safe — 1.4.2 audit MEDIUM-3.
+    if (cgroup_name_is_safe(service) == 0) { return Err(EINVAL); }
     # Create slice dir
     var sb1 = str_builder_new();
     str_builder_add_cstr(sb1, CGROUP_ROOT);
@@ -192,6 +229,7 @@ fn create_service_cgroup(service) {
 # Move a PID into a service's cgroup
 # Returns: Result
 fn move_to_cgroup(service, pid) {
+    if (cgroup_name_is_safe(service) == 0) { return Err(EINVAL); }
     var procs = cgroup_file(service, "cgroup.procs");
     var numbuf = alloc(24);
     var nlen = fmt_int_buf(pid, numbuf);

@@ -91,6 +91,50 @@ fn test_epoll() {
     return 0;
 }
 
+# Regression test for 1.4.2 audit CRITICAL-1 — the level-triggered
+# timerfd busy-spin that pinned PID 1 at 100% CPU forever.
+#
+# The shape that mattered: an armed timerfd registered EPOLLIN stays
+# readable once it expires, so epoll_wait returns immediately on every
+# subsequent call until the 8-byte expiration counter is read. Nothing
+# in the tree read it. This asserts the two halves of the fix:
+#   1. an expired, UNDRAINED timerfd reports ready repeatedly (the bug's
+#      mechanism — proving the test actually exercises the condition),
+#   2. after a drain, epoll_wait with timeout 0 reports nothing.
+# Without (2) passing, the reactor spins.
+fn test_timerfd_drain_clears_readiness() {
+    println("--- timerfd drain (CRITICAL-1 regression) ---");
+    var epfd_r = epoll_new();
+    assert(is_ok(epfd_r) == 1, "drain: epoll_create");
+    if (is_ok(epfd_r) == 0) { return 0; }
+    var epfd = result_unwrap(epfd_r);
+
+    # 1-second repeating timer, registered exactly as eventloop_setup does.
+    var tfd_r = timer_new(1);
+    assert(is_ok(tfd_r) == 1, "drain: timer_new");
+    if (is_ok(tfd_r) == 0) { owned_fd_close(epfd); return 0; }
+    var tfd = result_unwrap(tfd_r);
+    assert(is_ok(epoll_add_read(epfd, tfd, TOKEN_WATCHDOG)) == 1, "drain: epoll_add");
+
+    # Block until it fires (timeout well past the 1s interval).
+    var first = epoll_wait_events(epfd, 8, 3000);
+    assert_eq(vec_len(first), 1, "drain: timer fired");
+
+    # UNDRAINED: still ready immediately. This is the busy-spin.
+    var again = epoll_wait_events(epfd, 8, 0);
+    assert_eq(vec_len(again), 1, "drain: undrained fd still ready (spin condition)");
+
+    # Drain the expiration counter, then the fd must go quiet.
+    var exp = timerfd_drain(tfd);
+    assert(exp > 0, "drain: expiration count read");
+    var quiet = epoll_wait_events(epfd, 8, 0);
+    assert_eq(vec_len(quiet), 0, "drain: cleared readiness");
+
+    sys_close(tfd);
+    owned_fd_close(epfd);
+    return 0;
+}
+
 fn test_fileops() {
     println("--- fileops ---");
     var r = sys_mkdir("/tmp/cyr_ktest2", 0x1C0);
@@ -179,12 +223,31 @@ fn test_seccomp_builder() {
         var info = result_unwrap(info_r);
         var fptr = seccomp_filter_ptr(info);
         var flen = seccomp_filter_len(info);
-        # 3 allowed + 3 fixed instructions = 6 instructions * 8 bytes = 48
-        assert_eq(flen, 48, "filter size");
+        # 3 allowed + 5 fixed instructions = 8 instructions * 8 bytes = 64.
+        # The fixed five are: LD arch, JEQ arch, LD nr, RET KILL, RET ALLOW.
+        assert_eq(flen, 64, "filter size");
         assert(fptr != 0, "filter ptr");
 
-        # Verify first instruction: BPF_LD_W_ABS
+        # --- The architecture check (1.4.2 audit HIGH-3) ---
+        # These three assertions are the regression test for the seccomp
+        # ABI-switch bypass. A filter that loads seccomp_data.nr first and
+        # never pins seccomp_data.arch is bypassable by issuing syscalls
+        # under a different ABI, where the same numbers mean other calls.
+        # insn0 must load arch (offset 4), NOT nr (offset 0).
         assert_eq(load16(fptr), BPF_LD_W_ABS, "insn0 LD");
+        assert_eq(load32(fptr + 4), SECCOMP_DATA_ARCH_OFF, "insn0 loads arch");
+        # insn1 must compare it against this build's AUDIT_ARCH.
+        assert_eq(load16(fptr + 8), BPF_JMP_JEQ_K, "insn1 JEQ");
+        assert_eq(load32(fptr + 12), SECCOMP_AUDIT_ARCH, "insn1 pins audit arch");
+        # A mismatch must skip the whole allowlist and land on RET KILL.
+        assert_eq(load8(fptr + 11), 4, "insn1 jf skips allowlist");
+        # insn2 then loads the syscall number.
+        assert_eq(load16(fptr + 16), BPF_LD_W_ABS, "insn2 LD");
+        assert_eq(load32(fptr + 20), SECCOMP_DATA_NR_OFF, "insn2 loads nr");
+
+        # Deny-by-default: second-to-last is RET KILL_PROCESS.
+        assert_eq(load16(fptr + flen - 16), BPF_RET_K, "kill insn RET");
+        assert_eq(load32(fptr + flen - 12), SECCOMP_RET_KILL_PROCESS, "default kills");
         # Verify last instruction: BPF_RET_K ALLOW
         assert_eq(load16(fptr + flen - 8), BPF_RET_K, "last insn RET");
         assert_eq(load32(fptr + flen - 4), SECCOMP_RET_ALLOW, "last insn ALLOW");
@@ -198,6 +261,23 @@ fn test_seccomp_builder() {
     var empty = seccomp_builder_new();
     var er = seccomp_build(empty);
     assert(is_err_result(er) == 1, "empty build fails");
+
+    # --- u8 jump-offset overflow guard (1.4.2 audit HIGH-4) ---
+    # BPF jt/jf are u8. Past SECCOMP_MAX_ALLOW the offsets this layout
+    # emits no longer fit, and store8 would truncate them silently, so
+    # build must refuse rather than emit a filter that jumps wrong.
+    var big = seccomp_builder_new();
+    for (var bi = 0; bi < SECCOMP_MAX_ALLOW + 1; bi = bi + 1) {
+        seccomp_allow(big, bi);
+    }
+    assert(is_err_result(seccomp_build(big)) == 1, "oversized filter rejected");
+
+    # Exactly at the cap still builds.
+    var atcap = seccomp_builder_new();
+    for (var ci = 0; ci < SECCOMP_MAX_ALLOW; ci = ci + 1) {
+        seccomp_allow(atcap, ci);
+    }
+    assert(is_ok(seccomp_build(atcap)) == 1, "at-cap filter builds");
     return 0;
 }
 
@@ -770,6 +850,7 @@ fn main() {
     test_cloexec_fcntl_probe();
     test_owned_fd();
     test_eventloop_lifecycle();
+    test_timerfd_drain_clears_readiness();
     test_eventloop_setup_full();
     test_reaper_macros();
     test_signal_buffer();
