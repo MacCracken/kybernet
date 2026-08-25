@@ -35,6 +35,7 @@ include "src/lib/sandbox.cyr"
 include "src/lib/edge_boot.cyr"
 include "src/lib/svc_config.cyr"
 include "src/lib/service_sandbox.cyr"
+include "src/lib/boot_stages.cyr"
 
 # ================================================================
 # Globals
@@ -50,6 +51,11 @@ var g_log_fd = 0;
 # `kybernet.harness=loop` — set once at phase 5 so the timer intervals and
 # the reactor's epoll timeout agree. See kybernet_harness_loop_requested().
 var g_loop_harness = 0;
+# Guards start_services against a second run. Service-group boot stages
+# trigger startup on demand (see run_boot_stages), and phase 8 then covers
+# any mode whose sequence has no service stage at all — so the call can
+# legitimately arrive from either side, but must only do work once.
+var g_services_started = 0;
 
 # ================================================================
 # Logging is factored into src/lib/log.cyr (since 1.2.0). klog,
@@ -481,9 +487,21 @@ fn run_boot_stages() {
         klog2("boot: ", desc_cs);
         kmsg(desc_cs);
 
-        var ok = execute_boot_stage(stage);
-        if (ok == 1) {
+        # Service-group stages report whether their services came up, so
+        # the services have to have been attempted first. Starting them
+        # here rather than in a separate later phase is what makes those
+        # stages mean anything — before 1.5.1 they were evaluated before
+        # any service existed, which is part of why they all returned 1.
+        if (boot_stage_needs_services(stage) == 1) { ensure_services_started(); }
+
+        var ok = execute_boot_stage_for(g_init, g_config, stage);
+        if (ok == STAGE_OK) {
             init_mark_step_complete(g_init, stage);
+        } elif (ok == STAGE_SKIP) {
+            # Not performed by this deployment — recorded as SKIPPED, which
+            # init_is_boot_complete accepts. Distinct from claiming success.
+            klog2("boot: skipped (not applicable): ", desc_cs);
+            init_mark_step_skipped(g_init, stage, "not performed by this deployment");
         } else {
             var required = load64(step + 16);
             if (required == 1) {
@@ -501,26 +519,16 @@ fn run_boot_stages() {
     return 0;
 }
 
-fn execute_boot_stage(stage) {
-    switch (stage) {
-        case 0: return 1;
-        case 1: return 1;
-        case 2: return 1;
-        case 3: return 1;
-        case 4: return 1;
-        case 5: return 1;
-        case 6: return 1;
-        case 7: return 1;
-        case 8: return 1;
-        case 9: return 1;
-        case 10: return 1;
-        default: return 1;
-    }
-}
-
 # ================================================================
 # Service startup
 # ================================================================
+
+# Idempotent wrapper — see g_services_started.
+fn ensure_services_started() {
+    if (g_services_started == 1) { return 0; }
+    g_services_started = 1;
+    return start_services();
+}
 
 fn start_services() {
     if (g_init == 0) { return 0; }
@@ -797,8 +805,10 @@ fn kybernet_run() {
         klog("continuing after emergency shell");
     }
 
-    # Phase 8: Start services
-    start_services();
+    # Phase 8: Start services. Usually already done — a service-group boot
+    # stage above starts them on demand so those stages can report real
+    # status. This covers modes whose sequence has no service stage.
+    ensure_services_started();
     kmsg("phase 8: services started");
     klog("services started");
 

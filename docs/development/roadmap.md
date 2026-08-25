@@ -114,19 +114,23 @@ Ordered by what unblocks what.
 - [x] argonaut 1.10.0: enum `*_parse` inverses, `init_service_defs`,
       `svc_def_set_*`, `svc_hc_*`, and the oneshot-dependency fix
 
-### v1.5.1 — boot stages that do something
+### v1.5.1 — boot stages that do something ✅ (2026-08-25)
 
-`execute_boot_stage(stage)` is `return 1` for all 11 arms plus `default` — it
-is semantically `return 1;`. `run_boot_stages` therefore always takes the
-success branch, `init_mark_step_failed` is unreachable, and the caller's
-`if (boot_r < 0)` emergency path can never fire. The whole boot-stage
-apparatus reports success it never earned. 1.4.2 audit MEDIUM.
-
-- [ ] Implement the stages that have real work (mounts, udev, security policy
-      apply, database + service waves) and return honest status
-- [ ] Delete or explicitly no-op the stages that genuinely have nothing to do,
-      so "success" means something per stage
-- [ ] Test that a failing required stage reaches `drop_to_emergency`
+- [x] `src/lib/boot_stages.cyr` — each stage returns OK / SKIP / FAIL instead
+      of an unconditional 1; mounts, /dev, rootfs verification, the sandbox
+      hook's arming, and per-group service readiness are all really checked
+- [x] Stages kybernet genuinely does not perform (udev) are recorded
+      **SKIPPED**, not falsely COMPLETE — argonaut 1.10.1 added
+      `init_mark_step_skipped` because `STEP_SKIPPED` could never be set
+- [x] Services start on demand when a service-group stage needs them
+      (idempotent `ensure_services_started`), so those stages have something
+      real to report
+- [x] A failing required stage reaches `drop_to_emergency` — asserted in
+      tests, and the harness now gates on no stage failing
+- [x] Harness moved to `boot_mode: recovery` for a clean happy path; budget
+      back to 3000 ms (boots ~650 ms)
+- [x] Bench gate got a `MIN_DELTA_NS` noise floor — three releases of
+      1-2 ns false regressions on sub-10 ns benchmarks
 
 ### v1.5.2 — per-service security profiles (completes audit HIGH-1)
 
@@ -195,6 +199,9 @@ v1.2.1 above; now that argonaut is in scope for edits, that is unblocked.
 - **Binary signing on release** — pinned until libro 2.6+ signing/timestamping is consumer-driven from outside kybernet's tree
 
 ## History
+
+### v1.5.1 — Boot stages that do something (2026-08-25)
+execute_boot_stage was `return 1` for all eleven arms, so init_mark_step_failed and the emergency path were dead code. Stages now return OK/SKIP/FAIL and check real state; argonaut 1.10.1 added the SKIPPED marker that made an honest third answer possible. Bench gate gained a noise floor. 255 tests.
 
 ### v1.5.0 — Config-driven services (2026-08-24)
 services parsed from JSON; three defects fixed in the start path that had never executed; argonaut 1.10.0 for the enum parsers, service-set accessors and the oneshot-dependency fix. Harness now boots real services. 235 tests.

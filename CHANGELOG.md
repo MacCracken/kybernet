@@ -7,6 +7,108 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.5.1] — 2026-08-25
+
+**Boot stages that do something.** Requires **argonaut 1.10.1**. Suite
+235 → 255 assertions, 0 failures; both arches clean; harness green and back
+under the original 3000 ms budget.
+
+`execute_boot_stage(stage)` was a switch whose eleven arms *and* `default`
+all returned 1 — semantically `return 1;`. So `run_boot_stages` always took
+the success branch, `init_mark_step_failed` was unreachable, and the
+caller's `if (boot_r < 0)` emergency-drop path could never fire. Every
+`boot: <stage>` line an operator saw was theatre. 1.4.2 audit MEDIUM.
+
+### Added — three honest answers per stage
+
+`src/lib/boot_stages.cyr` (new). Each stage returns one of:
+
+- **`STAGE_OK`** — the work was performed or verified
+- **`STAGE_SKIP`** — this deployment does not perform this stage; argonaut
+  records `STEP_SKIPPED`, which `init_is_boot_complete` accepts
+- **`STAGE_FAIL`** — it should have worked and did not
+
+`SKIP` is the load-bearing addition. Several stages describe work kybernet
+genuinely does not do — it never starts udev; devtmpfs covers `/dev`. The
+two options before were to claim `COMPLETE` and lie, or `FAIL` and abort a
+healthy boot. Neither is honest, so argonaut 1.10.1 grew a third state.
+
+What each stage now actually checks:
+
+| Stage | Behaviour |
+|---|---|
+| `MOUNT_FS` | verifies `/proc`, `/sys`, `/dev` are really mounted — the first point that turns a failed required mount into a failed stage (phase 3's Err path only logs) |
+| `DEVICE_MGR` | verifies `/dev` is usable (`/dev/console` present), then **SKIP** — kybernet does not run udev |
+| `VERIFY_ROOTFS` | **OK** when edge verification applied, **SKIP** when the deployment never asked for it |
+| `SECURITY` | verifies the per-service sandbox hook is armed **before any service spawns** — a real ordering check, since a hook registered after the first spawn confines nothing. Probes Landlock support and logs if absent |
+| service groups | reports whether that group's services came up; a group with no services in this deployment is **SKIP**, not a failure |
+| `BOOT_COMPLETE` | reaching it is its completion |
+
+An unknown stage returns `SKIP` rather than silently passing — argonaut can
+add stages.
+
+### Changed — services start when a stage needs them
+
+Service-group stages report whether their services came up, so the services
+must have been attempted first. `run_boot_stages` now starts them on demand
+via an idempotent `ensure_services_started()`; phase 8 calls the same
+wrapper, covering modes whose sequence has no service stage. Previously
+those stages were evaluated *before* any service existed — part of why they
+all returned 1.
+
+### Changed — harness
+
+The QEMU config moves to `boot_mode: recovery`, whose sequence is the four
+early stages plus boot-complete and whose default service set is empty.
+Two consequences:
+
+- The stage outcomes are now assertable on a clean happy path. Previously
+  `BOOT_MINIMAL`'s required `STAGE_AGENT_RUNTIME` failed for real (daimon's
+  binary is not staged in the initramfs), so every harness boot routed
+  through the emergency shell — which masks whether stages actually succeed.
+- **Budget back to 3000 ms from 6000.** The 6000 existed for daimon's
+  10 × 200 ms ready-check retry against a port nothing listens on. Recovery
+  mode has no daimon, the retry disappears with it, and boots land at
+  **~650 ms** again.
+
+New gates: the `skipped (not applicable)` marker must appear, and
+`FATAL: required boot stage failed` must **not** — a check that could not
+have fired before 1.5.1, since a stage failure was structurally impossible.
+
+### Changed — the bench gate got a noise floor
+
+`MIN_DELTA_NS` (default 3). `cyrius bench` reports whole nanoseconds, so a
+benchmark at 2–5 ns/op moves ≥15% whenever it moves *at all* — one ns on a
+3 ns measurement is 33%. Three releases running, the only flagged
+regressions were 1–2 ns wobbles on sub-10 ns benchmarks in code the release
+never touched (`classify_signal`, `cgroup_file`, `Ok+is_ok`), each of which
+came back as an "improvement" the following release. A regression must now
+be **both** ≥15% and ≥3 ns absolute; sub-threshold percentage hits print as
+`noise` instead. A 15% regression on anything above ~20 ns/op still trips.
+A gate that cries wolf gets ignored, which is worse than no gate.
+
+### Upstream — argonaut 1.10.1
+
+`init_mark_step_skipped` (the third state), `init_service_ready` (the
+"is this service up" predicate, oneshot-aware), `init_boot_sequence`, and
+`config_set_boot_mode`.
+
+### Tests
+
+- `test_boot_stage_results` — each stage's honest answer, including that an
+  unknown stage does not pass and that `BOOT_COMPLETE` is not gated on
+  service state.
+- `test_boot_stage_security_requires_hook` — the security stage **fails**
+  with no hook registered and passes with one. This is the ordering
+  guarantee, asserted rather than assumed.
+- `test_boot_stage_service_groups` — a group whose service has not started
+  fails; a completed oneshot satisfies it; an absent group skips.
+- `test_required_stage_failure_propagates` — a failed required step blocks
+  `init_is_boot_complete`, while a **skipped** one does not. That contrast
+  is the whole reason for the third state.
+
+---
+
 ## [1.5.0] — 2026-08-24
 
 **Services actually come from config.** Requires **argonaut 1.10.0**. Suite

@@ -46,7 +46,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 KERNEL="${1:-}"
 TIMEOUT="${2:-15}"
-BUDGET_MS="${BUDGET_MS:-6000}"
+BUDGET_MS="${BUDGET_MS:-3000}"
 # Reactor-gate ceiling: a sleeping reactor wakes ~20-30 times in the 5s
 # window; the unfixed spin measured ~340,000/sec. 500 separates them by
 # three orders of magnitude without being flaky on a loaded runner.
@@ -142,7 +142,8 @@ for marker in \
     "kybernet: shutdown" \
     "kybernet: config: services parsed: 2" \
     "kybernet:   completed (oneshot): kyb-dep" \
-    "kybernet:   completed (oneshot): kyb-svc"; do
+    "kybernet:   completed (oneshot): kyb-svc" \
+    "kybernet: boot: skipped (not applicable): Start udev device manager"; do
     if echo "$RUNTIME_OUT" | grep -aqF "$marker"; then
         echo "  OK: $marker"
     else
@@ -156,28 +157,36 @@ if grep -aqE "Attempted to kill init|Kernel panic" "$LOG"; then
     fail=1
 fi
 
+# 1.5.1: no boot stage may fail in the harness. Before 1.5.1 this could not
+# have fired — execute_boot_stage returned 1 for all eleven stages, so
+# init_mark_step_failed was unreachable and a stage failure was structurally
+# impossible to observe. Now that stages do real work, a FATAL here means a
+# stage genuinely did not do its job.
+if echo "$RUNTIME_OUT" | grep -aqF "FATAL: required boot stage failed"; then
+    echo "  FAIL: a required boot stage failed"
+    echo "$RUNTIME_OUT" | grep -aF "FATAL: required boot stage failed" | head -3
+    fail=1
+else
+    echo "  OK: no boot stage failed"
+fi
+
 # Boot-time budget. Wall time includes qemu spin-up overhead (~200-400 ms)
 # so the budget is generous — the kernel-internal hand-off to phase 8 is
 # what we actually want to measure, but it's hard to get without
 # instrumenting the kernel. Wall time is the conservative proxy.
 #
-# Raised 3000 -> 6000 at 1.5.0, and the reason is not a regression: this is
-# the first release where the harness STARTS SERVICES AT ALL. Every earlier
-# boot resolved waves over `config_services()`, which was always empty, so
-# phase 8 did no work and 3000 ms was calibrated against a boot that forked
-# nothing.
+# History worth keeping: 1.5.0 raised this to 6000 because the harness
+# booted BOOT_MINIMAL, whose default set includes `daimon` — and daimon's
+# ready check is 10 x 200 ms of TCP connects against port 8090, which
+# nothing in the initramfs listens on because its binary is not staged.
+# That 2000 ms was argonaut correctly waiting on a service that could never
+# come up, not kybernet being slow.
 #
-# Measured cost of the new work: ~2000 ms of it is `daimon`, a BOOT_MINIMAL
-# default whose ready check is ready_check_new(..., retries=10,
-# retry_delay=200) — 10 x 200 ms of TCP-connect retries against port 8090,
-# which nothing in the initramfs listens on because daimon's binary
-# (/usr/lib/agnos/agent_runtime) is not staged. That is argonaut behaving
-# correctly for a service that fails to come up; it is not kybernet being
-# slow. Typical run is now ~2700 ms.
-#
-# The gate still bites: a reactor spin, a hang, or a genuinely slow boot
-# blows well past 6000 ms. If this ever needs raising again, find out what
-# is actually slow first — do not just move the number.
+# 1.5.1 moved the harness to BOOT_RECOVERY, whose sequence is the four
+# early stages plus boot-complete and whose default service set is empty.
+# The retry disappears with it and boots land at ~650 ms again, so the
+# budget goes back to 3000. If this ever needs raising, find out what is
+# actually slow first — do not just move the number.
 echo ""
 echo "  boot wall time: ${WALL_MS} ms (budget: ${BUDGET_MS} ms, includes qemu start)"
 if [ "$WALL_MS" -gt "$BUDGET_MS" ]; then

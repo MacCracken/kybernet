@@ -98,7 +98,7 @@ if [ -n "$BUSYBOX" ]; then
     mkdir -p "${INITRAMFS_DIR}/etc/kybernet"
     cat > "${INITRAMFS_DIR}/etc/kybernet/config.json" << 'CFGEOF'
 {
-  "boot_mode": "minimal",
+  "boot_mode": "recovery",
   "log_to_console": true,
   "shutdown_timeout_ms": 400,
   "services": [

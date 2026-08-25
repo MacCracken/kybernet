@@ -18,6 +18,9 @@ set -euo pipefail
 
 HISTORY_FILE="${1:-benches/history.csv}"
 REGRESS_PCT="${REGRESS_PCT:-15}"
+# Minimum absolute ns/op change for a percentage regression to count.
+# See the noise-floor note at the comparison below. 1.5.1.
+MIN_DELTA_NS="${MIN_DELTA_NS:-3}"
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
@@ -68,7 +71,25 @@ while IFS= read -r line; do
             RECORDED=$((RECORDED + 1))
             if [ -n "$PREV" ] && [ "$PREV" -gt 0 ] 2>/dev/null; then
                 DELTA=$(( (NS - PREV) * 100 / PREV ))
-                if [ "$DELTA" -ge "$REGRESS_PCT" ]; then
+                ABS=$(( NS - PREV ))
+                # Noise floor. `cyrius bench` reports whole nanoseconds, so
+                # a benchmark at 2-5 ns/op moves >=15% whenever it moves AT
+                # ALL — one ns on a 3 ns measurement is 33%. Three releases
+                # running, the only flagged "regressions" were 1-2 ns wobbles
+                # on sub-10 ns benchmarks in code the release never touched
+                # (classify_signal, cgroup_file, Ok+is_ok), each of which
+                # came back as an "improvement" the following release. A
+                # gate that cries wolf every time gets ignored, which is
+                # worse than no gate.
+                #
+                # So a regression must be BOTH >= REGRESS_PCT and at least
+                # MIN_DELTA_NS in absolute terms. That leaves real
+                # regressions on meaningful benchmarks fully covered — a
+                # 15% regression on anything above ~20 ns/op still trips —
+                # while sub-nanosecond quantisation noise no longer does.
+                if [ "$DELTA" -ge "$REGRESS_PCT" ] && [ "$ABS" -lt "$MIN_DELTA_NS" ]; then
+                    echo "  noise       ${NAME}: ${PREV} -> ${NS} ns/op (+${DELTA}%, ${ABS}ns < ${MIN_DELTA_NS}ns floor)"
+                elif [ "$DELTA" -ge "$REGRESS_PCT" ]; then
                     echo "  REGRESSION  ${NAME}: ${PREV} -> ${NS} ns/op (+${DELTA}%)"
                     REGRESSIONS=$((REGRESSIONS + 1))
                 elif [ "$DELTA" -le -5 ]; then

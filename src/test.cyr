@@ -19,6 +19,7 @@ include "src/lib/sandbox.cyr"
 include "src/lib/edge_boot.cyr"
 include "src/lib/svc_config.cyr"
 include "src/lib/service_sandbox.cyr"
+include "src/lib/boot_stages.cyr"
 
 # log.cyr's slog() short-circuits on g_log_fd <= 0; we never call
 # slog_init() in tests so the default 0 is the right starting state.
@@ -339,6 +340,113 @@ fn test_config_services_reach_argonaut() {
         }
     }
     assert_eq(found, vec_len(all), "e2e: every wave name resolves via str_data");
+    return 0;
+}
+
+# ---------------------------------------------------------------------
+# v1.5.1 — boot stages that do something.
+#
+# Before 1.5.1 execute_boot_stage was `return 1` for all eleven arms plus
+# default, so run_boot_stages always took the success branch,
+# init_mark_step_failed was unreachable, and the caller's emergency path
+# could never fire. These assert that each stage now produces an honest
+# answer and that a required failure actually propagates.
+fn test_boot_stage_results() {
+    println("--- boot stages (1.5.1) ---");
+
+    # Mounts: /proc and /sys are mounted wherever this test runs, so the
+    # real check must pass rather than being hardcoded.
+    assert_eq(execute_boot_stage_for(0, 0, STAGE_MOUNT_FS), STAGE_OK, "stage: mount_fs verifies");
+
+    # udev is genuinely not performed by kybernet — devtmpfs covers /dev.
+    # SKIP, not a false COMPLETE and not a failure.
+    assert_eq(execute_boot_stage_for(0, 0, STAGE_DEVICE_MGR), STAGE_SKIP, "stage: device_mgr skips");
+
+    # Rootfs verification only applies to an edge boot that asked for it.
+    var plain = argonaut_config_default();
+    assert_eq(execute_boot_stage_for(0, plain, STAGE_VERIFY_ROOTFS), STAGE_SKIP, "stage: verify skipped off-edge");
+    assert_eq(execute_boot_stage_for(0, 0, STAGE_VERIFY_ROOTFS), STAGE_SKIP, "stage: verify skipped w/o config");
+
+    # Reaching the final stage is its completion.
+    assert_eq(execute_boot_stage_for(0, 0, STAGE_BOOT_COMPLETE), STAGE_OK, "stage: boot_complete");
+
+    # An unknown stage must not silently pass as COMPLETE.
+    assert_eq(execute_boot_stage_for(0, 0, 999), STAGE_SKIP, "stage: unknown does not pass");
+
+    # Only service-group stages need services started first.
+    assert_eq(boot_stage_needs_services(STAGE_MOUNT_FS), 0, "needs_services: mount no");
+    assert_eq(boot_stage_needs_services(STAGE_SECURITY), 0, "needs_services: security no");
+    assert_eq(boot_stage_needs_services(STAGE_DATABASE), 1, "needs_services: database yes");
+    assert_eq(boot_stage_needs_services(STAGE_AGENT_RUNTIME), 1, "needs_services: agent yes");
+    assert_eq(boot_stage_needs_services(STAGE_SHELL), 1, "needs_services: shell yes");
+    return 0;
+}
+
+fn test_boot_stage_security_requires_hook() {
+    println("--- boot stage: security (1.5.1) ---");
+    # The security stage's real assertion is that the per-service sandbox
+    # is armed BEFORE any service can spawn — a hook registered after the
+    # first spawn confines nothing, so this is an ordering check.
+    var prev = argonaut_set_pre_exec_hook(0);
+    assert_eq(execute_boot_stage_for(0, 0, STAGE_SECURITY), STAGE_FAIL, "stage: security fails w/o hook");
+
+    argonaut_set_pre_exec_hook(&kyb_pre_exec);
+    assert_eq(execute_boot_stage_for(0, 0, STAGE_SECURITY), STAGE_OK, "stage: security ok with hook");
+    argonaut_set_pre_exec_hook(prev);
+    return 0;
+}
+
+fn test_boot_stage_service_groups() {
+    println("--- boot stage: service groups (1.5.1) ---");
+    # BOOT_RECOVERY so default_services() is empty — otherwise argonaut
+    # registers its OWN `daimon` first and argonaut_init_new skips the
+    # same-named one below (map_has guard), leaving the stage checking a
+    # default that was never started.
+    var cfg = config_set_boot_mode(argonaut_config_default(), BOOT_RECOVERY);
+
+    # A oneshot that has run to completion counts as up.
+    var ok_svc = svc_def_new(str_from("daimon"), str_from("d"), str_from("/bin/true"));
+    svc_def_set_service_type(ok_svc, SVC_ONESHOT);
+    vec_push(config_services(cfg), ok_svc);
+
+    var init = argonaut_init_new(cfg);
+
+    # Not yet started: the stage must report failure, not success.
+    assert_eq(execute_boot_stage_for(init, cfg, STAGE_AGENT_RUNTIME), STAGE_FAIL, "group: not started fails");
+
+    init_start_service(init, "daimon");
+    assert_eq(execute_boot_stage_for(init, cfg, STAGE_AGENT_RUNTIME), STAGE_OK, "group: completed oneshot ok");
+
+    # A group with no services in this deployment is SKIP — BOOT_MINIMAL
+    # has no postgres, and that is not a failure.
+    assert_eq(execute_boot_stage_for(init, cfg, STAGE_COMPOSITOR), STAGE_SKIP, "group: absent group skips");
+    return 0;
+}
+
+# The property 1.5.1 exists to restore: a FAILING REQUIRED stage must be
+# recorded as failed and must be visible to the caller. Before 1.5.1 no
+# stage could fail, so init_mark_step_failed and the emergency path were
+# both dead code.
+fn test_required_stage_failure_propagates() {
+    println("--- required stage failure (1.5.1) ---");
+    var cfg = argonaut_config_default();
+    var init = argonaut_init_new(cfg);
+
+    # STAGE_MOUNT_FS is required=1 in every mode's sequence.
+    assert_eq(init_mark_step_failed(init, STAGE_MOUNT_FS, "test"), 1, "fail: step marked failed");
+    assert_eq(init_is_boot_complete(init), 0, "fail: required failure blocks boot-complete");
+
+    # A SKIPPED step, by contrast, must NOT block boot completion —
+    # that is the whole reason argonaut 1.10.1 grew the third state.
+    var c2 = argonaut_config_default();
+    var i2 = argonaut_init_new(c2);
+    assert_eq(init_mark_step_skipped(i2, STAGE_DEVICE_MGR, "not performed"), 1, "skip: step marked skipped");
+    var steps = init_boot_sequence(i2);
+    var found_skipped = 0;
+    for (var i = 0; i < vec_len(steps); i = i + 1) {
+        if (load64(vec_get(steps, i) + 32) == STEP_SKIPPED) { found_skipped = 1; }
+    }
+    assert_eq(found_skipped, 1, "skip: status is STEP_SKIPPED");
     return 0;
 }
 
@@ -1063,6 +1171,10 @@ fn main() {
     test_svc_config_parse();
     test_svc_config_health_check();
     test_config_services_reach_argonaut();
+    test_boot_stage_results();
+    test_boot_stage_security_requires_hook();
+    test_boot_stage_service_groups();
+    test_required_stage_failure_propagates();
     test_eventloop_setup_full();
     test_reaper_macros();
     test_signal_buffer();

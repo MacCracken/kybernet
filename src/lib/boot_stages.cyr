@@ -1,0 +1,171 @@
+# kybernet/boot_stages.cyr — what each boot stage actually does
+# Requires: mount.cyr, sandbox.cyr, seccomp.cyr, edge_boot.cyr, argonaut
+#
+# Before 1.5.1 `execute_boot_stage(stage)` was a switch whose eleven arms
+# and `default` all returned 1 — semantically `return 1;`. `run_boot_stages`
+# therefore always took the success branch, `init_mark_step_failed` was
+# unreachable, and the caller's `if (boot_r < 0)` emergency path could never
+# fire. The whole apparatus reported success it never earned, and every
+# operator-visible "boot: <stage>" line was theatre. 1.4.2 audit MEDIUM.
+#
+# Each stage now returns one of three honest answers:
+#
+#   STAGE_OK    — the stage's work was performed or verified
+#   STAGE_SKIP  — this deployment does not perform this stage. NOT a
+#                 failure and NOT a success; argonaut records STEP_SKIPPED
+#                 (1.10.1), which init_is_boot_complete accepts.
+#   STAGE_FAIL  — the stage should have worked and did not. A *required*
+#                 stage failing now genuinely aborts the sequence and
+#                 reaches drop_to_emergency.
+#
+# SKIP is the important addition. Several stages describe work kybernet
+# does not do (it never starts udev; devtmpfs covers /dev). The two
+# pre-1.5.1 options were to claim COMPLETE and lie, or FAIL and abort a
+# healthy boot. Neither is honest, so argonaut grew a third.
+#
+# Where a stage's work happened EARLIER in kybernet's boot (mounts at phase
+# 3, rootfs verification at phase 6c), the stage verifies the outcome rather
+# than redoing it — the point is that "complete" reflects real state.
+
+enum BootStageResult {
+    STAGE_FAIL = 0;
+    STAGE_OK = 1;
+    STAGE_SKIP = 2;
+}
+
+# ---- individual stages -------------------------------------------------
+
+# The essential filesystems must actually be mounted. mount_essential ran at
+# phase 3 and its Err path only logs (kybernet continues so it can reach an
+# emergency shell), so this is the first point that turns a failed required
+# mount into a failed boot stage.
+fn _stage_mount_fs() {
+    if (is_mounted("/proc") == 0) { return STAGE_FAIL; }
+    if (is_mounted("/sys") == 0)  { return STAGE_FAIL; }
+    if (is_mounted("/dev") == 0)  { return STAGE_FAIL; }
+    return STAGE_OK;
+}
+
+# kybernet does not run udev, and has no plan to: /dev is populated by
+# devtmpfs, mounted at phase 1 before anything else. So the stage as
+# argonaut describes it ("Start udev device manager") is genuinely not
+# performed — but the *outcome* it exists to guarantee, a usable /dev, is
+# still checkable. Verify that, then report SKIP rather than claiming to
+# have started a device manager.
+fn _stage_device_mgr() {
+    if (is_mounted("/dev") == 0) { return STAGE_FAIL; }
+    # /dev/console is what console.cyr redirected stdio to at phase 2; if
+    # devtmpfs did not populate, this is absent.
+    if (sys_access("/dev/console", 0) != 0) { return STAGE_FAIL; }
+    return STAGE_SKIP;
+}
+
+# Rootfs verification is edge-boot's job and already ran at phase 6c —
+# kybernet powers off there if a required prerequisite was missing (1.4.2
+# HIGH-2), so reaching this stage at all means the gate did not refuse.
+# Report OK when verification actually applied, SKIP when the deployment
+# never asked for it.
+fn _stage_verify_rootfs(config) {
+    if (config == 0) { return STAGE_SKIP; }
+    if (config_boot_mode(config) != BOOT_EDGE) { return STAGE_SKIP; }
+    if (config_verify_boot(config) == 0) { return STAGE_SKIP; }
+    # edge_boot_run recorded what it found. dm-verity support is the
+    # property this stage is named for.
+    if (edge_boot_dmverity_supp() == 0) { return STAGE_FAIL; }
+    return STAGE_OK;
+}
+
+# "Initialize Landlock, seccomp, and MAC policies."
+#
+# kybernet's policy is installed per service in the child between fork and
+# exec (src/lib/service_sandbox.cyr, via argonaut's pre-exec hook). What
+# this stage can honestly assert is that the mechanism is armed BEFORE any
+# service spawns — a hook registered after the first spawn confines
+# nothing, so this is a real ordering check, not a formality.
+fn _stage_security() {
+    if (argonaut_pre_exec_hook() == 0) { return STAGE_FAIL; }
+
+    # Probe kernel support so the operator learns now, not when a service
+    # is silently unconfined. Absence is not fatal — policy is opt-in per
+    # service and a kernel without Landlock is a legitimate deployment —
+    # but it is worth a line in the log.
+    var ll = _landlock_create_ruleset();
+    if (ll < 0) {
+        klog("boot: Landlock unavailable on this kernel (policy will be seccomp-only)");
+    } else {
+        sys_close(ll);
+    }
+    return STAGE_OK;
+}
+
+# ---- service-group stages ---------------------------------------------
+#
+# STAGE_DATABASE, STAGE_AGENT_RUNTIME, STAGE_LLM_GATEWAY,
+# STAGE_MODEL_SERVICES, STAGE_COMPOSITOR and STAGE_SHELL each name a group
+# of services argonaut's default set defines. kybernet starts services in
+# dependency waves, so by the time a stage is evaluated its services have
+# been attempted; the stage's job is to report whether they came up.
+#
+# A service absent from this deployment is not a failure — BOOT_MINIMAL has
+# no postgres — so an empty group is SKIP.
+fn _stage_services_ready(init, a, b) {
+    var present = 0;
+    var ready = 0;
+
+    if (a != 0) {
+        if (init_get_service(init, a) != 0) {
+            present = present + 1;
+            if (init_service_ready(init, a) == 1) { ready = ready + 1; }
+        }
+    }
+    if (b != 0) {
+        if (init_get_service(init, b) != 0) {
+            present = present + 1;
+            if (init_service_ready(init, b) == 1) { ready = ready + 1; }
+        }
+    }
+
+    if (present == 0) { return STAGE_SKIP; }
+    if (ready == present) { return STAGE_OK; }
+    return STAGE_FAIL;
+}
+
+# Does this stage's completion depend on services having been started?
+# run_boot_stages uses this to start services before evaluating one.
+fn boot_stage_needs_services(stage) {
+    if (stage == STAGE_DATABASE)       { return 1; }
+    if (stage == STAGE_AGENT_RUNTIME)  { return 1; }
+    if (stage == STAGE_LLM_GATEWAY)    { return 1; }
+    if (stage == STAGE_MODEL_SERVICES) { return 1; }
+    if (stage == STAGE_COMPOSITOR)     { return 1; }
+    if (stage == STAGE_SHELL)          { return 1; }
+    return 0;
+}
+
+# The stage dispatcher. `init` and `config` are passed in rather than read
+# from globals so test.cyr can drive this without a booted system.
+fn execute_boot_stage_for(init, config, stage) {
+    if (stage == STAGE_MOUNT_FS)      { return _stage_mount_fs(); }
+    if (stage == STAGE_DEVICE_MGR)    { return _stage_device_mgr(); }
+    if (stage == STAGE_VERIFY_ROOTFS) { return _stage_verify_rootfs(config); }
+    if (stage == STAGE_SECURITY)      { return _stage_security(); }
+
+    # Nothing to verify — reaching it IS the completion. Deliberately ahead
+    # of the `init == 0` guard: it depends on no service state, and
+    # answering SKIP here would understate a boot that really did finish.
+    if (stage == STAGE_BOOT_COMPLETE) { return STAGE_OK; }
+
+    # Every remaining stage is a service group, which needs the registry.
+    if (init == 0) { return STAGE_SKIP; }
+
+    # Service names are argonaut's default-set names; see default_services.
+    if (stage == STAGE_DATABASE)       { return _stage_services_ready(init, "postgres", "redis"); }
+    if (stage == STAGE_AGENT_RUNTIME)  { return _stage_services_ready(init, "daimon", 0); }
+    if (stage == STAGE_LLM_GATEWAY)    { return _stage_services_ready(init, "llm-gateway", 0); }
+    if (stage == STAGE_MODEL_SERVICES) { return _stage_services_ready(init, "ifran", 0); }
+    if (stage == STAGE_COMPOSITOR)     { return _stage_services_ready(init, "aethersafha", 0); }
+    if (stage == STAGE_SHELL)          { return _stage_services_ready(init, "agnoshi", 0); }
+
+    # An unknown stage must not silently pass. argonaut could add one.
+    return STAGE_SKIP;
+}

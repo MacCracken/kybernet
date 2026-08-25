@@ -458,3 +458,54 @@ timestamp,commit,branch,benchmark,ns_per_op
 2026-08-24T23:47:58Z,7d1043f,main,cgroup_limits(new+2set+2get),37
 2026-08-24T23:47:58Z,7d1043f,main,resource_limits(new+3get),22
 2026-08-24T23:47:58Z,7d1043f,main,capability_set(new+3push),208
+2026-08-25T00:12:10Z,4ee9458,main,getpid,287
+2026-08-25T00:12:10Z,4ee9458,main,getuid,281
+2026-08-25T00:12:10Z,4ee9458,main,is_root,294
+2026-08-25T00:12:10Z,4ee9458,main,classify_signal,3
+2026-08-25T00:12:10Z,4ee9458,main,is_handled_signal,8
+2026-08-25T00:12:10Z,4ee9458,main,sigset_new+add+has,22
+2026-08-25T00:12:10Z,4ee9458,main,epoll_event_new,13
+2026-08-25T00:12:10Z,4ee9458,main,timerspec_new,16
+2026-08-25T00:12:10Z,4ee9458,main,W* macros (4 calls),11
+2026-08-25T00:12:10Z,4ee9458,main,knotify_classify(READY),15
+2026-08-25T00:12:10Z,4ee9458,main,knotify_classify+value,50
+2026-08-25T00:12:10Z,4ee9458,main,cgroup_path,4
+2026-08-25T00:12:10Z,4ee9458,main,cgroup_file (best case, same pair),4
+2026-08-25T00:12:10Z,4ee9458,main,cgroup_file (5-file burst, per call),104
+2026-08-25T00:12:10Z,4ee9458,main,is_mounted(/proc),50
+2026-08-25T00:12:10Z,4ee9458,main,seccomp_build(5 syscalls),365
+2026-08-25T00:12:10Z,4ee9458,main,seccomp_basic_service+build,1678
+2026-08-25T00:12:10Z,4ee9458,main,sandbox_basic_service,212
+2026-08-25T00:12:10Z,4ee9458,main,str_builder(3 segments),278
+2026-08-25T00:12:10Z,4ee9458,main,str_builder(cstr+int mix),263
+2026-08-25T00:12:10Z,4ee9458,main,Ok+is_ok,14
+2026-08-25T00:12:10Z,4ee9458,main,Err+is_err_result,14
+2026-08-25T00:12:10Z,4ee9458,main,Some+is_some+unwrap,25
+2026-08-25T00:12:10Z,4ee9458,main,vec(push*3+get*2+len),74
+2026-08-25T00:12:10Z,4ee9458,main,mount_table_init,30
+2026-08-25T00:12:10Z,4ee9458,main,owned_fd_new+raw,13
+2026-08-25T00:12:10Z,4ee9458,main,memeq (2 calls),20
+2026-08-25T00:12:10Z,4ee9458,main,strlen(52 chars),25
+2026-08-25T00:12:10Z,4ee9458,main,memcpy(128 bytes),206
+2026-08-25T00:12:10Z,4ee9458,main,memset(128 bytes),185
+2026-08-25T00:12:10Z,4ee9458,main,epoll(new+add+close),7744
+2026-08-25T00:12:10Z,4ee9458,main,epoll_wait(timeout=0),303
+2026-08-25T00:12:10Z,4ee9458,main,event_token+flags,4
+2026-08-25T00:12:10Z,4ee9458,main,timer_new+close,4431
+2026-08-25T00:12:10Z,4ee9458,main,klog_sim(3 writes),965
+2026-08-25T00:12:10Z,4ee9458,main,klog2_sim(4 writes),1286
+2026-08-25T00:12:10Z,4ee9458,main,notify_status_value(2),21
+2026-08-25T00:12:10Z,4ee9458,main,seccomp_from_profile,161
+2026-08-25T00:12:10Z,4ee9458,main,sandbox(new+3 rules+count),127
+2026-08-25T00:12:10Z,4ee9458,main,sandbox_from_ruleset(2 rules),2860
+2026-08-25T00:12:10Z,4ee9458,main,set_no_new_privs,424
+2026-08-25T00:12:10Z,4ee9458,main,drop_caps(non-root err),295
+2026-08-25T00:12:10Z,4ee9458,main,secure_pre_exec(non-root),316
+2026-08-25T00:12:10Z,4ee9458,main,hashmap(3 set+4 get/has),901
+2026-08-25T00:12:10Z,4ee9458,main,alloc(4 sizes burst),36
+2026-08-25T00:12:10Z,4ee9458,main,alloc(3)+reset+init,532
+2026-08-25T00:12:10Z,4ee9458,main,security_context(new+4 get),80
+2026-08-25T00:12:10Z,4ee9458,main,agent_config(new+get+set),116
+2026-08-25T00:12:10Z,4ee9458,main,cgroup_limits(new+2set+2get),37
+2026-08-25T00:12:10Z,4ee9458,main,resource_limits(new+3get),22
+2026-08-25T00:12:10Z,4ee9458,main,capability_set(new+3push),211
