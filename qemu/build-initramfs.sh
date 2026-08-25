@@ -258,8 +258,11 @@ sudo chmod 666 "${INITRAMFS_DIR}/dev/console" "${INITRAMFS_DIR}/dev/null" "${INI
 EDGE_DIR="${SCRIPT_DIR}/edge"
 if command -v veritysetup >/dev/null 2>&1; then
     rm -rf "$EDGE_DIR"; mkdir -p "$EDGE_DIR"
-    dd if=/dev/urandom of="${EDGE_DIR}/data.img" bs=1M count=4 status=none
-    truncate -s 2M "${EDGE_DIR}/hash.img"
+    # 1 MiB, not 4: CI runners have no KVM, so the edge passes run under
+    # TCG where every hashed block is emulated. 1 MiB is still a real
+    # Merkle tree over 256 blocks — the round trip is genuine, just cheap.
+    dd if=/dev/urandom of="${EDGE_DIR}/data.img" bs=1M count=1 status=none
+    truncate -s 1M "${EDGE_DIR}/hash.img"
     EDGE_ROOT_HASH=$(veritysetup format "${EDGE_DIR}/data.img" "${EDGE_DIR}/hash.img" 2>/dev/null \
         | awk '/Root hash/{print $3}')
 
@@ -269,12 +272,32 @@ if command -v veritysetup >/dev/null 2>&1; then
         # binary, just with more libraries.
         EDGE_STAGE="${SCRIPT_DIR}/initramfs-edge"
         rm -rf "$EDGE_STAGE"
-        cp -a "${INITRAMFS_DIR}" "$EDGE_STAGE"
-        mkdir -p "${EDGE_STAGE}/usr/bin" "${EDGE_STAGE}/usr/lib" "${EDGE_STAGE}/lib64"
+        mkdir -p "$EDGE_STAGE"
+        # Copy everything EXCEPT ./dev. The device nodes were created by the
+        # `sudo mknod` block above, and recreating them needs CAP_MKNOD —
+        # `cp -a` of a character device fails with EPERM for an unprivileged
+        # user, which under `set -e` killed the whole build on CI. They are
+        # re-made below with the same best-effort pattern the main tree uses.
+        tar -cf - -C "${INITRAMFS_DIR}" --exclude=./dev . | tar -xf - -C "$EDGE_STAGE"
+        mkdir -p "${EDGE_STAGE}/dev" "${EDGE_STAGE}/usr/bin" "${EDGE_STAGE}/usr/lib" "${EDGE_STAGE}/lib64"
+        sudo mknod "${EDGE_STAGE}/dev/console" c 5 1 2>/dev/null || true
+        sudo mknod "${EDGE_STAGE}/dev/null"    c 1 3 2>/dev/null || true
+        sudo mknod "${EDGE_STAGE}/dev/ttyS0"   c 4 64 2>/dev/null || true
+        sudo mknod "${EDGE_STAGE}/dev/kmsg"    c 1 11 2>/dev/null || true
+        sudo chmod 666 "${EDGE_STAGE}/dev/console" "${EDGE_STAGE}/dev/null" \
+            "${EDGE_STAGE}/dev/ttyS0" "${EDGE_STAGE}/dev/kmsg" 2>/dev/null || true
         VS=$(command -v veritysetup)
         cp "$VS" "${EDGE_STAGE}/usr/bin/veritysetup"
+        # Stage every shared object at its ORIGINAL absolute path, not into
+        # a single /usr/lib. There is no ld.so.cache in the initramfs, so the
+        # loader falls back to its compiled-in defaults — which on a
+        # multiarch distro (Ubuntu, as CI runs) are
+        # /lib/x86_64-linux-gnu and /usr/lib/x86_64-linux-gnu, NOT /usr/lib.
+        # Flattening them worked on Arch and would have silently produced an
+        # unrunnable veritysetup on the runner.
         for lib in $(ldd "$VS" 2>/dev/null | awk '{print $3}' | grep '^/'); do
-            cp -L "$lib" "${EDGE_STAGE}/usr/lib/" 2>/dev/null || true
+            mkdir -p "${EDGE_STAGE}$(dirname "$lib")"
+            cp -L "$lib" "${EDGE_STAGE}${lib}" 2>/dev/null || true
         done
         LOADER=$(ldd "$VS" 2>/dev/null | awk '/ld-linux/{print $1}')
         if [ -n "$LOADER" ] && [ -f "$LOADER" ]; then
