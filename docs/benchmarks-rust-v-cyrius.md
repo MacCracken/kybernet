@@ -1,5 +1,33 @@
 # Kybernet: Rust vs Cyrius Comparison
 
+> **Historical snapshot — not maintained.** Every figure below was measured at
+> **v1.0.0** and is preserved as a record of the port, not as current fact. Two things
+> a reader should know before using any number here:
+>
+> - **The Rust tree is gone.** `rust-old/` was deleted at **v1.5.4**, once the last
+>   behaviours it still held over the Cyrius port were closed. It remains in git
+>   history. Nothing in this document can be re-measured against it without checking
+>   that tree back out.
+> - **The Cyrius side has moved a long way.** The 486 KB binary below predates dead-code
+>   elimination and **31 releases** of feature work; the current DCE build is ~1.45 MB —
+>   *three times larger*, not smaller, because it now carries per-service security
+>   enforcement, cgroup limits, deferred restarts and verified boot that the v1.0.0
+>   binary did not. The document's prediction that "binary size will drop
+>   significantly" with DCE turned out backwards: DCE is now the standard build flag and
+>   the binary grew anyway. Current numbers live in [CHANGELOG.md](../CHANGELOG.md) and
+>   `benches/history.csv`.
+> - **Several "Cyrius column" claims were later reversed.** The Rust implementation's
+>   PendingRestart queue and its authenticated emergency shell — both listed below as
+>   Rust-only design differences — were re-adopted at **v1.5.4** and **v1.5.8**
+>   respectively. Where the two columns disagree, check the CHANGELOG before believing
+>   the Cyrius side still differs.
+> - **Forward references below are stale.** Lines pointing at "v1.0.1 milestone" and
+>   similar targets were written before the work was resequenced; most of it has since
+>   shipped under a different number.
+>
+> For current performance figures use `bash scripts/bench-history.sh`, which records
+> per-benchmark ns/op and gates on regressions.
+
 Kybernet was rewritten from Rust to Cyrius in v0.9.0 (2026-04-05). This document compares the two implementations as of v1.0.0.
 
 ## Binary Size
@@ -137,6 +165,14 @@ Cyrius QEMU boot times pending (v1.0.1 milestone).
 **Rust**: Uses Cargo ecosystem (105 crates), `nix` for safe syscall wrappers, `serde_json` for config, `tracing` for structured logging. PendingRestart queue with dedicated timerfd for restart scheduling. Emergency shell with password authentication.
 
 **Cyrius**: Zero external package manager. Direct Linux syscalls via agnosys. JSON parsing via stdlib json.cyr. Structured logging via single-write JSON lines. Restart scheduling delegated to argonaut's `backoff_delay()`. Emergency shell via fork+exec. Security features (seccomp, landlock, capabilities) implemented natively instead of through argonaut feature flags.
+
+> **Superseded.** Three of those statements no longer describe kybernet:
+> `agnosys` was dropped at 1.3.5 (syscalls come from the cyrius stdlib);
+> `json.cyr` was folded into `bayan` at 1.3.4; and restart scheduling is no
+> longer "delegated to `backoff_delay()`" — argonaut computed the backoff but
+> nothing ever waited on it, so **v1.5.4 re-adopted the Rust column's design**,
+> a PendingRestart queue with a dedicated `TOKEN_RESTART` timerfd. The
+> authenticated emergency shell came back at **v1.5.8** for the same reason.
 
 ## Conclusions
 

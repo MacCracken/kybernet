@@ -7,7 +7,7 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [1.5.8] — 2026-08-24
+## [1.5.8] — 2026-08-25
 
 **The emergency-auth gate did not work at all, and on an edge board it was a
 reboot loop.** Suite 477 → 491 assertions, 0 failures. No dep change.
@@ -154,7 +154,7 @@ emergency gate runs at most once, and only on a boot that already failed.
 
 ---
 
-## [1.5.7] — 2026-08-24
+## [1.5.7] — 2026-08-25
 
 **Edge boot actually verifies, and stops being a poweroff trap.** Suite
 440 → 477 assertions, 0 failures. Requires **argonaut 1.13.2**.
@@ -356,7 +356,7 @@ hundred times per boot, from logging.
 
 ---
 
-## [1.5.6] — 2026-08-24
+## [1.5.6] — 2026-08-25
 
 **aarch64 service spawning was broken in a dependency, and the lock was
 missing two commit pins.** No kybernet source change. Requires **argonaut
@@ -419,7 +419,7 @@ No regressions; five improvements, largest `restart_queue_pop_due_empty`
 
 ---
 
-## [1.5.5] — 2026-08-24
+## [1.5.5] — 2026-08-25
 
 **Per-service cgroup limits are configured, applied, and proven.** Suite
 409 → 440 assertions, 0 failures. Requires **argonaut 1.13.0** and
@@ -587,7 +587,7 @@ otherwise.
 
 ---
 
-## [1.5.4] — 2026-08-24
+## [1.5.4] — 2026-08-25
 
 **The Rust port is complete; `rust-old/` is deleted.** Suite 309 → 409
 assertions, 0 failures. Requires **argonaut 1.12.0**.
