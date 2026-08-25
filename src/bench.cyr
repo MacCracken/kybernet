@@ -214,7 +214,39 @@ fn bench_cgroup_file_burst() {
 # Mount table init + is_mounted check
 # ================================================================
 
+# ⚠ HERMETIC ON PURPOSE. This used to call `is_mounted("/proc")` against the
+# host's real /proc/self/mounts, which made it measure THE MACHINE rather
+# than kybernet: `is_mounted` scans the cached table byte by byte and returns
+# at the first match, so its cost is "how many bytes before /proc appears".
+# A dev box with 27 mounts and a CI runner with a Docker/overlay table are
+# nowhere near each other.
+#
+# It failed CI at 1.6.1 for exactly that: 48 -> 445 ns/op, +641%, while every
+# other benchmark in the same run IMPROVED. Nothing in kybernet had changed.
+# The calibration loop normalises CPU speed; it cannot normalise how much
+# data the host hands you, so a benchmark over host-shaped input can never be
+# regression-gated across machines.
+#
+# The fix is to give it a FIXED table. `/proc` is placed last so every run
+# scans the whole buffer — deterministic, and the worst case rather than a
+# lucky early hit.
 fn bench_is_mounted() {
+    _mount_cache_invalidate();
+    var synth = alloc(4096);
+    var pos = 0;
+    var filler = "tmpfs /run/pad tmpfs rw,nosuid,nodev,mode=755 0 0\n";
+    var flen = strlen(filler);
+    while (pos + flen < 2048) {
+        memcpy(synth + pos, filler, flen);
+        pos = pos + flen;
+    }
+    var tail = "proc /proc proc rw,nosuid,nodev,noexec 0 0\n";
+    var tlen = strlen(tail);
+    memcpy(synth + pos, tail, tlen);
+    pos = pos + tlen;
+    _mount_cache = synth;
+    _mount_cache_len = pos;
+
     var iters = 10000;
     var start = now_ns();
     var k = 0;
@@ -222,7 +254,12 @@ fn bench_is_mounted() {
         is_mounted("/proc");
         k = k + 1;
     }
-    report("is_mounted(/proc)", now_ns() - start, iters);
+    var elapsed = now_ns() - start;
+    # Confirm it actually matched — a benchmark of a miss would scan the same
+    # bytes and report a plausible number while measuring the wrong path.
+    if (is_mounted("/proc") != 1) { println("  WARNING: bench_is_mounted did not match"); }
+    _mount_cache_invalidate();
+    report("is_mounted(/proc, 2KiB fixed table)", elapsed, iters);
     return 0;
 }
 
@@ -316,27 +353,44 @@ fn bench_emerg_cred_parse() {
     return 0;
 }
 
-# The cheapest record kybernet will accept: m=8192 KiB (the memory floor),
-# t=1. Deliberately NOT the m=19456/t=2 default — at ~230 ms/op that would
-# add minutes to every bench run for no extra signal, since cost scales with
-# m*t and this measures the same code.
+# ⚠ CACHE-RESIDENT ON PURPOSE — this measures the KDF's CODE PATH, not its
+# production cost.
+#
+# Argon2 is memory-HARD: at kybernet's m=8192 floor it touches 8 MiB, which
+# overflows L2 and lands in L3/DRAM. The regression gate's calibration loop is
+# a tight dependent-chain integer loop — pure ALU — so a memory-bandwidth-bound
+# benchmark does not track it, and the ratio between two machines' ALU speed
+# and their memory subsystems is not the same number. That is the same class
+# of defect as `is_mounted` scanning the host's real mount table (see
+# bench_is_mounted): a benchmark the calibration cannot normalise is one that
+# cannot be gated across machines.
+#
+# So this calls `argon2id_into` directly at m=64 KiB, which stays in cache and
+# therefore scales with the calibration. It exercises H0, the fill schedule,
+# the finalizer and the arena contract — everything except the DRAM traffic.
+#
+# The production cost is a POLICY number, not a regression signal, and it
+# lives in CHANGELOG 1.5.9 with its measurements (m=19456/t=2 -> 232 ms here,
+# and the m*t <= 131072 work cap derived from it). Re-measure it deliberately
+# when the parameters change; do not infer it from this line.
 fn bench_emerg_cred_verify_floor() {
-    var esc = emergency_shell_default();
-    store64(esc + 24, 1);
-    var vb = str_builder_new();
-    str_builder_add_cstr(vb, "v1$1$8192$1$6b796265726e65742d746573742d3031$");
-    str_builder_add_cstr(vb, "ec828a05303abe80988a455c9ed2e4b07a0d5f08");
-    str_builder_add_cstr(vb, "9b1a375c105e96aa9a310640");
-    store64(esc + 32, str_builder_build(vb));
-    var pw = str_from("hunter2");
-    var iters = 20;
+    var m = 64;
+    var mem = alloc(argon2_mem_bytes(m, 1));
+    var out = alloc(32);
+    var salt = alloc(16);
+    for (var i = 0; i < 16; i = i + 1) { store8(salt + i, 65 + i); }
+    var iters = 200;
     var start = now_ns();
     var k = 0;
+    var rc = 0;
     while (k < iters) {
-        kyb_verify_emergency_auth(esc, pw);
+        rc = argon2id_into(mem, "hunter2", 7, salt, 16, 1, m, 1, out, 32);
         k = k + 1;
     }
-    report("emerg_verify argon2id (m=8192 t=1)", now_ns() - start, iters);
+    var elapsed = now_ns() - start;
+    # A failed call returns early and would time almost nothing.
+    if (rc != 0) { println("  WARNING: bench argon2id_into returned an error"); }
+    report("argon2id_into (m=64 cache-resident)", elapsed, iters);
     return 0;
 }
 

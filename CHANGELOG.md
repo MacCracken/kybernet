@@ -10,8 +10,13 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [1.6.1] — 2026-08-25
 
 **Gates that could not fail, and the kernel panic the first new one found.**
-Suite 608 → 632 assertions. Harness 44 → 45 properties. argonaut 1.13.2 →
-1.13.3; no other dep change.
+Suite 608 → 632 assertions. Harness 44 → 45 properties. 55 → 57 benchmarks.
+argonaut 1.13.2 → 1.13.3; no other dep change.
+
+⚠ The first cut of this release failed its own new benchmark gate, and the
+three benchmark fixes below are the result. They are folded in here rather
+than split into a follow-up: a release whose CI went red did not ship, so
+there is one 1.6.1 and this is it.
 
 1.6.0 shipped four defects that had survived three releases, and every one of
 them survived because a gate could not see it or could not go red. This
@@ -78,6 +83,65 @@ was discarded and the status was swallowed into an `awk` pipe, so `hits` was
 always empty and the check always reported clean. It was the helper's only
 caller. Verified both ways: the old pattern finds nothing in a file containing
 a literal `system(` call; the new one finds it.
+
+### Fixed — `is_mounted` benchmarked the machine, not kybernet
+
+CI reported `is_mounted(/proc): 48 -> 445 ns/op, +641%` while **every other
+benchmark in the same run improved** — the runner is simply faster at
+syscalls than the box that recorded history, and the calibration normalisation
+handled that correctly (`getpid` -42%, `set_no_new_privs` -50%). One
+benchmark did not fit, and nothing in kybernet had changed.
+
+`is_mounted` scans the cached `/proc/self/mounts` byte by byte and returns at
+the first match, so its cost is *how many bytes of the host's mount table sit
+before the target*. A dev box with 27 mounts and a CI runner carrying Docker
+and overlay mounts are nowhere near each other.
+
+**1.6.0's calibration loop normalises CPU speed. It cannot normalise how much
+data the host hands you.** A benchmark over host-shaped input can therefore
+never be regression-gated across machines, and that is a property of the
+benchmark, not a threshold to tune.
+
+The benchmark now installs a **fixed 2 KiB synthetic mount table** with
+`/proc` placed last, so every run scans the same bytes and takes the worst
+case rather than a lucky early hit. Renamed to
+`is_mounted(/proc, 2KiB fixed table)` so it is obvious the input is
+synthetic. Measured spread across three consecutive local runs: 4075 / 4013 /
+4004 ns/op — 1.8 %. It also now asserts the lookup actually matched, since a
+benchmark of a *miss* would scan the same bytes and report a plausible number
+while measuring the wrong path.
+
+### Changed — the Argon2 benchmark was the same defect, not yet fired
+
+`emerg_verify argon2id (m=8192 t=1)` had not failed, but it is the identical
+class and would have eventually: Argon2 is memory-**hard**, so at the m=8192
+floor it touches 8 MiB and lands in L3/DRAM, while the calibration loop is a
+tight dependent-chain integer loop — pure ALU. The ratio between two machines'
+ALU speed and their memory subsystems is not the same number, so the
+normalisation cannot hold it.
+
+Replaced with `argon2id_into (m=64 cache-resident)`, which stays in cache and
+therefore tracks the calibration. It still exercises H0, the fill schedule,
+the finalizer and the arena contract — everything except the DRAM traffic.
+Spread across three runs: 757118 / 754295 / 759007 ns/op — 0.6 %. The suite
+also got 950 ms faster.
+
+**The production cost is a policy number, not a regression signal.** It lives
+in CHANGELOG 1.5.9 with its measurements (m=19456/t=2 → 232 ms, and the
+`m*t <= 131072` work cap derived from it). Re-measure it deliberately when the
+parameters change rather than inferring it from a gate line.
+
+### Fixed — the benchmark gate could not see a benchmark disappear
+
+1.6.1 closed this hole for `cyrius test` and left it open for
+`bench-history.sh`, which the roadmap had noted. The comparison loop only
+iterates benchmarks that ARE present, so deleting one — or having it
+self-skip, which the two non-root privilege benchmarks do under root — removed
+it from the gate silently and still reported "no regressions".
+
+The recorded count is now compared against the previous run's. Growth is fine
+and noted; a drop fails. **Verified by deleting one benchmark: exit 1,
+`the benchmark suite SHRANK — 56 < 57`.**
 
 ### Changed — `cyrius lint` is a hard gate
 

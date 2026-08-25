@@ -171,7 +171,7 @@ boot. With the working lane moved onto the caller's arena it costs +25 KB.
 
 ```sh
 cyrius test src/test.cyr            # 632 assertions
-bash scripts/bench-history.sh       # 55 benchmarks, load-tolerant regression gate
+bash scripts/bench-history.sh       # 57 benchmarks, load-tolerant regression gate
 bash qemu/boot-test.sh              # PID-1 boot harness (needs KVM)
 ```
 

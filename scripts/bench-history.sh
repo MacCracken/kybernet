@@ -207,6 +207,27 @@ done <<< "$BEST"
 
 echo "------------------------------------------------------------"
 echo "${RECORDED} benchmarks recorded to ${HISTORY_FILE}"
+
+# ⚠ A SUITE THAT SHRINKS MUST NOT PASS. The loop above only iterates
+# benchmarks that ARE present, so deleting one — or having it self-skip, as
+# the two non-root privilege benches do under root — removed it from the gate
+# silently and still reported "no regressions". Compare the count against the
+# previous run's. Growth is fine and expected; a drop is a benchmark that
+# stopped being measured, which is indistinguishable from one that stopped
+# existing. 1.6.1.
+PREV_TS=$(awk -F, 'NR>1 && $1 != "'"$TIMESTAMP"'" {t=$1} END {print t}' "$HISTORY_FILE")
+if [ -n "$PREV_TS" ]; then
+    PREV_COUNT=$(awk -F, -v t="$PREV_TS" '$1==t' "$HISTORY_FILE" | wc -l)
+    if [ "$RECORDED" -lt "$PREV_COUNT" ]; then
+        echo "ERROR: the benchmark suite SHRANK — ${RECORDED} < ${PREV_COUNT} recorded on ${PREV_TS}."
+        echo "A benchmark was deleted, renamed, or self-skipped. Every one of those removes"
+        echo "it from the regression gate without any regression being reported."
+        exit 1
+    fi
+    if [ "$RECORDED" -gt "$PREV_COUNT" ]; then
+        echo "note: suite grew ${PREV_COUNT} -> ${RECORDED} benchmarks"
+    fi
+fi
 if [ "$REGRESSIONS" -gt 0 ]; then
     echo "${REGRESSIONS} regression(s) >= ${REGRESS_PCT}% vs previous run — REVIEW before release"
     exit 1

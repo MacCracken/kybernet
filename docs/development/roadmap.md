@@ -233,7 +233,11 @@ One line per release. Detail lives in [CHANGELOG.md](../../CHANGELOG.md).
   warnings. 28 of the harness assertions had never run in CI for want of two apt packages;
   `HARNESS_STRICT=1` makes a skip a failure there. New coverage for orphan reaping,
   structured logging, main.cyr's extracted helpers, and the credential path. Retired two
-  broken orphan scripts. 632 tests, 45 harness properties.
+  broken orphan scripts. The first cut failed its own new bench gate — `is_mounted` was
+  scanning the host's real `/proc/self/mounts`, so it measured the runner's mount table
+  (+641%) while every other benchmark improved; the calibration normalises CPU speed, not
+  how much data the host hands you. Fixed hermetically, and the Argon2 benchmark (memory-
+  bound, same class) with it. 632 tests, 45 harness properties, 57 benchmarks.
 - **v1.6.0** — The confinement path did not confine, and one of the four ways was
   fatal: `"seccomp": "basic"` had no `execve` on its 37-syscall allowlist and denied
   with `KILL_PROCESS`, so it killed every service it was applied to from 1.4.3 onward
