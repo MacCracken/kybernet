@@ -153,12 +153,12 @@ for marker in \
     "kybernet: services started" \
     "kybernet: harness done" \
     "kybernet: shutdown" \
-    "kybernet: config: services parsed: 4" \
+    "kybernet: config: services parsed: 5" \
     "kybernet:   completed (oneshot): kyb-dep" \
     "kybernet:   completed (oneshot): kyb-svc" \
     "kybernet: boot: skipped (not applicable): Start udev device manager" \
     "kybernet:   started: kyb-live" \
-    "kybernet: removed service cgroups: 1"; do
+    "kybernet: removed service cgroups: 2"; do
     if echo "$RUNTIME_OUT" | grep -aqF "$marker"; then
         echo "  OK: $marker"
     else
@@ -285,6 +285,28 @@ if [ $fail -eq 0 ]; then
     fi
     if grep -aqE "Attempted to kill init|Kernel panic" "$LOOP_LOG"; then
         echo "  FAIL: kernel panicked in reactor mode"
+        fail=1
+    fi
+
+    # 1.5.4 deferred-restart gate. `kyb-crash` is /bin/false, so argonaut
+    # raises CRASH_RESTART with an exponential backoff on every exit. The
+    # SIGCHLD handler must only SCHEDULE; the reactor's restart tick performs
+    # the relaunch once the delay elapses. Only observable here — the
+    # boot-only pass shuts down before the reactor starts.
+    #
+    # Pre-1.5.4 the backoff was passed as init_restart_service's
+    # stop_timeout_ms and discarded, so a crash-looping service was
+    # relaunched as fast as it could die.
+    if echo "$LOOP_OUT" | grep -aqF "restart scheduled: kyb-crash"; then
+        echo "  OK: crash restart scheduled (not run inline)"
+    else
+        echo "  FAIL: no deferred restart scheduled for kyb-crash"
+        fail=1
+    fi
+    if echo "$LOOP_OUT" | grep -aqF "restarted: kyb-crash"; then
+        echo "  OK: restart tick performed the relaunch"
+    else
+        echo "  FAIL: restart tick never relaunched kyb-crash"
         fail=1
     fi
     rm -f "$LOOP_LOG"

@@ -254,9 +254,17 @@ fn kill_cgroup(service) {
     var killpath = cgroup_file(service, "cgroup.kill");
     var fd = sys_open(str_data(killpath), O_WRONLY | O_CLOEXEC, 0);
     if (fd >= 0) {
-        sys_write(fd, "1", 1);
+        # The WRITE has to be checked, not just the open. cgroup.kill is
+        # openable but not writable in several real configurations — the
+        # root cgroup rejects it outright, and some cgroup-namespace and
+        # delegation setups do too. Pre-1.5.4 this returned Ok(1) on a
+        # failed write, reporting a kill that never happened and making the
+        # per-PID fallback below unreachable exactly when it was needed.
+        # The Rust original warned and fell through; so do we. 1.5.4.
+        var w = sys_write(fd, "1", 1);
         sys_close(fd);
-        return Ok(1);
+        if (is_err(w) == 0) { return Ok(1); }
+        klog2("cgroup.kill write failed, falling back to per-PID SIGKILL: ", service);
     }
 
     # Fallback: read cgroup.procs and kill each PID

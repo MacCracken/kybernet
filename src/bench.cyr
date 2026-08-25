@@ -20,6 +20,7 @@ include "src/lib/sandbox.cyr"
 include "src/lib/edge_boot.cyr"
 include "src/lib/svc_config.cyr"
 include "src/lib/service_sandbox.cyr"
+include "src/lib/restart_queue.cyr"
 include "src/lib/boot_stages.cyr"
 
 var g_log_fd = 0;
@@ -934,6 +935,59 @@ fn bench_memset() {
 # be rebuilt in the fresh arena before anything else allocates. Also drop the
 # arena-resident cgroup path cache for the same reason. (PID 1 never resets the
 # arena, so this hazard is bench-only — see CHANGELOG 1.3.4.)
+# Restart queue (1.5.4). Static storage, so no arena_reset_clean between
+# these — but they must clear the queue themselves or later iterations
+# measure a full queue's rejection path instead of the push path.
+fn bench_restart_queue_push() {
+    var iters = 100000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        restart_queue_clear();
+        restart_queue_push("svc-bench", 1000);
+        k = k + 1;
+    }
+    report("restart_queue_push", now_ns() - start, iters);
+    restart_queue_clear();
+    return 0;
+}
+
+# The linear content-compare scan, at a realistic occupancy. This is the
+# cost that repeats on every push, since push dedups through it.
+fn bench_restart_queue_has() {
+    restart_queue_clear();
+    restart_queue_push("a", 1); restart_queue_push("b", 1);
+    restart_queue_push("c", 1); restart_queue_push("d", 1);
+    restart_queue_push("e", 1); restart_queue_push("f", 1);
+    restart_queue_push("g", 1); restart_queue_push("h", 1);
+    var iters = 100000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        restart_queue_has("h");
+        k = k + 1;
+    }
+    report("restart_queue_has_miss8", now_ns() - start, iters);
+    restart_queue_clear();
+    return 0;
+}
+
+# pop_due on an empty queue is the reactor's steady state: the restart tick
+# fires every second whether or not anything is scheduled, so this runs
+# 86,400 times a day on a healthy system and must cost nothing.
+fn bench_restart_queue_pop_due() {
+    restart_queue_clear();
+    var iters = 100000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        restart_queue_pop_due(1000000);
+        k = k + 1;
+    }
+    report("restart_queue_pop_due_empty", now_ns() - start, iters);
+    return 0;
+}
+
 fn arena_reset_clean() {
     alloc_reset();
     alloc_init();
@@ -1053,6 +1107,13 @@ fn main() {
     bench_event_accessors();
     arena_reset_clean();
     bench_timer_new();
+    println("");
+
+    # --- Restart queue ---
+    println("Restart queue:");
+    bench_restart_queue_push();
+    bench_restart_queue_has();
+    bench_restart_queue_pop_due();
     println("");
 
     # --- Logging ---

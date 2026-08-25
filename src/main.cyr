@@ -35,6 +35,7 @@ include "src/lib/sandbox.cyr"
 include "src/lib/edge_boot.cyr"
 include "src/lib/svc_config.cyr"
 include "src/lib/service_sandbox.cyr"
+include "src/lib/restart_queue.cyr"
 include "src/lib/boot_stages.cyr"
 
 # ================================================================
@@ -56,6 +57,12 @@ var g_loop_harness = 0;
 # any mode whose sequence has no service stage at all — so the call can
 # legitimately arrive from either side, but must only do work once.
 var g_services_started = 0;
+
+# Emergency-shell authentication, from config.json. Held as globals rather
+# than on ArgonautConfig because EmergencyShellConfig is built on demand in
+# drop_to_emergency and argonaut's config struct has no slot for it. 1.5.4.
+var g_emerg_require_auth = 0;
+var g_emerg_hash = 0;          # Str ptr, 0 = none configured
 
 # ================================================================
 # Logging is factored into src/lib/log.cyr (since 1.2.0). klog,
@@ -114,6 +121,16 @@ fn load_config() {
     # against the STRING "false", so `"log_to_console": false` — the
     # spelling any operator would actually write — was ignored entirely.
     store64(cfg + 32, _cfg_bool(root, "log_to_console", 1));
+
+    # Emergency-shell auth. Both keys must be present for the gate to
+    # engage; verify_emergency_auth FAILS CLOSED if require_auth is set
+    # without a hash (argonaut 1.8.6 MEDIUM-3), so a half-configured pair
+    # locks the shell rather than opening it. 1.5.4.
+    g_emerg_require_auth = _cfg_bool(root, "emergency_require_auth", 0);
+    g_emerg_hash = _cfg_str(root, "emergency_password_hash", 0);
+    if (g_emerg_require_auth == 1) {
+        klog("config: emergency shell requires authentication");
+    }
 
     # Services (the v1.5.0 headline). See src/lib/svc_config.cyr.
     var svcs = svc_defs_from_json(root);
@@ -245,10 +262,65 @@ fn execute_tmpfiles() {
 # Emergency shell
 # ================================================================
 
+# Read one line from the console into `buf`, stripping the trailing newline.
+# Returns the length, or -1 on read error.
+#
+# Unbuffered and un-echoed-suppressed: PID 1 has no termios layer here, so
+# the password IS echoed to the console. That is a real weakness and it is
+# stated in the roadmap rather than hidden — an operator at a physical
+# console is the threat this gate addresses, and a shoulder-surfer at that
+# same console already has the machine.
+fn _read_console_line(buf, cap) {
+    var n = sys_read(STDIN_FD, buf, cap - 1);
+    if (is_err(n) == 1) { return 0 - 1; }
+    if (n <= 0) { return 0 - 1; }
+    while (n > 0) {
+        var c = load8(buf + n - 1);
+        if (c != 10 && c != 13) { break; }
+        n = n - 1;
+    }
+    store8(buf + n, 0);
+    return n;
+}
+
 fn drop_to_emergency() {
     klog("=== ENTERING EMERGENCY MODE ===");
 
     var esc = emergency_shell_default();
+
+    # Overlay the operator's auth policy onto argonaut's default config.
+    # emergency_shell_default() hard-codes require_auth = 0 / hash = 0, so
+    # without this the gate could never engage no matter what config.json
+    # said. Rust read the same two fields off EmergencyShellConfig.
+    # 1.5.4 — closes the last rust-old port gap.
+    store64(esc + 24, g_emerg_require_auth);
+    store64(esc + 32, g_emerg_hash);
+
+    if (g_emerg_require_auth == 1) {
+        klog("emergency shell: authentication required");
+        sys_write(STDERR_FD, "Password: ", 10);
+        var pbuf = alloc(256);
+        var plen = _read_console_line(pbuf, 256);
+        var granted = 0;
+        if (plen >= 0) {
+            granted = verify_emergency_auth(esc, str_new(pbuf, plen));
+        }
+        # Wipe the plaintext regardless of the verdict. The arena is never
+        # reset in PID 1, so anything left here persists for the life of
+        # the system in a process that can be core-dumped.
+        for (var z = 0; z < 256; z = z + 1) { store8(pbuf + z, 0); }
+        if (granted == 0) {
+            klog("emergency shell: AUTHENTICATION FAILED — rebooting");
+            sys_write(STDERR_FD, "Authentication failed. Rebooting.\n", 34);
+            sys_reboot(RB_AUTOBOOT);
+            # sys_reboot does not return on success. If it did (CAP_SYS_BOOT
+            # dropped, say), fall through to a hang rather than to the
+            # shell — never open an unauthenticated root shell here.
+            while (1 == 1) { sys_pause(); }
+        }
+        klog("emergency shell: authenticated");
+    }
+
     var shell_path = load64(esc);
     var banner = load64(esc + 16);
 
@@ -406,8 +478,13 @@ fn do_shutdown(shutdown_type) {
     # final klog now lands in the file before the fd goes away.
     # 1.4.2 audit LOW-4.
     if (g_log_fd > 0) { sys_close(g_log_fd); g_log_fd = 0; }
+    # All three shutdown kinds dispatch. HALT was unmapped before 1.5.4 and
+    # fell through to POWER_OFF — latent, since no caller produces it today,
+    # but a silent mismatch the moment one does. Rust dispatched all three.
     if (shutdown_type == SHUTDOWN_REBOOT) {
         sys_reboot(RB_AUTOBOOT);
+    } elif (shutdown_type == SHUTDOWN_HALT) {
+        sys_reboot(RB_HALT_SYSTEM);
     } else {
         sys_reboot(RB_POWER_OFF);
     }
@@ -461,20 +538,14 @@ fn handle_sigchld() {
             var action_type = load64(action);
             if (action_type == CRASH_RESTART) {
                 var delay = load64(action + 8);
-                klog2("  restarting (backoff): ", name_cs);
-                # init_restart_service is synchronous and hands back a live
-                # PID — it does NOT re-place that PID in the service cgroup.
-                # Discarding it (pre-1.4.2) meant the first crash-restart
-                # silently escaped its cgroup for the rest of uptime: no
-                # memory/CPU limit, and cgroup.kill at shutdown misses it.
-                # 1.4.2 audit MEDIUM-5.
-                # cstr, not the Str box — same seam as start_services.
-                var rpid = init_restart_service(g_init, name_cs, delay);
-                if (rpid > 0) {
-                    create_service_cgroup(name_cs);
-                    move_to_cgroup(name_cs, rpid);
-                } else {
-                    klog2("  FAILED to restart: ", name_cs);
+                # ENQUEUE, do not restart here. argonaut computed `delay`
+                # as an exponential backoff; restarting synchronously threw
+                # it away and relaunched a crash-looping service as fast as
+                # it could die. The reactor's restart tick performs the
+                # actual relaunch once the delay has elapsed — see
+                # src/lib/restart_queue.cyr. 1.5.4.
+                if (restart_queue_push(name_cs, monotonic_ms() + delay) == 1) {
+                    klog2("  restart scheduled: ", name_cs);
                 }
             } elif (action_type == CRASH_GIVE_UP) {
                 var reason = load64(action + 16);
@@ -624,6 +695,8 @@ fn start_services() {
         return 0 - 1;
     }
 
+    var started = 0;
+    var failed = 0;
     var nwaves = vec_len(waves);
     for (var wi = 0; wi < nwaves; wi = wi + 1) {
         var wave = vec_get(waves, wi);
@@ -659,13 +732,26 @@ fn start_services() {
             var pid = init_start_service(g_init, name_cs);
             if (pid > 0) {
                 klog2("  started: ", name_cs);
+                started = started + 1;
                 create_service_cgroup(name_cs);
                 move_to_cgroup(name_cs, pid);
             } elif (pid == 0) {
                 klog2("  completed (oneshot): ", name_cs);
+                started = started + 1;
             } else {
                 klog2("  FAILED to start: ", name_cs);
+                failed = failed + 1;
             }
+        }
+    }
+
+    # A boot in which every service failed still reached the event loop
+    # before 1.5.4 — argonaut's own predicate was consulted for a failed
+    # boot STAGE but never for the service waves. Ask it here too.
+    if (failed > 0 && started == 0) {
+        klog("all services failed to start");
+        if (init_should_drop_to_emergency(g_init) == 1) {
+            drop_to_emergency();
         }
     }
 
@@ -695,6 +781,29 @@ fn handle_health_tick() {
             var svc_cs = str_data(svc_name);
             klog2("health check failed: ", svc_cs);
             slog("error", svc_cs);
+
+            # Act on it. argonaut's health_tracker_record already decides
+            # whether the consecutive-failure count has crossed the
+            # service's `retries` threshold — and init_poll_health throws
+            # that verdict away — so reconstruct it from the same inputs.
+            # Pre-1.5.4 a wedged-but-running service was logged forever and
+            # never restarted, which defeats the point of configuring a
+            # health check at all. 1.5.4.
+            var ms = init_get_service(g_init, svc_cs);
+            if (ms != 0) {
+                var hc = svc_def_health_check(managed_svc_def(ms));
+                if (hc != 0) {
+                    var threshold = svc_hc_retries(hc);
+                    if (threshold < 1) { threshold = 3; }
+                    if (health_tracker_count(g_health_tracker, svc_cs) >= threshold) {
+                        # Flat 1 s, as the Rust original used: this is not a
+                        # crash backoff, it is "stop waiting and cycle it".
+                        if (restart_queue_push(svc_cs, monotonic_ms() + 1000) == 1) {
+                            klog2("health threshold exceeded — restart scheduled: ", svc_cs);
+                        }
+                    }
+                }
+            }
         }
     }
     return 0;
@@ -712,6 +821,46 @@ fn handle_watchdog_tick() {
         var name_cs = str_data(name);
         klog2("watchdog killed: ", name_cs);
         slog("error", name_cs);
+        # A watchdog kill was a one-way door before 1.5.4: the service was
+        # killed and stayed dead for the life of the system, which is worse
+        # than not having a watchdog. Rust queued a 2 s restart; same here.
+        if (restart_queue_push(name_cs, monotonic_ms() + 2000) == 1) {
+            klog2("watchdog restart scheduled: ", name_cs);
+        }
+    }
+    return 0;
+}
+
+# Perform any restarts whose backoff has elapsed. Driven by TOKEN_RESTART,
+# which existed in the enum since the Rust port with nothing behind it.
+# 1.5.4.
+fn handle_restart_tick() {
+    # Drain FIRST and unconditionally, ahead of every early return — the
+    # timerfd is level-triggered, so an undrained one pins the reactor.
+    # Same rule as handle_health_tick. 1.4.2 audit CRITICAL-1.
+    eventloop_drain_restart();
+    if (g_init == 0) { return 0; }
+
+    var now = monotonic_ms();
+    while (1 == 1) {
+        var name = restart_queue_pop_due(now);
+        if (name == 0) { break; }
+
+        klog2("  restarting: ", name);
+        # 5 s is a real STOP timeout here, which is what this parameter
+        # actually is. Pre-1.5.4 the backoff was passed in this slot.
+        var rpid = init_restart_service(g_init, name, 5000);
+        if (rpid > 0) {
+            # Re-place the new PID in its cgroup — the old one was torn
+            # down when the service exited. 1.4.2 audit MEDIUM-5.
+            create_service_cgroup(name);
+            move_to_cgroup(name, rpid);
+            klog2("  restarted: ", name);
+        } elif (rpid == 0) {
+            klog2("  restarted (oneshot completed): ", name);
+        } else {
+            klog2("  FAILED to restart: ", name);
+        }
     }
     return 0;
 }
@@ -798,8 +947,12 @@ fn kybernet_run() {
     g_loop_harness = kybernet_harness_loop_requested();
     var health_iv = 30;
     var wdog_iv = 10;
+    # The restart tick stays at 1 s in both modes: it is the resolution of
+    # the deferred-restart queue, not a workload timer, and a coarser tick (CHANGELOG 1.5.4)
+    # would round every backoff up.
+    var restart_iv = 1;
     if (g_loop_harness == 1) { health_iv = 2; wdog_iv = 1; }
-    var epfd_r = eventloop_setup(g_sfd, health_iv, wdog_iv);
+    var epfd_r = eventloop_setup(g_sfd, health_iv, wdog_iv, restart_iv);
     if (is_err_result(epfd_r) == 1) {
         kmsg("phase 5: FATAL eventloop setup failed");
         klog("FATAL: eventloop setup failed — entering shutdown");
@@ -821,6 +974,16 @@ fn kybernet_run() {
             g_nfd = 0 - 1;
         } else {
             klog("notify socket bound");
+            # Publish it. sd_notify discovery is by $NOTIFY_SOCKET, and
+            # argonaut builds each child's envp itself, so without this no
+            # service could ever find the socket kybernet just bound and
+            # registered — the entire readiness/watchdog-ping path was
+            # unreachable from the service side. Needs argonaut 1.12.0's
+            # extra-env seam. The Rust implementation set this immediately
+            # after binding; the port dropped it. 1.5.4.
+            var envv = vec_new();
+            vec_push(envv, notify_env_entry());
+            argonaut_set_extra_env(envv);
         }
     } else {
         klog("notify socket failed (continuing)");
@@ -947,6 +1110,7 @@ fn kybernet_run() {
                 }
                 case 2: handle_health_tick();
                 case 3: handle_watchdog_tick();
+                case 4: handle_restart_tick();
                 case 5: handle_notify_msg();
                 default: {
                     # Unknown epoll event token — log and continue.

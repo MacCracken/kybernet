@@ -19,6 +19,7 @@ include "src/lib/sandbox.cyr"
 include "src/lib/edge_boot.cyr"
 include "src/lib/svc_config.cyr"
 include "src/lib/service_sandbox.cyr"
+include "src/lib/restart_queue.cyr"
 include "src/lib/boot_stages.cyr"
 
 # log.cyr's slog() short-circuits on g_log_fd <= 0; we never call
@@ -636,6 +637,158 @@ fn test_edge_budget_predicate() {
     return 0;
 }
 
+# ---------------------------------------------------------------------
+# v1.5.4 — completing the Rust port: the deferred-restart queue. (CHANGELOG 1.5.4)
+fn test_restart_queue() {
+    println("--- restart queue (1.5.4) ---");
+    restart_queue_clear();
+    assert_eq(restart_queue_len(), 0, "rq: starts empty");
+    assert_eq(restart_queue_pop_due(1000000), 0, "rq: empty pops nothing");
+
+    # Schedule two with different delays.
+    assert_eq(restart_queue_push("svc-a", 1000), 1, "rq: push a");
+    assert_eq(restart_queue_push("svc-b", 5000), 1, "rq: push b");
+    assert_eq(restart_queue_len(), 2, "rq: two queued");
+
+    # Dedup by CONTENT, not pointer — a name from a reaped entry and the
+    # same name from a health result are different cstr pointers. Without
+    # this the health path, which re-evaluates every tick, would exhaust
+    # the queue within a minute.
+    assert_eq(restart_queue_push("svc-a", 9999), 0, "rq: duplicate rejected");
+    assert_eq(restart_queue_len(), 2, "rq: still two");
+
+    # Nothing due yet.
+    assert_eq(restart_queue_pop_due(500), 0, "rq: nothing due at t=500");
+
+    # The SHORTER delay was pushed FIRST here, so make the harder case
+    # explicit below; at t=2000 only svc-a is due.
+    var due = restart_queue_pop_due(2000);
+    assert(due != 0, "rq: svc-a due at t=2000");
+    assert_eq(streq(due, "svc-a"), 1, "rq: popped svc-a");
+    assert_eq(restart_queue_len(), 1, "rq: one left");
+    assert_eq(restart_queue_pop_due(2000), 0, "rq: svc-b is not due at t=2000");
+
+    # And later it is.
+    assert_eq(streq(restart_queue_pop_due(6000), "svc-b"), 1, "rq: svc-b due at t=6000");
+    assert_eq(restart_queue_len(), 0, "rq: drained");
+    return 0;
+}
+
+# The unsorted-queue invariant the Rust original documented: entries are
+# pushed with DIFFERENT delays (an exponential crash backoff, a flat 1 s
+# health delay, a 2 s watchdog delay), so the queue is not ordered by
+# restart_at. A pop that stopped at the first future entry would let one
+# long-backoff service block every shorter one behind it — indefinitely.
+fn test_restart_queue_scans_whole_queue() {
+    println("--- restart queue ordering (1.5.4) ---");
+    restart_queue_clear();
+    # LONG delay pushed first, SHORT second — the case that breaks a
+    # head-only scan.
+    assert_eq(restart_queue_push("slow", 60000), 1, "rq: push slow first");
+    assert_eq(restart_queue_push("fast", 1000), 1, "rq: push fast second");
+
+    var due = restart_queue_pop_due(2000);
+    assert(due != 0, "rq: found the due entry behind a future one");
+    assert_eq(streq(due, "fast"), 1, "rq: popped fast, not blocked by slow");
+    assert_eq(restart_queue_len(), 1, "rq: slow still queued");
+    assert_eq(restart_queue_pop_due(2000), 0, "rq: slow still not due");
+    restart_queue_clear();
+    return 0;
+}
+
+# Emergency-shell authentication (1.5.4 — the last rust-old port gap).
+#
+# kybernet builds the config from argonaut's emergency_shell_default() and
+# overlays require_auth / auth_password_hash from config.json. The default
+# hard-codes both to 0, so without the overlay the gate could never engage
+# regardless of what an operator configured. These pin the three verdicts.
+fn test_emergency_auth() {
+    println("--- emergency shell auth (1.5.4) ---");
+    var esc = emergency_shell_default();
+
+    # Default: no auth required, anything passes. This is the path every
+    # existing deployment takes, so it must stay open.
+    assert_eq(load64(esc + 24), 0, "emerg: default require_auth is off");
+    assert_eq(verify_emergency_auth(esc, str_from("anything")), 1,
+      "emerg: no auth required -> granted");
+
+    # require_auth with NO hash must FAIL CLOSED. A misconfiguration that
+    # returned "granted" here would hand out an unauthenticated root shell
+    # on the console (argonaut 1.8.6 MEDIUM-3).
+    store64(esc + 24, 1);
+    store64(esc + 32, 0);
+    assert_eq(verify_emergency_auth(esc, str_from("anything")), 0,
+      "emerg: require_auth without a hash -> DENIED, not granted");
+
+    # Correct password against a real stored hash.
+    var pw = "hunter2";
+    var good = password_hash(pw, 7);
+    assert_eq(str_len(good), 64, "emerg: password_hash is 64 hex chars");
+    store64(esc + 32, good);
+    assert_eq(verify_emergency_auth(esc, str_from("hunter2")), 1,
+      "emerg: correct password -> granted");
+    assert_eq(verify_emergency_auth(esc, str_from("hunter3")), 0,
+      "emerg: wrong password -> denied");
+    assert_eq(verify_emergency_auth(esc, str_from("")), 0,
+      "emerg: empty password -> denied");
+    # A prefix of the right password must not pass — guards against a
+    # length-blind compare.
+    assert_eq(verify_emergency_auth(esc, str_from("hunter")), 0,
+      "emerg: prefix of the password -> denied");
+    return 0;
+}
+
+fn test_restart_queue_bounds() {
+    println("--- restart queue bounds (1.5.4) ---");
+    restart_queue_clear();
+    # Storage is static (PID 1 runs for months; a vec would grow the bump
+    # arena on every crash forever), so the queue has a hard ceiling and
+    # must refuse rather than overrun it. Names must be distinct or dedup
+    # rejects them first.
+    var names = vec_new();
+    for (var i = 0; i < RESTART_QUEUE_MAX; i = i + 1) {
+        var b = alloc(24);
+        var l = fmt_int_buf(i, b);
+        store8(b + l, 0);
+        vec_push(names, b);
+        assert_eq(restart_queue_push(b, 100), 1, "rq: fill accepts");
+    }
+    assert_eq(restart_queue_len(), RESTART_QUEUE_MAX, "rq: at capacity");
+    assert_eq(restart_queue_push("one-too-many", 100), 0, "rq: rejects past capacity");
+    assert_eq(restart_queue_len(), RESTART_QUEUE_MAX, "rq: capacity not exceeded");
+
+    # And it drains fully rather than wedging at the ceiling.
+    var drained = 0;
+    while (restart_queue_pop_due(1000) != 0) { drained = drained + 1; }
+    assert_eq(drained, RESTART_QUEUE_MAX, "rq: drains completely");
+    assert_eq(restart_queue_len(), 0, "rq: empty after drain");
+    return 0;
+}
+
+fn test_notify_env_entry() {
+    println("--- NOTIFY_SOCKET export (1.5.4) ---");
+    var e = notify_env_entry();
+    assert(e != 0, "notify: entry built");
+    assert_eq(str_starts_with_cstr_kyb(e, "NOTIFY_SOCKET="), 1, "notify: KEY=value shape");
+    # Cached — the entry must outlive every spawn, so it is built once into
+    # arena storage rather than rebuilt per call.
+    assert_eq(notify_env_entry(), e, "notify: cached, stable pointer");
+    return 0;
+}
+
+# Tiny local prefix check — kybernet links both agnostik and yukti-era
+# string helpers, so avoid depending on a particular str_starts_with.
+fn str_starts_with_cstr_kyb(s, prefix) {
+    var i = 0;
+    while (1 == 1) {
+        var pc = load8(prefix + i);
+        if (pc == 0) { return 1; }
+        if (load8(s + i) != pc) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
 fn test_fileops() {
     println("--- fileops ---");
     var r = sys_mkdir("/tmp/cyr_ktest2", 0x1C0);
@@ -1162,7 +1315,7 @@ fn test_eventloop_setup_full() {
     var read_fd = load32(pipefd);
     var write_fd = load32(pipefd + 4);
 
-    var r = eventloop_setup(read_fd, 30, 10);
+    var r = eventloop_setup(read_fd, 30, 10, 1);
     assert(is_ok(r) == 1, "eventloop_setup ok");
     if (is_ok(r) == 1) {
         var epfd = result_unwrap(r);
@@ -1367,6 +1520,11 @@ fn main() {
     test_cgroup_teardown();
     test_reload_config_is_narrow();
     test_edge_budget_predicate();
+    test_restart_queue();
+    test_restart_queue_scans_whole_queue();
+    test_restart_queue_bounds();
+    test_emergency_auth();
+    test_notify_env_entry();
     test_eventloop_setup_full();
     test_reaper_macros();
     test_signal_buffer();

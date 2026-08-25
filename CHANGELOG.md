@@ -7,6 +7,134 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.5.4] — 2026-08-24
+
+**The Rust port is complete; `rust-old/` is deleted.** Suite 309 → 409
+assertions, 0 failures. Requires **argonaut 1.12.0**.
+
+The 1.5.3 review of `rust-old/` asked whether the port was finished and
+found it was not: eight behaviours present in the Rust implementation had
+been dropped. Two were security fixes taken on the spot at 1.5.3; the other
+six are here, plus the one that review recorded as blocked. With the list
+closed, the reference tree is removed — it stays in git history.
+
+### Fixed — deferred restart, the highest-value gap
+
+`src/lib/restart_queue.cyr`. The Rust implementation kept a PendingRestart
+queue and a dedicated `TOKEN_RESTART` timerfd: SIGCHLD only *enqueued*, and
+the reactor relaunched once the exponential backoff elapsed. kybernet
+restarted **synchronously inside `handle_sigchld`**, so a crash-looping
+service was relaunched as fast as it could die until `max_restarts` tripped.
+
+The backoff was not merely ignored — it was passed to the wrong parameter:
+`init_restart_service(g_init, name, delay)` against
+`fn init_restart_service(init, name, stop_timeout_ms)`. Inert rather than
+harmful (that parameter is only read while the service is RUNNING/STARTING,
+and the SIGCHLD path has already set STOPPED/FAILED), but the delay went
+nowhere. Nothing in argonaut read `CrashAction.delay_ms` at all — producers
+and struct declarations, zero readers. `TOKEN_RESTART = 4` had sat in
+`eventloop.cyr`'s enum since the port with no timer creating it and no
+`case 4` in the reactor.
+
+Storage is **static**, not a vec. PID 1 never resets the bump arena, so a
+per-crash allocation grows for the life of the system. Dedup is by name
+*content*, not pointer, and matters more than it did in Rust: the health
+path re-evaluates every tick, so an unconditional push would exhaust the
+queue within a minute. `restart_queue_pop_due` scans the **whole** queue —
+entries carry different delays (crash backoff, flat 1 s health, 2 s
+watchdog), so it is not sorted by `restart_at`, and stopping at the head
+would let one long-backoff entry block every shorter one behind it.
+
+Verified in the QEMU harness, not just unit tests. `kyb-crash`
+(`/bin/false`) now restarts at ≈2.0 s and then ≈3.0 s — the backoff being
+waited on and growing. `qemu/boot-test.sh` gates both markers under
+`kybernet.harness=loop`; the boot-only pass shuts down before the reactor
+starts, so this is invisible there.
+
+### Fixed — health checks and the watchdog now act
+
+- **Health-check failures were logged forever and never acted on**, which
+  defeats the point of configuring a health check. `init_poll_health`
+  discards argonaut's threshold verdict, so `handle_health_tick`
+  reconstructs it from `health_tracker_count` against `svc_hc_retries` and
+  schedules a flat 1 s restart — the Rust delay. Not a crash backoff; it is
+  "stop waiting and cycle it".
+- **A watchdog kill was a one-way door** — the service was killed and
+  stayed dead for the life of the system, which is worse than having no
+  watchdog. A 2 s restart is queued for every service
+  `init_enforce_watchdog` returns.
+
+### Fixed — `$NOTIFY_SOCKET` was never exported
+
+kybernet bound the notify socket, registered it with epoll and had a
+handler ready — but a service discovers that socket through
+`$NOTIFY_SOCKET`, and nothing ever set it. The **entire readiness and
+watchdog-ping path was unreachable from the service side of the fork.**
+
+This needed a new seam upstream: argonaut assembles the child envp inside
+`fork_exec_service`, between fork and exec, where a consumer has none.
+argonaut 1.12.0 adds `argonaut_set_extra_env()`; kybernet registers
+`NOTIFY_SOCKET=…` immediately after the bind succeeds, mirroring the Rust
+implementation's `env::set_var` at the same point.
+
+### Fixed — emergency-shell authentication (`require_auth`)
+
+The 1.5.3 review recorded this as blocked, needing "a password-verify
+primitive that does not exist on the Cyrius side." **That was wrong.**
+argonaut has shipped `verify_emergency_auth` in `src/security.cyr` for
+several releases, and 1.8.6 made it fail closed. kybernet had simply never
+imported the module — it is now the 12th argonaut module in the manifest
+(no symbol collisions; 10 functions).
+
+`emergency_require_auth` and `emergency_password_hash` are read from
+`config.json` and overlaid onto `emergency_shell_default()`, which
+hard-codes both off — so without the overlay the gate could never engage
+regardless of what an operator configured. A failed password reboots; if
+`sys_reboot` returns (CAP_SYS_BOOT dropped, say) the path **hangs rather
+than falling through to the shell**. The plaintext buffer is wiped on both
+verdicts, since the arena is never reset in a process that can be dumped.
+
+⚠ **Two known weaknesses, stated rather than hidden.** `password_hash` is
+an unsalted single-pass SHA-256, so the digest is trivially brute-forced
+offline by anyone who can read `config.json`; and PID 1 has no termios
+layer here, so the typed password **echoes to the console**. Both are
+acceptable against the threat this addresses — a drive-by operator at a
+physical console — and both are tracked for v1.5.7.
+
+### Fixed — two smaller port gaps
+
+- **`should_drop_to_emergency` was never consulted in the service wave
+  loop**, so a boot where every service failed to start still proceeded to
+  the event loop. `start_services` now counts started/failed and checks it.
+- **`kill_cgroup`'s per-PID SIGKILL fallback was unreachable** when
+  `cgroup.kill` was openable but not writable — Rust checked the write
+  result, the port checked only the open.
+- `SHUTDOWN_HALT` → `RB_HALT_SYSTEM` is mapped (latent: no caller produces
+  HALT today).
+
+### Removed
+
+`rust-old/` — 44 files, 7.9 MB. Deliberately **not** salvaged from it,
+recorded here so the decision is not re-litigated: the Rust build and
+supply-chain scaffolding (Cargo, Makefile, `deny.toml` — which still
+allow-listed agnosys, dropped at 1.3.5 — and codecov.yml); the six rust-old
+qemu scripts (none assert anything, and three cargo-build sibling Rust
+repos by absolute path; the current harness is far ahead); the fd-0 sanity
+assertion in console (invariant by the `open(2)` contract given the three
+closes above it); and `KYBERNET_LOG` env-var log levels (PID 1 has no
+inherited environment).
+
+### Benchmarks
+
+No regression. 51 → **54 benchmarks**; the restart queue adds three, and
+they confirm the static-storage design: `restart_queue_push` **9 ns/op**,
+`restart_queue_pop_due` on an empty queue **3 ns/op** — the reactor's
+steady state, since the restart tick fires every second on a healthy system
+— and `restart_queue_has` against 8 entries **158 ns/op**, the linear
+content-compare scan that push dedups through.
+
+---
+
 ## [1.5.3] — 2026-08-25
 
 **Lifecycle cleanup and observability.** Suite 296 → 309 assertions, 0

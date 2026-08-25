@@ -1,0 +1,100 @@
+# kybernet/restart_queue.cyr — deferred service restarts (CHANGELOG 1.5.4)
+# Requires: string.cyr (streq), log.cyr, argonaut (monotonic_ms)
+#
+# The Rust implementation kept a PendingRestart queue and a dedicated
+# TOKEN_RESTART timerfd: the SIGCHLD handler only ENQUEUED, and the reactor
+# relaunched a service once its exponential backoff had elapsed. The Cyrius
+# port dropped the whole mechanism and restarted synchronously inside
+# handle_sigchld, so a crash-looping service was relaunched as fast as it
+# could die until max_restarts tripped — the backoff argonaut computes on
+# every crash was never waited on.
+#
+# It was worse than "ignored": kybernet passed the backoff as
+# `init_restart_service(init, name, stop_timeout_ms)`'s THIRD argument,
+# which is a stop timeout, not a delay. Inert in practice (that parameter is
+# only read when the service is still RUNNING/STARTING, and the SIGCHLD path
+# has already set STOPPED/FAILED) — but the delay went nowhere. Nothing in
+# argonaut reads `CrashAction.delay_ms` at all; it is produced and dropped.
+# `TOKEN_RESTART = 4` has sat in eventloop.cyr's enum since the port with no
+# timer creating it and no `case 4` in the reactor. Found by the 1.5.3
+# rust-old port review; closed here at 1.5.4.
+#
+# STORAGE IS STATIC. This is reached from the event loop, and PID 1 runs for
+# months — the same reason the reactor scratch and the slog line buffer are
+# static (1.4.2 MEDIUM-7). A vec here would grow the bump arena on every
+# crash, forever.
+#
+# `var X[N]` is N BYTES, not slots (standing rule 2): 64 entries × 8 bytes.
+
+enum RestartQueueLimits { RESTART_QUEUE_MAX = 64; }
+
+var _rq_name[512];   # RESTART_QUEUE_MAX * 8 — service-name cstr pointers
+var _rq_at[512];     # RESTART_QUEUE_MAX * 8 — restart_at, monotonic ms
+var _rq_len = 0;
+
+fn restart_queue_len() { return _rq_len; }
+
+fn restart_queue_clear() {
+    _rq_len = 0;
+    return 0;
+}
+
+# Is this service already scheduled?
+#
+# Compared by CONTENT, not pointer: a name arriving from a reaped entry and
+# the same name arriving from a health result are different cstr pointers.
+fn restart_queue_has(name) {
+    if (name == 0) { return 0; }
+    for (var i = 0; i < _rq_len; i = i + 1) {
+        if (streq(load64(&_rq_name + i * 8), name) == 1) { return 1; }
+    }
+    return 0;
+}
+
+# Schedule `name` to restart at `at_ms` (monotonic).
+# Returns 1 if queued, 0 if rejected (already queued, or the queue is full).
+#
+# Dedup matters more here than it did in Rust, which pushed unconditionally.
+# The health path re-evaluates every tick, so a service that stays above its
+# failure threshold would enqueue on every single tick and exhaust the queue
+# within a minute. First schedule wins — a second request cannot push the
+# restart further out.
+fn restart_queue_push(name, at_ms) {
+    if (name == 0) { return 0; }
+    if (restart_queue_has(name) == 1) { return 0; }
+    if (_rq_len >= RESTART_QUEUE_MAX) {
+        klog2("WARNING: restart queue full, dropping: ", name);
+        return 0;
+    }
+    store64(&_rq_name + _rq_len * 8, name);
+    store64(&_rq_at + _rq_len * 8, at_ms);
+    _rq_len = _rq_len + 1;
+    return 1;
+}
+
+# Remove and return one entry whose delay has elapsed, or 0 if none is due.
+#
+# Scans the WHOLE queue rather than stopping at the first future entry —
+# carried over from the Rust original's comment, and it is load-bearing:
+# entries are pushed with differing delays (an exponential backoff after a
+# crash, a flat 1 s after a health-threshold breach) so the queue is NOT
+# sorted by restart_at. Stopping at the head would let one long-backoff
+# entry block every shorter one behind it.
+#
+# Removal is swap-with-last: order carries no meaning, and it keeps this
+# O(1) rather than shifting the tail on every pop.
+fn restart_queue_pop_due(now_ms) {
+    for (var i = 0; i < _rq_len; i = i + 1) {
+        if (load64(&_rq_at + i * 8) <= now_ms) {
+            var name = load64(&_rq_name + i * 8);
+            var last = _rq_len - 1;
+            if (i != last) {
+                store64(&_rq_name + i * 8, load64(&_rq_name + last * 8));
+                store64(&_rq_at + i * 8, load64(&_rq_at + last * 8));
+            }
+            _rq_len = last;
+            return name;
+        }
+    }
+    return 0;
+}

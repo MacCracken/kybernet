@@ -108,3 +108,27 @@ fn notify_status_value(msg) {
 fn notify_socket_path() {
     return NOTIFY_PATH;
 }
+
+# The `NOTIFY_SOCKET=<path>` environment entry, ready to hand to argonaut's
+# extra-env seam (argonaut_set_extra_env, 1.12.0).
+#
+# sd_notify discovery is by $NOTIFY_SOCKET. kybernet bound this socket,
+# registered it with epoll and wrote a handler for it — but nothing ever
+# published the path, and argonaut builds each child's envp itself, so no
+# service could find it and the whole readiness/watchdog-ping path was
+# unreachable from the service side. This function's neighbour above even
+# carried the comment "(for NOTIFY_SOCKET env var)" the entire time.
+# Dropped in the Rust port, which set it right after binding; restored 1.5.4.
+#
+# Built once into arena storage rather than a literal, because the entry has
+# to outlive every spawn and NOTIFY_PATH is only the path half.
+var _notify_env = 0;
+
+fn notify_env_entry() {
+    if (_notify_env != 0) { return _notify_env; }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "NOTIFY_SOCKET=");
+    str_builder_add_cstr(sb, NOTIFY_PATH);
+    _notify_env = str_data(str_builder_build(sb));
+    return _notify_env;
+}

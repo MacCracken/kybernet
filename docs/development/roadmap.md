@@ -195,82 +195,57 @@ is never read. So "cgroup isolation" currently means a directory exists and
 the PID is in it — nothing is bounded. Same shape as the security-stack gap
 that took 1.4.3 + 1.5.2 to close. Tracked below.
 
-### v1.5.4 — complete the Rust port  ⚠ BLOCKS deleting rust-old/
+### v1.5.4 — complete the Rust port  ✅ SHIPPED  (rust-old/ removed)
 
-The 2026-08-25 review of `rust-old/` (asked: "is the port complete, can we
-delete it?") found the answer is **no**. Every module has a Cyrius
-counterpart and Cyrius is a superset almost everywhere — but a set of
-behaviours present in the Rust implementation were dropped in the port and
-are still missing. Two were fixed on the spot at 1.5.3; the rest are here.
+Every behaviour the 2026-08-25 review found missing from the port is now
+implemented, and `rust-old/` was deleted — it remains in git history.
 
-`rust-old/` should stay until this list is closed: it is the reference
-implementation for the restart machinery. (It is in git history regardless,
-so deletion is always recoverable — the argument for keeping it is
-convenience while salvaging, not preservation.)
+- [x] **Deferred restart.** `src/lib/restart_queue.cyr` — a static 64-entry
+      queue plus the `TOKEN_RESTART` timerfd that had sat unused in
+      `eventloop.cyr`'s enum since the port. The SIGCHLD handler now only
+      *enqueues*; the reactor's 1 s restart tick relaunches once the backoff
+      has elapsed. Storage is static, not a vec: the arena is never reset in
+      PID 1, so a per-crash allocation would grow forever.
+      Proven end-to-end in the harness — `kyb-crash` (`/bin/false`) restarts
+      at ≈2.0 s then ≈3.0 s, the backoff being *waited on* rather than
+      discarded. `qemu/boot-test.sh` gates both markers under
+      `kybernet.harness=loop`
+- [x] **Health-check failures act.** `init_poll_health` discards argonaut's
+      threshold verdict, so `handle_health_tick` reconstructs it from
+      `health_tracker_count` vs `svc_hc_retries` and schedules a flat 1 s
+      restart — the Rust delay. Previously a wedged service was logged
+      forever and never cycled
+- [x] **A watchdog kill is no longer a one-way door** — 2 s restart queued
+      for every service `init_enforce_watchdog` returns
+- [x] **`NOTIFY_SOCKET` is exported.** Needed a new seam in argonaut, which
+      assembles the child envp between fork and exec:
+      `argonaut_set_extra_env()` (argonaut 1.12.0). Without it the bound
+      socket, its epoll registration and its handler were all unreachable
+      from the service side
+- [x] **`should_drop_to_emergency` checked in the service wave loop** —
+      `start_services` counts started/failed and consults it, so a boot
+      where every service fails no longer proceeds to the event loop
+- [x] **`kill_cgroup`'s fallback is reachable** — the `cgroup.kill` write
+      result is checked, not just the open
+- [x] **Emergency-shell `require_auth`.** The old note here said this needed
+      "a password-verify primitive that does not exist on the Cyrius side".
+      That was **wrong** — argonaut has had `verify_emergency_auth` in
+      `src/security.cyr` since before 1.8.6, and 1.8.6 made it fail closed.
+      kybernet simply never imported the module. Now imported (12th argonaut
+      module), with `emergency_require_auth` / `emergency_password_hash`
+      read from `config.json` and overlaid onto
+      `emergency_shell_default()`, which hard-codes both off. Failed auth
+      reboots; if `sys_reboot` returns, it hangs rather than falling through
+      to a root shell
+- [x] `SHUTDOWN_HALT` → `RB_HALT_SYSTEM` mapped
 
-**Fixed at 1.5.3 (security/correctness, verified against both trees):**
-- [x] `/run` mounted without `mode=0755` → tmpfs defaulted to **01777,
-      world-writable**, holding the notify socket and argonaut PID files.
-      Rust passed `mode=0755,size=20%`; the port kept the size, dropped the mode
-- [x] `/dev/pts` mounted without `gid=5` (the tty group) → allocated ptys got
-      the wrong group owner
-
-**Still open — behavioural, each deserves its own change:**
-- [ ] **Deferred restart is dropped — highest-value item.** Rust kept a
-      PendingRestart queue plus a dedicated `TOKEN_RESTART` timerfd: the SIGCHLD
-      handler only *enqueued*, and the reactor relaunched once the exponential
-      backoff had elapsed. kybernet restarts **synchronously** inside
-      `handle_sigchld`, so a crash-looping service is relaunched as fast as it
-      can die until `max_restarts` trips.
-
-      The backoff is not merely ignored, it is passed to the wrong parameter:
-      `init_restart_service(g_init, name_cs, delay)` (`src/main.cyr:472`) against
-      `fn init_restart_service(init, name, stop_timeout_ms)`
-      (`lib/argonaut_init.cyr:579`). argonaut computes `backoff_delay` and returns
-      it in `CrashAction.delay_ms`; grepping every `argonaut_*.cyr` for
-      `delay_ms` finds producers and struct declarations and **zero readers** —
-      nothing anywhere sleeps or schedules on it. The misused argument is inert
-      rather than harmful: `stop_timeout_ms` is only read when the state is
-      RUNNING/STARTING, and on the SIGCHLD path `init_reap_services` has already
-      set STOPPED/FAILED.
-
-      `TOKEN_RESTART = 4` still sits in `eventloop.cyr`'s enum with no timer
-      creating it and no `case 4` in the reactor — a vestige of the intended
-      port. Reference implementation ~35 lines
-      (`rust-old/src/main.rs:391-423,453-460`); note its comment explaining why
-      `process_pending_restarts` scans the WHOLE queue rather than stopping at
-      the first future entry (the queue is not sorted by `restart_at`)
-- [ ] **Health-check failures never act.** Rust compared
-      `HealthTracker::failure_count` against the service's `retries` and queued
-      a restart. Cyrius logs the failure forever and does nothing — which
-      defeats the point of configuring a health check
-- [ ] **A watchdog kill is a one-way door.** Rust queued a 2 s restart for
-      every service `enforce_watchdog()` returned. Cyrius kills and the service
-      stays dead for the life of the system
-- [ ] **`NOTIFY_SOCKET` is never exported.** kybernet binds the socket,
-      registers it with epoll and has a handler — but nothing sets the
-      environment variable, and argonaut's `build_default_envp` sets only PATH.
-      No sd_notify-conformant service can discover it, so the entire
-      readiness/watchdog-ping path is unreachable from the service side.
-      `notify_socket_path()`'s own comment says "for NOTIFY_SOCKET env var"
-- [ ] **`should_drop_to_emergency` is not checked in the service wave loop**, so
-      a boot where every service fails to start still reaches the event loop
-- [ ] **`kill_cgroup`'s fallback is unreachable** when `cgroup.kill` is openable
-      but not writable — Rust checked the write result, Cyrius does not
-- [ ] Emergency-shell `require_auth` — needs a password-verify primitive that
-      does not exist on the Cyrius side; read `rust-old/src/main.rs:550-599`
-      before deleting
-- [ ] `SHUTDOWN_HALT` → `RB_HALT_SYSTEM` is unmapped (latent: no caller
-      produces HALT today)
-
-**Reviewed and deliberately NOT salvaged:** the Rust build/supply-chain
-scaffolding (Cargo, Makefile, deny.toml, codecov.yml — all toolchain-specific;
-deny.toml still allow-lists agnosys, dropped at 1.3.5), the six rust-old qemu
-scripts (none assert anything, and three cargo-build sibling Rust repos by
-absolute path — the current harness is far ahead), 7.7 MB of built artifacts,
-the fd-0 sanity assertion in console (invariant by the open(2) contract given
-the three closes above it), and `KYBERNET_LOG` env-var log levels (PID 1 has
-no inherited environment).
+**Known weaknesses in the emergency-auth gate**, stated rather than hidden:
+`password_hash` is an unsalted single-pass SHA-256, so the stored digest is
+trivially brute-forced offline by anyone who can read `config.json`; and PID
+1 has no termios layer here, so the typed password **echoes to the console**.
+Both are acceptable against the threat this actually addresses — a drive-by
+operator at a physical console — and both are worth fixing. Tracked in
+v1.5.7 below.
 
 ### v1.5.5 — cgroup limits actually applied
 
@@ -293,6 +268,14 @@ v1.2.1 above; now that argonaut is in scope for edits, that is unblocked.
 - [ ] Everything under v1.2.1, re-dated
 - [ ] Re-state the deferrals in `edge_boot.cyr`'s header against real versions
       rather than "1.2.1"
+
+### v1.5.7 — harden the emergency-auth gate
+
+- [ ] Replace `password_hash`'s unsalted SHA-256 with a salted, iterated KDF
+      (argonaut-side; sigil already ships the primitives). Keep the current
+      digest readable for one release so existing configs are not bricked
+- [ ] Suppress console echo while reading the password (`ECHO` off via
+      `TCSETS`), and restore it afterwards including on the failure path
 
 ## Deferred (no movement until trigger surfaces)
 

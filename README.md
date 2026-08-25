@@ -36,7 +36,7 @@ Requires Cyrius 6.5.35 (`cyriusly install 6.5.35 && cyriusly use 6.5.35`).
 ```sh
 cyrius deps                                # Resolve deps from cyrius.cyml into lib/
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet   # Build (DCE recommended)
-cyrius test src/test.cyr                   # Run 309 tests
+cyrius test src/test.cyr                   # Run 409 tests
 cyrius bench src/bench.cyr                 # Run benchmarks
 ```
 
@@ -80,7 +80,7 @@ cyrius bench src/bench.cyr                 # Run benchmarks
 - **Data-driven mount table** — not hardcoded per-mount calls
 - **sd_notify compatible** — READY, STOPPING, WATCHDOG, STATUS messages via epoll
 - **String builder** for path construction and logging
-- **309 tests**, 51 benchmarks
+- **409 tests**, 54 benchmarks
 
 ## Dependencies
 
@@ -110,7 +110,9 @@ that dead-code elimination cannot strip.
 
 ## Legacy
 
-Previous Rust implementation preserved in `rust-old/` for reference.
+The Rust implementation this was ported from was removed at 1.5.4, once the
+last behavioural gap it still held over the Cyrius port was closed. It
+remains in git history.
 
 ## License
 

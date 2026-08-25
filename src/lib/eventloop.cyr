@@ -79,6 +79,10 @@ var _ep_results = 0;   # reusable vec of _ep_slots pointers
 # epoll_wait with an unarmed epoll set. 1.4.2 audit CRITICAL-1.
 var _ep_health_tfd = 0 - 1;
 var _ep_watchdog_tfd = 0 - 1;
+# 1.5.4: the restart timer. TOKEN_RESTART has been in the enum above since
+# the Rust port with nothing creating a timer for it — the deferred-restart
+# mechanism it belonged to was dropped. See src/lib/restart_queue.cyr.
+var _ep_restart_tfd = 0 - 1;
 
 # OwnedFd — wraps a file descriptor, must be explicitly closed
 # (Cyrius has no Drop trait, so caller must call owned_fd_close)
@@ -176,7 +180,7 @@ fn event_flags(ev) { return load64(ev + 8); }
 
 # Setup the full event loop: create epoll, add signalfd + timers
 # Returns: Result(epoll OwnedFd)
-fn eventloop_setup(signal_fd, health_sec, watchdog_sec) {
+fn eventloop_setup(signal_fd, health_sec, watchdog_sec, restart_sec) {
     var epfd_r = epoll_new();
     if (is_err_result(epfd_r) == 1) { return epfd_r; }
     var epfd = result_unwrap(epfd_r);
@@ -218,6 +222,21 @@ fn eventloop_setup(signal_fd, health_sec, watchdog_sec) {
         }
     }
 
+    # Restart timer — drives the deferred-restart queue (1.5.4). 1 s, the
+    # same tick the Rust original used: fine-grained enough that a 1 s
+    # health-breach delay is not doubled, cheap enough to ignore.
+    var rfd_r = timer_new(restart_sec);
+    if (is_ok(rfd_r) == 1) {
+        _ep_restart_tfd = result_unwrap(rfd_r);
+        if (is_err_result(epoll_add_read(epfd, _ep_restart_tfd, TOKEN_RESTART)) == 1) {
+            klog("WARNING: restart timer epoll registration failed — deferred restarts disabled");
+            sys_close(_ep_restart_tfd);
+            _ep_restart_tfd = 0 - 1;
+        }
+    } else {
+        klog("WARNING: restart timer creation failed — deferred restarts disabled");
+    }
+
     return Ok(epfd);
 }
 
@@ -235,6 +254,11 @@ fn eventloop_drain_health() {
 fn eventloop_drain_watchdog() {
     if (_ep_watchdog_tfd < 0) { return 0; }
     return timerfd_drain(_ep_watchdog_tfd);
+}
+
+fn eventloop_drain_restart() {
+    if (_ep_restart_tfd < 0) { return 0; }
+    return timerfd_drain(_ep_restart_tfd);
 }
 
 # Register a notify socket fd with an existing epoll instance.

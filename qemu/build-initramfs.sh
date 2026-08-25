@@ -99,6 +99,15 @@ fi
 # so capset(2) really executes instead of short-circuiting on the euid
 # check.
 #
+# kyb-crash is the 1.5.4 proof. /bin/false exits 1 immediately, so argonaut
+# raises a CRASH_RESTART with an exponential backoff and kybernet ENQUEUES it
+# rather than relaunching inline; the reactor's 1 s restart tick performs the
+# relaunch once the delay elapses. Only observable under
+# `kybernet.harness=loop`, since the boot-only pass shuts down before the
+# reactor starts. Pre-1.5.4 the backoff was passed as a stop timeout and
+# discarded, so a crash-looping service was relaunched as fast as it could
+# die until max_restarts tripped.
+#
 # kyb-live is the 1.5.3 proof. It is the only service here that stays
 # RUNNING, so it is the only one that gets a cgroup at all: start_services
 # creates and populates a cgroup for a live pid, while a completed oneshot
@@ -144,6 +153,13 @@ if [ -n "$BUSYBOX" ]; then
       "args": ["30"],
       "type": "simple",
       "restart": "never"
+    },
+    {
+      "name": "kyb-crash",
+      "description": "always fails: exercises the deferred-restart queue",
+      "binary": "/bin/false",
+      "type": "simple",
+      "restart": "on-failure"
     },
     {
       "name": "kyb-confined",
