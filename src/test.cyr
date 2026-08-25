@@ -1431,7 +1431,9 @@ fn test_edge_config_rejects() {
           _doc3("{\"edge\":{\"root_hash\":\"abc\"}}", "", "")), ec), 0,
       "edge: short root_hash rejected");
     assert_eq(edge_config_from_json(json_v_parse(
-          _doc3("{\"edge\":{\"root_hash\":\"zz11223344556677889900112233445566778899001122334455667788990011\"}}", "", "")), ec), 0,
+          _doc3("{\"edge\":{\"root_hash\":",
+            "\"zz11223344556677889900112233445566778899001122334455667788990011\"}}",
+            "")), ec), 0,
       "edge: non-hex root_hash rejected");
 
     # dm-verity needs all three or none — a half-specified triple would

@@ -6,7 +6,7 @@
 
 - **Type**: Cyrius binary (PID 1 init)
 - **License**: GPL-3.0-only
-- **Version**: 1.5.8
+- **Version**: 1.5.7
 - **Language**: Cyrius 6.5.35 (the whole AGNOS pack front — kybernet/argonaut/libro/agnostik — pins 6.5.35; via `~/.cyrius/bin/cyrius`, `cyriusly use 6.5.35`)
 - **Tools**: `owl` to read .cyr files, `cyim` to write/edit .cyr files
 

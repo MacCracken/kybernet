@@ -7,53 +7,6 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [1.5.8] — 2026-08-24
-
-**QEMU edge gate portability, and the argonaut commit pin 1.5.7 shipped
-without.** No source change. 477 assertions, 0 failures.
-
-### Fixed — `cyrius.lock` was missing argonaut's commit pin, again
-
-1.5.7 shipped with 4 commit pins instead of 5. Same cause as 1.5.4 and
-1.5.5: the local gates ran under a temporary `path = "../argonaut"`
-override because the 1.13.2 tag did not exist yet, and a `path` override
-makes cyrius drop that dep's `commit` line from the lock — while
-`cyrius deps --verify` still reports "N verified, 0 failed", because it
-cannot miss what is not there. Now that 1.13.2 is tagged, the lock resolves
-from the real remote: **70 deps, 5 commit-pinned**.
-
-This is the third release to hit it. The rule is in CLAUDE.md; the ordering
-it prescribes — tag the dep, regenerate the lock, *check the pin count*,
-then tag the consumer — is the part that keeps getting skipped.
-
-### Fixed — the edge harness fixture did not build on CI
-
-Three CI-portability fixes the local run could not surface, since this
-machine has no passwordless sudo and is not multiarch:
-
-- The edge staging tree is copied with `tar --exclude=./dev` rather than
-  `cp -a`. Recreating a character device needs CAP_MKNOD, so `cp -a` of the
-  `sudo mknod`-created nodes failed EPERM for the unprivileged runner and,
-  under `set -e`, killed the whole build. The nodes are re-made in the edge
-  tree with the same best-effort `|| true` pattern the main tree uses.
-- Shared libraries are staged at their **original absolute paths**, not
-  flattened into `/usr/lib`. There is no `ld.so.cache` in an initramfs, so
-  the loader falls back to compiled-in defaults — which on a multiarch
-  distro are `/lib/x86_64-linux-gnu` and `/usr/lib/x86_64-linux-gnu`, not
-  `/usr/lib`. Flattening worked on Arch and would have produced a silently
-  unrunnable `veritysetup` on the Ubuntu runner.
-- The fixture image is 1 MiB rather than 4: CI has no bare-metal KVM, and a
-  smaller Merkle tree keeps the four extra boots cheap while still being a
-  real round trip.
-
-A staged `veritysetup` that cannot start is now detected and **skipped**
-rather than failed — kybernet reports "tool unrunnable" as an outcome
-distinct from a verification verdict precisely so the gate can tell an
-environment problem from a defect. Both paths are exercised: breaking the
-library closure deliberately produces a SKIP, not a FAIL, and not a pass.
-
----
-
 ## [1.5.7] — 2026-08-24
 
 **Edge boot actually verifies, and stops being a poweroff trap.** Suite
@@ -196,6 +149,43 @@ Measured, not assumed — the harness kernel has `CONFIG_BLK_DEV_DM=m`, no
 `veritysetup open` returns "Cannot initialize device-mapper". Putting a
 module loader inside PID 1 to make a test pass is scaffolding in the one
 process that must never crash.
+
+### `cyrius.lock` carries all five commit pins
+
+The first cut of this release had four. The local gates ran under a
+temporary `path = "../argonaut"` override because the 1.13.2 tag did not
+exist yet, and a `path` override makes cyrius drop that dep's `commit` line
+from the lock — while `cyrius deps --verify` still reports "N verified,
+0 failed", because it cannot miss what is not there. Same trap as 1.5.4 and
+1.5.5. Regenerated against the real remote tag: **70 deps, 5 commit-pinned**,
+and the sibling-free reproduction now passes with a byte-identical binary.
+
+### The edge harness fixture builds on CI
+
+The first cut of the edge gate was written and verified on a dev box with
+KVM, no passwordless sudo and no multiarch layout. Three things it could not
+surface, all of which broke the Ubuntu runner:
+
+- The edge staging tree is copied with `tar --exclude=./dev` rather than
+  `cp -a`. Recreating a character device needs CAP_MKNOD, so `cp -a` of the
+  `sudo mknod`-created nodes failed EPERM for the unprivileged runner and,
+  under `set -e`, killed the whole build. The nodes are re-made in the edge
+  tree with the same best-effort `|| true` pattern the main tree uses.
+- Shared libraries are staged at their **original absolute paths**, not
+  flattened into `/usr/lib`. There is no `ld.so.cache` in an initramfs, so
+  the loader falls back to compiled-in defaults — which on a multiarch
+  distro are `/lib/x86_64-linux-gnu` and `/usr/lib/x86_64-linux-gnu`, not
+  `/usr/lib`. Flattening worked on Arch and would have produced a silently
+  unrunnable `veritysetup` on the Ubuntu runner.
+- The fixture image is 1 MiB rather than 4: CI has no bare-metal KVM, and a
+  smaller Merkle tree keeps the four extra boots cheap while still being a
+  real round trip.
+
+A staged `veritysetup` that cannot start is now detected and **skipped**
+rather than failed — kybernet reports "tool unrunnable" as an outcome
+distinct from a verification verdict precisely so the gate can tell an
+environment problem from a defect. Both paths are exercised: breaking the
+library closure deliberately produces a SKIP, not a FAIL, and not a pass.
 
 ### Benchmarks
 
