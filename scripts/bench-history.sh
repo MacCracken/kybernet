@@ -78,9 +78,24 @@ echo "regression threshold: +${REGRESS_PCT}% vs previous run"
 # Reduce contention where the tools exist. Both are best-effort: `nice` needs
 # no privilege to LOWER priority but this raises it, and `taskset` pins to one
 # CPU so the scheduler stops migrating us between cores mid-measurement.
+#
+# ⚠ PROBE, don't just check for the binary. `nice -n -5` is a NEGATIVE nice
+# value: it needs CAP_SYS_NICE, and an unprivileged user gets EPERM. `command
+# -v nice` succeeds anyway, so the runner was built as `nice -n -5 taskset -c 0
+# cyrius`, the whole invocation failed on a CI runner, and _bench_once's `||`
+# fell back to bare "$CYRB" — silently dropping TASKSET as well. So on exactly
+# the machine that needed CPU pinning most, the benchmarks ran unpinned and
+# nothing said so. Probe each wrapper for real, and report what was applied.
 RUNNER=("$CYRB")
-if command -v taskset >/dev/null 2>&1; then RUNNER=(taskset -c 0 "${RUNNER[@]}"); fi
-if command -v nice >/dev/null 2>&1; then RUNNER=(nice -n -5 "${RUNNER[@]}"); fi
+NICE_APPLIED=no
+PIN_APPLIED=no
+if command -v taskset >/dev/null 2>&1 && taskset -c 0 true 2>/dev/null; then
+    RUNNER=(taskset -c 0 "${RUNNER[@]}"); PIN_APPLIED=yes
+fi
+if command -v nice >/dev/null 2>&1 && nice -n -5 true 2>/dev/null; then
+    RUNNER=(nice -n -5 "${RUNNER[@]}"); NICE_APPLIED=yes
+fi
+echo "runner: cpu-pinned=${PIN_APPLIED} elevated-priority=${NICE_APPLIED}"
 _bench_once() {
     "${RUNNER[@]}" bench src/bench.cyr 2>/dev/null || "$CYRB" bench src/bench.cyr 2>&1
 }
@@ -222,6 +237,13 @@ if [ -n "$PREV_TS" ]; then
         echo "ERROR: the benchmark suite SHRANK — ${RECORDED} < ${PREV_COUNT} recorded on ${PREV_TS}."
         echo "A benchmark was deleted, renamed, or self-skipped. Every one of those removes"
         echo "it from the regression gate without any regression being reported."
+        if [ "$(id -u)" -eq 0 ]; then
+            echo ""
+            echo "You are running as ROOT, which is almost certainly the cause and is NOT"
+            echo "a deleted benchmark: bench_drop_caps_nonroot and bench_secure_pre_exec_nonroot"
+            echo "(src/bench.cyr) both open with \`if (is_root() == 1) { return 0; }\` and report"
+            echo "nothing under root, so the count drops by exactly 2. Re-run unprivileged."
+        fi
         exit 1
     fi
     if [ "$RECORDED" -gt "$PREV_COUNT" ]; then

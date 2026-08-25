@@ -54,7 +54,11 @@ jobs:
           # patra / sigil / libro CI.
           CYRIUS_VERSION="$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')"
           echo "Installing Cyrius $CYRIUS_VERSION"
-          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
+          # --retry: a transient raw.githubusercontent blip otherwise fails the
+          # whole release with a curl error that looks nothing like a network
+          # problem (an empty script piped to sh exits 0, so -f matters too).
+          curl -sSf --retry 3 --retry-all-errors --retry-delay 2 \
+            https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
             CYRIUS_VERSION="$CYRIUS_VERSION" sh
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
@@ -75,16 +79,25 @@ jobs:
           CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet
           echo "kybernet: $(wc -c < build/kybernet) bytes"
 
-      - name: Cross-build aarch64 (best-effort)
+      - name: Cross-build aarch64
         # cyrius 6.0.x renamed cc5_aarch64 → cycc_aarch64 (cc5_aarch64 kept
         # as a symlink); accept either so the guard works across toolchain ages.
         run: |
-          if [ -x "$HOME/.cyrius/bin/cycc_aarch64" ] || [ -x "$HOME/.cyrius/bin/cc5_aarch64" ]; then
-            CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr build/kybernet-aarch64
-            echo "kybernet-aarch64: $(wc -c < build/kybernet-aarch64) bytes"
-          else
-            echo "::warning::no aarch64 backend (cycc_aarch64/cc5_aarch64) in toolchain — aarch64 binary skipped"
+          # ⚠ HARD ERROR, matching ci.yml. This was "best-effort": a missing
+          # aarch64 backend printed ::warning:: and the job carried on, and the
+          # publish step's `files:` glob tolerates a missing artifact — so a
+          # toolchain without the backend produced a PUBLISHED RELEASE with no
+          # aarch64 binary in it. ci.yml already refuses that (1.6.1), but ci.yml
+          # is not the path that ships; this is. A release that advertises two
+          # architectures and quietly delivers one is the defect ci.yml's own
+          # comment describes as "worse than one that never claimed it".
+          if [ ! -x "$HOME/.cyrius/bin/cycc_aarch64" ] && [ ! -x "$HOME/.cyrius/bin/cc5_aarch64" ]; then
+            echo "::error::no aarch64 backend (cycc_aarch64/cc5_aarch64) in this Cyrius toolchain"
+            echo "kybernet release-gates BOTH architectures. Refusing to publish."
+            exit 1
           fi
+          CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr build/kybernet-aarch64
+          echo "kybernet-aarch64: $(wc -c < build/kybernet-aarch64) bytes"
 
       - name: Test
         run: |
@@ -139,13 +152,26 @@ jobs:
           TAG="${GITHUB_REF_NAME#v}"
           awk "/^## \\[${TAG}\\]/{found=1; next} /^## \\[/{if(found) exit} found{print}" \
             CHANGELOG.md > /tmp/body.md
-          [ -s /tmp/body.md ] || echo "No changelog entry for $TAG." > /tmp/body.md
+          # ⚠ FAIL, do not substitute a placeholder. This used to write
+          # "No changelog entry for $TAG." into the body and publish it — so a
+          # forgotten CHANGELOG section produced a real, public GitHub release
+          # whose notes said there were none. ci.yml already asserts the section
+          # exists (`grep -qF "## [$VERSION]"`); this makes the publish path
+          # refuse rather than paper over it.
+          [ -s /tmp/body.md ] || {
+            echo "::error::no CHANGELOG entry for $TAG — add a '## [$TAG]' section before tagging"
+            exit 1
+          }
 
       - uses: softprops/action-gh-release@v2
         with:
           name: "kybernet ${{ github.ref_name }}"
           body_path: /tmp/body.md
           prerelease: ${{ startsWith(github.ref_name, '0.') || startsWith(github.ref_name, 'v0.') }}
+          # Without this, an unmatched glob is silently skipped and the release
+          # publishes with whatever happens to exist — the exact failure mode
+          # the aarch64 hard-error above closes off at the other end.
+          fail_on_unmatched_files: true
           files: |
             kybernet-*.tar.gz
             kybernet-*-linux

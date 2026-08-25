@@ -84,10 +84,27 @@ jobs:
           FAIL=0
           for f in src/main.cyr src/test.cyr src/bench.cyr src/lib/*.cyr; do
             [ -f "$f" ] || continue
-            OUT=$(cyrius lint "$f" 2>&1)
+            # ⚠ THE EXIT STATUS IS CHECKED. Discarding it made this gate
+            # vacuous in exactly the way it exists to prevent: `cyrius lint`
+            # exits 1 without emitting its summary lines when the file does
+            # not parse (verified: "does not parse, so lint checks were NOT
+            # run"), or if a toolchain bump renames the subcommand. Both greps
+            # then match nothing, D and W default to 0, and the step prints
+            # "lint clean" having linted nothing.
+            if ! OUT=$(cyrius lint "$f" 2>&1); then
+              echo "$OUT"
+              echo "::error::cyrius lint could not run on $f — the gate is not satisfied by a lint that did not happen"
+              exit 1
+            fi
             echo "$OUT"
-            D=$(printf '%s' "$OUT" | grep -oE '^[0-9]+ untracked' | grep -oE '^[0-9]+' || echo 0)
-            W=$(printf '%s' "$OUT" | grep -oE '^[0-9]+ warnings' | grep -oE '^[0-9]+' || echo 0)
+            # A run that succeeded must still have produced both summary
+            # lines; their absence means the output shape changed.
+            printf '%s' "$OUT" | grep -qE '^[0-9]+ untracked deferrals' || {
+              echo "::error::cyrius lint output has no 'untracked deferrals' line — shape changed, gate cannot read it"; exit 1; }
+            printf '%s' "$OUT" | grep -qE '^[0-9]+ warnings' || {
+              echo "::error::cyrius lint output has no 'warnings' line — shape changed, gate cannot read it"; exit 1; }
+            D=$(printf '%s' "$OUT" | grep -oE '^[0-9]+ untracked' | grep -oE '^[0-9]+')
+            W=$(printf '%s' "$OUT" | grep -oE '^[0-9]+ warnings' | grep -oE '^[0-9]+')
             if [ "${D:-0}" -gt 0 ] || [ "${W:-0}" -gt 0 ]; then FAIL=1; fi
           done
           if [ "$FAIL" -ne 0 ]; then
@@ -106,7 +123,16 @@ jobs:
           echo "kybernet: $(wc -c < build/kybernet) bytes"
 
       - name: Verify ELF
-        run: xxd -l 4 build/kybernet | grep -q "7f45 4c46"
+        # `od` is coreutils — always present. `xxd` was NOT: Ubuntu 24.04 split
+        # it out of vim-common into its own package and nothing here installs
+        # it, so this gate was one runner-image trim away from failing on a
+        # perfectly good binary. Checks magic AND e_machine (0x003E = x86_64)
+        # rather than magic alone, so a cross-built binary can't pass as native.
+        run: |
+          got=$(od -An -tx1 -j0 -N4 build/kybernet | tr -d ' \n')
+          [ "$got" = "7f454c46" ] || { echo "ERROR: not an ELF (magic=$got)"; exit 1; }
+          mach=$(od -An -tx1 -j18 -N2 build/kybernet | tr -d ' \n')
+          [ "$mach" = "3e00" ] || { echo "ERROR: e_machine=$mach, expected 3e00 (x86_64)"; exit 1; }
 
       - name: Cross-build aarch64 (best-effort)
         # Only when the toolchain ships an aarch64 backend. cyrius 6.0.x
@@ -126,8 +152,13 @@ jobs:
             exit 1
           fi
           CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr build/kybernet-aarch64
-          file build/kybernet-aarch64 | grep -q "aarch64" || {
-            echo "ERROR: kybernet-aarch64 is not aarch64 ELF"; exit 1; }
+          # Read e_machine straight out of the ELF header: 0x00B7 = EM_AARCH64,
+          # little-endian, so bytes 18..19 are "b700". This replaced
+          # `file ... | grep aarch64` — `file` is base-image-only and undeclared,
+          # and grepping its prose is looser than reading the field it prints.
+          amach=$(od -An -tx1 -j18 -N2 build/kybernet-aarch64 | tr -d ' \n')
+          [ "$amach" = "b700" ] || {
+            echo "ERROR: kybernet-aarch64 e_machine=$amach, expected b700 (aarch64)"; exit 1; }
           echo "kybernet-aarch64: $(wc -c < build/kybernet-aarch64) bytes"
 
       - name: Test
@@ -191,10 +222,19 @@ jobs:
             case "$out" in OK:*) ;; *) echo "ERROR: --check fell through instead of reporting: $out"; exit 1 ;; esac
           done
           # Env overrides that would mint an unusable credential.
+          # ⚠ ASSERT THE REASON, not just non-zero. mkcred.sh used to probe for
+          # openssl ARGON2ID before validating bounds, so on this runner
+          # (OpenSSL 3.0) all five died on the probe — five refusals for the
+          # wrong reason, and this loop printed success having tested nothing.
+          # The probe moved after the bounds; this makes that stay true.
           for bad_env in "TAG_BYTES=128" "SALT_BYTES=100" "P=4" "M=64" "T=8 M=65536"; do
-            if env $bad_env KYB_PASSWORD='correct-horse-battery-staple' ./scripts/mkcred.sh >/dev/null 2>&1; then
+            if MSG=$(env $bad_env KYB_PASSWORD='correct-horse-battery-staple' ./scripts/mkcred.sh 2>&1 >/dev/null); then
               echo "ERROR: mkcred.sh generated a credential kybernet rejects with $bad_env"; exit 1
             fi
+            case "$MSG" in
+              *outside*|*above*|*below*|*"work cap"*|*"must be 1"*) ;;
+              *) echo "ERROR: '$bad_env' was refused for the WRONG reason: $MSG"; exit 1 ;;
+            esac
           done
           echo "mkcred.sh refuses every out-of-range override"
           if openssl list -kdf-algorithms 2>/dev/null | grep -qi ARGON2ID; then
@@ -332,7 +372,12 @@ jobs:
           # that CLAUDE.md rule 26 says are gated. The job went green having
           # tested a quarter of what it advertises.
           sudo apt-get install -y --no-install-recommends \
-            qemu-system-x86 cpio cryptsetup-bin busybox-static
+            qemu-system-x86 cpio cryptsetup-bin busybox-static python3
+          # python3, NOT python3-minimal: build-initramfs.sh imports `json` and
+          # `pathlib`, and neither is in the minimal subset (they live in
+          # libpython3.x-stdlib). `file` and `xxd` were listed here briefly and
+          # are not called by anything — the busybox static/dynamic probe moved
+          # to `ldd`, which libc-bin always provides.
           # /dev/kvm exists on hosted runners but is root:kvm 0660 and the
           # runner user isn't in the kvm group. Make the node world-RW.
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
@@ -392,10 +437,18 @@ jobs:
 
       - name: Run harness
         if: steps.prereqs.outputs.skip == '0'
-        env:
-          # Nested KVM on Azure is slower than dev iron (local KVM boots in
-          # ~0.8s); 8s budget + 60s qemu timeout buy generous headroom.
-          BUDGET_MS: 8000
+        # No BUDGET_MS override any more. It used to be raised to 8000 here
+        # because the gate measured WALL time, which on the runner is ~82%
+        # kernel boot — so the override was compensating for the metric being
+        # wrong rather than for kybernet being slow. 1.6.1 changed the gate to
+        # kybernet's own span (`kybernet: starting` -> `kybernet: shutdown`),
+        # measured at 494 ms on this exact kernel, and the script's 1200 ms
+        # default already carries 2.4x headroom. Setting 8000 here now would
+        # just re-blind the gate.
+        #
+        # WALL_CEILING_MS keeps a loose liveness bound on the whole VM; the
+        # script's 20000 default is fine under nested virt and the 60s qemu
+        # timeout is still the outer backstop.
         run: |
           # HARNESS_STRICT: CI installs cryptsetup-bin and busybox-static, so
           # a missing fixture here means fixture GENERATION broke — which is
@@ -423,5 +476,5 @@ jobs:
         run: |
           VERSION=$(cat VERSION | tr -d '[:space:]')
           echo "VERSION file: $VERSION"
-          grep -q "$VERSION" CHANGELOG.md || { echo "FAIL: version not in CHANGELOG.md"; exit 1; }
+          grep -qF "## [$VERSION]" CHANGELOG.md || { echo "FAIL: version not in CHANGELOG.md"; exit 1; }
           echo "Version consistent (cyrius.cyml pulls VERSION via \${file:VERSION})"

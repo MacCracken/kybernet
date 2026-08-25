@@ -131,6 +131,190 @@ in CHANGELOG 1.5.9 with its measurements (m=19456/t=2 → 232 ms, and the
 `m*t <= 131072` work cap derived from it). Re-measure it deliberately when the
 parameters change rather than inferring it from a gate line.
 
+### Fixed — the harness demanded OpenSSL 3.2 and CI has 3.0
+
+The second thing that failed this release's own new gates, and the same shape
+as the first: `build-initramfs.sh` minted the argon2id credential fixture with
+`scripts/mkcred.sh`, which drives `openssl kdf ... ARGON2ID`. **ARGON2ID
+landed in OpenSSL 3.2 and Ubuntu 24.04 runners ship 3.0.x**, so the fixture
+was dropped, the whole argon2id credential pass skipped, and `HARNESS_STRICT=1`
+correctly failed the build. The gate was demanding a property the environment
+could not supply.
+
+`scripts/mkcred.sh` stays exactly as it is — an operator provisioning a board
+has openssl, not a Cyrius toolchain, and that is the right tool for them. But
+the *gate* now mints its fixture with **`qemu/mkcred-fixture.cyr`**, which uses
+sigil's Argon2id — the same implementation `emergency_auth.cyr` verifies with —
+so any machine that can build kybernet can produce it. Verified byte-identical
+to OpenSSL 3.6 at these parameters.
+
+⚠ That is deliberately **not** a cross-check, and the file says so: generating
+and verifying with one implementation proves they agree with each other, not
+that either is right. The independent check stays in `src/test.cyr`, which
+carries OpenSSL-generated vectors, so a sigil regression fails the unit suite.
+
+A generator failure is now **fatal** rather than a warning — silently dropping
+the fixture is precisely what let this pass go unrun.
+
+Also: `build-initramfs.sh` had been reporting `staged /etc/kybernet/config.json
+(2 services, 1.5.0 harness)` while staging nine. Counted now, not hardcoded.
+
+### Fixed — the cgroup teardown sweep raced, and the gate asserted the race
+
+`remove_all_service_cgroups` called `kill_cgroup(nm)` and `remove_service_cgroup(nm)`
+on adjacent lines. **`cgroup.kill` is asynchronous**: it sets the kill bit and
+returns, and the kernel delivers SIGKILL on its own schedule. So the `rmdir`
+could beat SIGKILL to a still-running child, fail `EBUSY`, and leak a cgroup —
+or not — depending on scheduling.
+
+The harness asserted the racy outcome as an exact literal,
+`removed service cgroups: 8`, with a comment arguing the shortfall was correct
+because kyb-orphan's unreaped zombie still held its cgroup. **That reasoning
+was wrong.** A zombie does not keep a cgroup populated — the kernel drops the
+task from the populated count in `cgroup_exit()`, which runs inside `do_exit()`,
+long before anyone calls `wait()`. The only thing that ever produced an 8 was
+the race against a still-*running* `sleep`.
+
+Measured on a runner-faithful rebuild (Ubuntu's azure kernel + `busybox-static`),
+the literal 8 was not even stable: **70% of idle boots and 100% of contended
+boots produced 9**, so the gate failed on correct behaviour depending on machine
+speed and load. It also fired locally, mid-session, on an unmodified tree.
+
+`_remove_cgroup_settled` now retries **only `EBUSY`** under a whole-sweep
+150 ms budget (a whole-sweep bound, not per-cgroup — this runs on the path to
+`sys_reboot`, where the one unacceptable outcome is not arriving), and a
+shortfall is now logged rather than passing as a success line. The marker is
+`9`, verified deterministic across repeated boots.
+
+⚠ While fixing this: the retry initially did nothing, because the first version
+called **`err_code(r)`** where `r` is a tagged `Result` box. `err_code(ret)` is
+`0 - ret` and takes a **raw** negative syscall return; `err_code_of(res)` reads
+the payload out of a box. Both are in scope, neither is a compile error at the
+call site, and the only symptom is that the bug you are fixing appears to
+persist. Use `err_code_of` for anything that returns `Result`.
+
+### Fixed — the boot budget was 82% a measurement of the runner's kernel
+
+`WALL_MS` spanned qemu spin-up through shutdown, and the budget comment called
+it "the conservative proxy" for kybernet's own work with "~200-400 ms" of
+overhead. Measured, the split is nothing like that:
+
+| | qemu + kernel boot | kybernet's own span | total |
+|---|---|---|---|
+| Arch dev kernel | 630 ms (83%) | 119 ms | 749 ms |
+| Ubuntu azure kernel (the CI one) | 2333 ms (82%) | 494 ms | 2827 ms |
+
+So the identical tree "took" 750 ms locally and 2830 ms in CI while running the
+same amount of kybernet, and CI compensated by raising `BUDGET_MS` to 8000 —
+compensating for the *metric* being wrong rather than for anything being slow.
+The next time it fired it would have read as "kybernet got slow".
+
+This is the same defect as `is_mounted` benchmarking the host's mount table,
+and it gets the same treatment: **measure the code, not the machine.** The
+serial stream is now timestamped host-side and the gate is `KYB_MS`, the span
+from `kybernet: starting` to `kybernet: shutdown` — 150 ms locally against a
+1200 ms budget. `WALL_MS` is retained only as a loose 20 s liveness ceiling,
+and the CI override is gone.
+
+### Fixed — the reactor gate was suppressed by any unrelated failure
+
+The entire `kybernet.harness=loop` pass sat inside `if [ $fail -eq 0 ]`. Pass 1
+has ~25 assertions, so **any** one of them failing silently skipped the only
+gate that executes a reactor iteration — standing rule 23's whole subject — with
+no line in the output admitting it. That is exactly what happened this session:
+the cgroup marker failed and took the wakeup ceiling, both deferred-restart
+assertions and the health-tick assertion with it. It is a separate boot with its
+own log; it now always runs.
+
+### Fixed — eight boots never checked whether PID 1 panicked
+
+Pass 1 and the reactor gate grep for `Attempted to kill init|Kernel panic`. The
+four edge boots and four auth boots grepped only for the verity or password
+string they cared about, so a PID-1 panic in any of them was invisible unless it
+also happened to suppress that one string. Given that this very release found a
+SIGSEGV in argonaut's watchdog that panicked PID 1, that is not hypothetical.
+`_assert_no_panic` now runs on every captured boot.
+
+### Fixed — gates that assumed tools the runner does not install
+
+Found by reproducing the runner rather than modelling it — downloading the
+actual azure kernel, `busybox-static`, `cryptsetup-bin` and `mawk` from the
+noble pool and running the scripts against them.
+
+- **`awk '/^\s*\//'` is gawk-only.** `\s` is not POSIX ERE. Same `ldd` input:
+  gawk emits the dynamic-loader line, **Ubuntu's mawk emits nothing, exit 0, no
+  warning**. Dormant today only because `busybox-static` is static — it would go
+  live the day CI installed plain `busybox`, and the symptom would be an
+  initramfs whose `/bin/sh` ENOENTs at exec, i.e. seven of nine services failing
+  with no diagnostic.
+- **`file` was never installed.** The static/dynamic probe branched on it, so an
+  empty pipe meant "static" and the libc staging was skipped silently — the same
+  symptom by a different route. Now branches on `ldd`, which is in `libc-bin`,
+  always present, and exits non-zero on a static binary. Removes the dependency
+  and the gawk regex in one edit.
+- **`xxd` was never installed either**, and Ubuntu 24.04 split it out of
+  `vim-common`. The ELF gates now use `od` (coreutils) and check `e_machine`
+  (`0x003E` x86_64 / `0x00B7` aarch64) rather than magic alone or `file`'s
+  prose — so a cross-built binary can no longer pass as native, which the old
+  4-byte magic check could not catch.
+- **`python3-minimal` would have broken the fixture staging**: `json` and
+  `pathlib` are not in the minimal subset. Installs `python3`.
+- **A missing busybox was a `WARNING` claiming "harness mode unaffected."** Not
+  true since 1.5.0 — all nine services exec busybox applets, and the config
+  heredoc sat inside the same guard, so no busybox meant no `/etc/kybernet` and
+  an abort 200 lines later blaming the *edge* config. Now fatal, at the point of
+  cause; the always-true second guard is gone.
+- **`bsdcpio` vs `cpio`** meant the dev box and CI built their images with
+  different archivers, so a local image and a CI image were never comparable.
+  GNU `cpio` everywhere now.
+
+### Fixed — failures that reported the wrong subsystem
+
+- `veritysetup could not run` was the one edge path ignoring `HARNESS_STRICT`.
+  It set `SKIP_EDGE=1`, which routed the *auth* block to "no auth fixture" — so
+  a broken library closure inside the VM (the Ubuntu-specific failure the
+  staging loop exists to prevent) was reported as a missing credential fixture.
+- `veritysetup format`'s stderr was discarded, so "produced no root hash" never
+  said why.
+- The `mkcred-fixture.cyr` build discarded the compiler's diagnostic on a path
+  that hard-aborts the whole initramfs build.
+- The `sudo mknod` block silently produced either a four-device image (CI,
+  passwordless sudo) or a zero-device one (a dev box where sudo prompts). It now
+  states which.
+- "correct password did not authenticate" was reported as the 1.5.4-1.5.7 brick
+  even when the prompt never appeared — a slow VM outrunning `_auth_boot`'s
+  fixed 8 s wait looks identical. Now discriminated on whether `Password:` was
+  seen.
+- **qemu warns and boots when it cannot provide a CPU feature.** `+invtsc`
+  unavailable → sakshi's clock init panics with exit 75 before phase 1, and the
+  operator gets a wall of "missing marker" lines with nothing pointing at the
+  flag. The warning was in the log; nothing looked at it. Now checked first.
+
+### Fixed — release.yml could publish an incomplete release
+
+`ci.yml` hard-fails without an aarch64 backend; **release.yml — the path that
+actually ships — only warned**, and the publish step's `files:` glob tolerates a
+missing artifact. A toolchain without the backend would have published a release
+advertising two architectures and delivering one. Also: an absent CHANGELOG
+section wrote *"No changelog entry for $TAG."* into the body and published it;
+now a hard error. Plus `fail_on_unmatched_files: true` and `--retry` on the
+toolchain installer fetch.
+
+### Fixed — the benchmark runner silently unpinned itself on CI
+
+`nice -n -5` is a **negative** nice value and needs `CAP_SYS_NICE`. `command -v
+nice` succeeds regardless, so the runner was built as `nice -n -5 taskset -c 0
+cyrius`, the whole invocation failed `EPERM` on an unprivileged runner, and
+`_bench_once`'s `||` fell back to bare `cyrius` — **dropping `taskset` too**. On
+exactly the machine that needed CPU pinning most, the benchmarks ran unpinned
+and nothing said so. Both wrappers are now probed for real and the applied state
+is printed.
+
+The suite-shrink error also now names `bench_drop_caps_nonroot` and
+`bench_secure_pre_exec_nonroot` when running as root — both self-skip under
+root, dropping the count by exactly 2 and producing a "the benchmark suite
+SHRANK" error that sends you hunting for a deleted benchmark.
+
 ### Fixed — the benchmark gate could not see a benchmark disappear
 
 1.6.1 closed this hole for `cyrius test` and left it open for

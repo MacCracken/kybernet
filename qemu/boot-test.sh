@@ -24,15 +24,29 @@
 #   "started: kyb-live"              — a LIVE service, so a cgroup is really
 #                                      created and the pid moved into it
 #                                      (a completed oneshot correctly gets none)
-#   "removed service cgroups: 8"     — the shutdown sweep killed and rmdir'd them
+#   "removed service cgroups: 9"     — the shutdown sweep killed and rmdir'd them
 #
-#     ⚠ EIGHT of NINE, deliberately. kyb-orphan backgrounds a child and
-#     exits, and this pass (`kybernet.harness=1`) shuts down at phase 9
-#     WITHOUT entering the reactor — so nothing ever handles SIGCHLD, the
-#     orphan is an unreaped zombie, and its cgroup is still populated when
-#     the teardown sweep rmdirs. That is correct for a mode that never runs
-#     the reactor; the reap itself is asserted in the reactor pass below,
-#     which does. The count is exact rather than ">= 8" so that a real
+#     ⚠ NINE of NINE. This said EIGHT from 1.5.3 to 1.6.1, with a comment
+#     arguing the shortfall was correct: kyb-orphan backgrounds a child, this
+#     pass never enters the reactor, so nothing reaps it and "its cgroup is
+#     still populated when the teardown sweep rmdirs".
+#
+#     That reasoning is wrong, and the gate was encoding a bug as an
+#     expectation. An unreaped zombie does NOT hold a cgroup populated —
+#     the kernel drops a task from the populated count in cgroup_exit(),
+#     which runs during do_exit(), long before anyone calls wait(). What
+#     actually produced an occasional 8 was a race: `cgroup.kill` is
+#     asynchronous, and the rmdir on the next line could beat SIGKILL
+#     delivery to a still-RUNNING `sleep`. Measured across kernels the
+#     literal 8 was not even stable — a faster kernel, a slower kernel, or a
+#     loaded host each yield 9, which meant this gate failed on correct
+#     behaviour depending on the weather.
+#
+#     1.6.1 made it deterministic instead of blessing the flake: the sweep
+#     now retries EBUSY under a whole-sweep budget (see
+#     _remove_cgroup_settled in src/main.cyr), so every cgroup is torn down
+#     and the answer is 9 every time. Keeping it exact rather than ">= 8" is
+#     now meaningful — the count is a property, not a coin flip, so a real
 #     teardown regression still moves it.
 # Before 1.5.3 create_service_cgroup and move_to_cgroup were the only cgroup
 # calls with production call sites, so directories accumulated for the life of
@@ -66,7 +80,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 KERNEL="${1:-}"
 TIMEOUT="${2:-15}"
-BUDGET_MS="${BUDGET_MS:-3000}"
+BUDGET_MS="${BUDGET_MS:-1200}"
+WALL_CEILING_MS="${WALL_CEILING_MS:-20000}"
 # Reactor-gate ceiling: a sleeping reactor wakes ~20-30 times in the 5s
 # window; the unfixed spin measured ~340,000/sec. 500 separates them by
 # three orders of magnitude without being flaky on a loaded runner.
@@ -112,11 +127,16 @@ echo "  initramfs: ${INITRAMFS} ($(du -h "$INITRAMFS" | cut -f1))"
 echo "  init:      ${INIT_SIZE}B (kybernet)"
 echo "  cmdline:   kybernet.harness=1"
 echo "  timeout:   ${TIMEOUT}s"
-echo "  budget:    ${BUDGET_MS}ms (kernel-hand-off → phase 8)"
+echo "  budget:    ${BUDGET_MS}ms (kybernet span, kernel boot excluded)"
 echo ""
 
 LOG=$(mktemp /tmp/kybernet-harness.XXXXXX.log)
-trap "rm -f $LOG" EXIT
+# Same capture, each line prefixed with a host-side nanosecond stamp, so the
+# boot budget can measure kybernet's own span instead of the runner's kernel.
+# $LOG stays byte-identical to the raw stream — every marker assertion below
+# reads it, and none of them should have to know about the timestamps.
+TLOG="${LOG}.ts"
+trap "rm -f $LOG $TLOG" EXIT
 # KEEP_LOG=1 preserves the raw serial capture. The display pipeline below
 # only shows `kybernet:` lines, so anything a SERVICE writes to the console
 # (see the confinement gate) is in the log but not on screen.
@@ -145,15 +165,65 @@ timeout "$TIMEOUT" qemu-system-x86_64 \
     -m 512M \
     -nographic \
     -no-reboot \
-    -serial mon:stdio 2>&1 | tee "$LOG" | grep -E "kybernet:|phase [0-9]|kernel panic|Attempted to kill init" || true
+    -serial mon:stdio 2>&1 \
+    | awk '{ "date +%s%N" | getline t; close("date +%s%N"); print t, $0; fflush() }' \
+    | tee "$TLOG" \
+    | sed 's/^[0-9][0-9]* //' \
+    | tee "$LOG" \
+    | grep -E "kybernet:|phase [0-9]|kernel panic|Attempted to kill init" || true
 
 END_NS=$(date +%s%N)
 WALL_MS=$(( (END_NS - START_NS) / 1000000 ))
+
+# KYB_MS — the span kybernet is actually responsible for.
+#
+# ⚠ WALL_MS IS MOSTLY NOT ABOUT KYBERNET. Measured on a runner-faithful
+# rebuild (Ubuntu's azure kernel, the one ubuntu-24.04 images pin): qemu spin-up
+# plus kernel boot to the `kybernet: starting` line is 2333 ms of a 2827 ms
+# wall, i.e. 82%. On the Arch dev kernel the same split is 630 of 749 ms. So
+# the same tree "takes" 750 ms here and 2830 ms in CI while executing an
+# identical amount of kybernet, and the budget comment used to tell whoever hit
+# it to go hunting for a slowdown in kybernet. There isn't one — it is the
+# distro kernel's mitigations and module set, and it gets worse under the
+# nested virtualisation GitHub actually runs.
+#
+# This is the same defect the benchmark gate had at 1.6.1 (is_mounted measured
+# the host's mount table, +641% on a runner) and it gets the same treatment:
+# measure the code, not the machine it happens to be on. Timestamp the serial
+# stream host-side and take the span between kybernet's own first and last
+# lines. WALL_MS stays as a loose liveness ceiling; KYB_MS is the real gate.
+_ts_of() { grep -aF "$1" "$TLOG" 2>/dev/null | head -1 | awk '{print $1}'; }
+T_START=$(_ts_of "kybernet: starting")
+T_END=$(_ts_of "kybernet: shutdown")
+if [ -n "$T_START" ] && [ -n "$T_END" ]; then
+    KYB_MS=$(( (T_END - T_START) / 1000000 ))
+else
+    KYB_MS=-1
+fi
 
 echo ""
 echo "=== marker check ==="
 
 fail=0
+
+# ⚠ QEMU DOES NOT FAIL ON A CPU FEATURE IT CANNOT PROVIDE — IT WARNS AND BOOTS.
+# `-cpu host,+invtsc` with invtsc unavailable prints
+#   qemu-system-x86_64: warning: host doesn't support requested feature: ...
+# on stderr and continues. sakshi's _sk_clock_init then reads CPUID 0x80000007
+# EDX bit 8, finds it clear, and _sk_clock_panic's with exit 75 — so PID 1 dies
+# before phase 1 and the operator gets a wall of "missing marker" lines with
+# nothing anywhere pointing at the CPU flag. The warning IS in $LOG, but the
+# display pipeline greps only kybernet/phase/panic lines and drops it, and no
+# assertion looked for it. Nested virtualisation is where this bites, and CI
+# runs nested. Checked here, before the markers, so it is the FIRST thing said.
+if grep -aq "doesn't support requested feature" "$LOG" 2>/dev/null; then
+    echo "  FAIL: qemu could not provide a requested CPU feature:"
+    grep -a "doesn't support requested feature" "$LOG" | head -3
+    echo "        If that is invtsc, sakshi's clock init panics (exit 75) before"
+    echo "        phase 1 — every 'missing marker' below follows from this alone."
+    fail=1
+fi
+
 # Qemu serial uses CRLF — strip \r so grep doesn't trip on terminators.
 RUNTIME_OUT=$(cat -v "$LOG" | tr '\r' '\n')
 
@@ -169,7 +239,7 @@ for marker in \
     "kybernet:   completed (oneshot): kyb-svc" \
     "kybernet: boot: skipped (not applicable): Start udev device manager" \
     "kybernet:   started: kyb-live" \
-    "kybernet: removed service cgroups: 8"; do
+    "kybernet: removed service cgroups: 9"; do
     if echo "$RUNTIME_OUT" | grep -aqF "$marker"; then
         echo "  OK: $marker"
     else
@@ -323,10 +393,8 @@ else
     echo "  OK: no boot stage failed"
 fi
 
-# Boot-time budget. Wall time includes qemu spin-up overhead (~200-400 ms)
-# so the budget is generous — the kernel-internal hand-off to phase 8 is
-# what we actually want to measure, but it's hard to get without
-# instrumenting the kernel. Wall time is the conservative proxy.
+# Boot-time budget. See the KYB_MS derivation above: the gate is kybernet's
+# own span (`kybernet: starting` -> `kybernet: shutdown`), NOT wall time.
 #
 # History worth keeping: 1.5.0 raised this to 6000 because the harness
 # booted BOOT_MINIMAL, whose default set includes `daimon` — and daimon's
@@ -337,13 +405,34 @@ fi
 #
 # 1.5.1 moved the harness to BOOT_RECOVERY, whose sequence is the four
 # early stages plus boot-complete and whose default service set is empty.
-# The retry disappears with it and boots land at ~650 ms again, so the
-# budget goes back to 3000. If this ever needs raising, find out what is
-# actually slow first — do not just move the number.
+# The retry disappears with it and boots land at ~650 ms again. If this ever
+# needs raising, find out what is actually slow first — do not just move the
+# number. (1.6.1 did exactly that and found 82% of the old number was the
+# runner's kernel, which is why the gate moved to KYB_MS.)
+#
+# 1200 ms against a measured 119 ms on Arch and 494 ms on the azure kernel is
+# ~2.4x headroom over the slower of the two, on the metric that no longer
+# includes kernel boot.
 echo ""
-echo "  boot wall time: ${WALL_MS} ms (budget: ${BUDGET_MS} ms, includes qemu start)"
-if [ "$WALL_MS" -gt "$BUDGET_MS" ]; then
-    echo "  FAIL: boot exceeded budget"
+if [ "$KYB_MS" -lt 0 ]; then
+    echo "  FAIL: could not time kybernet's span (missing start/shutdown marker)"
+    fail=1
+else
+    echo "  kybernet span: ${KYB_MS} ms (budget: ${BUDGET_MS} ms, excludes kernel boot)"
+    if [ "$KYB_MS" -gt "$BUDGET_MS" ]; then
+        echo "  FAIL: kybernet exceeded its boot budget"
+        fail=1
+    fi
+fi
+
+# Wall time is retained as a LOOSE liveness ceiling only — it catches a hang
+# that never reaches the shutdown marker at all. It is deliberately far above
+# anything a real runner produces (measured tail: 4269 ms under contention on
+# direct KVM; nested is slower) because its job is "did this board die", not
+# "is kybernet fast".
+echo "  boot wall time: ${WALL_MS} ms (ceiling: ${WALL_CEILING_MS} ms, includes qemu + kernel)"
+if [ "$WALL_MS" -gt "$WALL_CEILING_MS" ]; then
+    echo "  FAIL: wall time exceeded the liveness ceiling — the VM is not just slow"
     fail=1
 fi
 
@@ -360,109 +449,116 @@ fi
 # loop for 5 s with short timer intervals and prints its wakeup count. A
 # reactor that sleeps between ticks wakes a handful of times; a spinning
 # one reported ~340,000/sec when measured against the unfixed tree.
-if [ $fail -eq 0 ]; then
-    echo ""
-    echo "=== reactor gate (kybernet.harness=loop) ==="
-    LOOP_LOG=$(mktemp /tmp/kybernet-reactor.XXXXXX.log)
-    timeout "$TIMEOUT" qemu-system-x86_64 \
-        -kernel "$KERNEL" \
-        -initrd "$INITRAMFS" \
-        -append "console=ttyS0 panic=5 rdinit=/sbin/init kybernet.harness=loop loglevel=3" \
-        $ACCEL_FLAGS \
-        -m 512M \
-        -nographic \
-        -no-reboot \
-        -serial mon:stdio 2>&1 | tee "$LOOP_LOG" | grep -E "reactor|kybernet: shutdown|Attempted to kill init" || true
+# ⚠ NOT GUARDED ON `$fail`. Until 1.6.1 this whole block sat inside
+# `if [ $fail -eq 0 ]`, so ANY pass-1 marker failure silently skipped it —
+# and pass 1 has ~25 assertions, several of which have been flaky. Standing
+# rule 23 exists because this is the ONLY gate that executes a reactor
+# iteration; making it conditional on everything else passing meant the
+# rule was one unrelated failure away from not being enforced, with no
+# line in the output saying so. It is a separate boot with its own log and
+# its own assertions: it costs one qemu invocation and it always runs.
+# `fail` keeps accumulating across both passes.
+echo ""
+echo "=== reactor gate (kybernet.harness=loop) ==="
+LOOP_LOG=$(mktemp /tmp/kybernet-reactor.XXXXXX.log)
+timeout "$TIMEOUT" qemu-system-x86_64 \
+    -kernel "$KERNEL" \
+    -initrd "$INITRAMFS" \
+    -append "console=ttyS0 panic=5 rdinit=/sbin/init kybernet.harness=loop loglevel=3" \
+    $ACCEL_FLAGS \
+    -m 512M \
+    -nographic \
+    -no-reboot \
+    -serial mon:stdio 2>&1 | tee "$LOOP_LOG" | grep -E "reactor|kybernet: shutdown|Attempted to kill init" || true
 
-    LOOP_OUT=$(cat -v "$LOOP_LOG" | tr '\r' '\n')
-    WAKEUPS=$(echo "$LOOP_OUT" | sed -n 's/.*reactor wakeups=\([0-9][0-9]*\).*/\1/p' | tail -1)
+LOOP_OUT=$(cat -v "$LOOP_LOG" | tr '\r' '\n')
+WAKEUPS=$(echo "$LOOP_OUT" | sed -n 's/.*reactor wakeups=\([0-9][0-9]*\).*/\1/p' | tail -1)
 
-    if [ -z "$WAKEUPS" ]; then
-        echo "  FAIL: reactor gate produced no wakeup count"
+if [ -z "$WAKEUPS" ]; then
+    echo "  FAIL: reactor gate produced no wakeup count"
+    fail=1
+else
+    # 5s window, 250ms epoll timeout, 1s watchdog + 2s health ticks.
+    # Correct behaviour is ~20-30 wakeups. Anything in the thousands
+    # means the reactor is spinning instead of sleeping.
+    echo "  reactor wakeups: ${WAKEUPS} (ceiling: ${WAKEUP_CEILING})"
+    if [ "$WAKEUPS" -gt "$WAKEUP_CEILING" ]; then
+        echo "  FAIL: reactor is spinning — a timerfd is not being drained"
         fail=1
     else
-        # 5s window, 250ms epoll timeout, 1s watchdog + 2s health ticks.
-        # Correct behaviour is ~20-30 wakeups. Anything in the thousands
-        # means the reactor is spinning instead of sleeping.
-        echo "  reactor wakeups: ${WAKEUPS} (ceiling: ${WAKEUP_CEILING})"
-        if [ "$WAKEUPS" -gt "$WAKEUP_CEILING" ]; then
-            echo "  FAIL: reactor is spinning — a timerfd is not being drained"
-            fail=1
-        else
-            echo "  OK: reactor sleeps between ticks"
-        fi
+        echo "  OK: reactor sleeps between ticks"
     fi
-    if grep -aqE "Attempted to kill init|Kernel panic" "$LOOP_LOG"; then
-        echo "  FAIL: kernel panicked in reactor mode"
-        fail=1
-    fi
-
-    # 1.5.4 deferred-restart gate. `kyb-crash` is /bin/false, so argonaut
-    # raises CRASH_RESTART with an exponential backoff on every exit. The
-    # SIGCHLD handler must only SCHEDULE; the reactor's restart tick performs
-    # the relaunch once the delay elapses. Only observable here — the
-    # boot-only pass shuts down before the reactor starts.
-    #
-    # Pre-1.5.4 the backoff was passed as init_restart_service's
-    # stop_timeout_ms and discarded, so a crash-looping service was
-    # relaunched as fast as it could die.
-    if echo "$LOOP_OUT" | grep -aqF "restart scheduled: kyb-crash"; then
-        echo "  OK: crash restart scheduled (not run inline)"
-    else
-        echo "  FAIL: no deferred restart scheduled for kyb-crash"
-        fail=1
-    fi
-    if echo "$LOOP_OUT" | grep -aqF "restarted: kyb-crash"; then
-        echo "  OK: restart tick performed the relaunch"
-    else
-        echo "  FAIL: restart tick never relaunched kyb-crash"
-        fail=1
-    fi
-
-    # 1.6.1 — the health-check and watchdog tick BODIES actually execute.
-    #
-    # Before this fixture, `grep -rn health_check qemu/` returned nothing, so
-    # init_poll_health recorded nothing for any service and both tick handlers
-    # drained empty vecs on every reactor tick. The reactor gate proved the
-    # DRAINS happen (audit rule 13) and nothing more — every
-    # restart-on-threshold and watchdog path from 1.5.4 was dead code in
-    # practice. Worth stating plainly: with no health_check configured there
-    # is NO WATCHDOG AT ALL, because init_check_watchdog's only non-startup
-    # arm is health-check-driven.
-    #
-    # kyb-health fails deterministically: a TCP connect to 127.0.0.1:9
-    # (discard), which nothing in the initramfs listens on, with retries=1 so
-    # the first failed poll crosses the threshold.
-    # 1.6.1 — PID 1 reaps a child it did not start.
-    #
-    # kyb-orphan backgrounds `sleep 1` and exits, so the sleep is reparented
-    # to init and must be collected by reap_and_log (src/lib/reaper.cyr) on
-    # SIGCHLD — a different path from argonaut's init_reap_services, which
-    # only knows about managed services. This is the property
-    # qemu/boot-crash-test.sh was written for; that script booted with
-    # -m 256M, which audit rule 8 says fails alloc_init outright, so it has
-    # been retired in favour of asserting it here where it actually runs.
-    # ⚠ NOT ASSERTED, and the reason is a finding rather than an omission.
-    # kyb-orphan exercises the orphan path — a child reparented to PID 1 —
-    # but nothing observable comes out of it: argonaut's init_reap_services
-    # calls proc_table_reap_orphans(), which does waitpid(-1, WNOHANG) in a
-    # loop and DISCARDS the count, and it runs before kybernet's own reaper.
-    # So orphans are reaped correctly and invisibly, and kybernet's
-    # reap_and_log is unreachable on that path once argonaut is up. Surfacing
-    # the count is an argonaut change and is on the roadmap for v1.6.2. The
-    # fixture stays because it exercises the path (which is how the watchdog
-    # SIGSEGV was found) and because the cgroup-count marker above depends on
-    # it.
-
-    if echo "$LOOP_OUT" | grep -aqF "health check failed: kyb-health"; then
-        echo "  OK: health tick body executed and reported a failing check"
-    else
-        echo "  FAIL: no health-check failure observed — the tick body never ran"
-        echo "$LOOP_OUT" | grep -aiE 'health' | head -3
-        fail=1
-    fi
-    rm -f "$LOOP_LOG"
 fi
+if grep -aqE "Attempted to kill init|Kernel panic" "$LOOP_LOG"; then
+    echo "  FAIL: kernel panicked in reactor mode"
+    fail=1
+fi
+
+# 1.5.4 deferred-restart gate. `kyb-crash` is /bin/false, so argonaut
+# raises CRASH_RESTART with an exponential backoff on every exit. The
+# SIGCHLD handler must only SCHEDULE; the reactor's restart tick performs
+# the relaunch once the delay elapses. Only observable here — the
+# boot-only pass shuts down before the reactor starts.
+#
+# Pre-1.5.4 the backoff was passed as init_restart_service's
+# stop_timeout_ms and discarded, so a crash-looping service was
+# relaunched as fast as it could die.
+if echo "$LOOP_OUT" | grep -aqF "restart scheduled: kyb-crash"; then
+    echo "  OK: crash restart scheduled (not run inline)"
+else
+    echo "  FAIL: no deferred restart scheduled for kyb-crash"
+    fail=1
+fi
+if echo "$LOOP_OUT" | grep -aqF "restarted: kyb-crash"; then
+    echo "  OK: restart tick performed the relaunch"
+else
+    echo "  FAIL: restart tick never relaunched kyb-crash"
+    fail=1
+fi
+
+# 1.6.1 — the health-check and watchdog tick BODIES actually execute.
+#
+# Before this fixture, `grep -rn health_check qemu/` returned nothing, so
+# init_poll_health recorded nothing for any service and both tick handlers
+# drained empty vecs on every reactor tick. The reactor gate proved the
+# DRAINS happen (audit rule 13) and nothing more — every
+# restart-on-threshold and watchdog path from 1.5.4 was dead code in
+# practice. Worth stating plainly: with no health_check configured there
+# is NO WATCHDOG AT ALL, because init_check_watchdog's only non-startup
+# arm is health-check-driven.
+#
+# kyb-health fails deterministically: a TCP connect to 127.0.0.1:9
+# (discard), which nothing in the initramfs listens on, with retries=1 so
+# the first failed poll crosses the threshold.
+# 1.6.1 — PID 1 reaps a child it did not start.
+#
+# kyb-orphan backgrounds `sleep 1` and exits, so the sleep is reparented
+# to init and must be collected by reap_and_log (src/lib/reaper.cyr) on
+# SIGCHLD — a different path from argonaut's init_reap_services, which
+# only knows about managed services. This is the property
+# qemu/boot-crash-test.sh was written for; that script booted with
+# -m 256M, which audit rule 8 says fails alloc_init outright, so it has
+# been retired in favour of asserting it here where it actually runs.
+# ⚠ NOT ASSERTED, and the reason is a finding rather than an omission.
+# kyb-orphan exercises the orphan path — a child reparented to PID 1 —
+# but nothing observable comes out of it: argonaut's init_reap_services
+# calls proc_table_reap_orphans(), which does waitpid(-1, WNOHANG) in a
+# loop and DISCARDS the count, and it runs before kybernet's own reaper.
+# So orphans are reaped correctly and invisibly, and kybernet's
+# reap_and_log is unreachable on that path once argonaut is up. Surfacing
+# the count is an argonaut change and is on the roadmap for v1.6.2. The
+# fixture stays because it exercises the path (which is how the watchdog
+# SIGSEGV was found) and because the cgroup-count marker above depends on
+# it.
+
+if echo "$LOOP_OUT" | grep -aqF "health check failed: kyb-health"; then
+    echo "  OK: health tick body executed and reported a failing check"
+else
+    echo "  FAIL: no health-check failure observed — the tick body never ran"
+    echo "$LOOP_OUT" | grep -aiE 'health' | head -3
+    fail=1
+fi
+rm -f "$LOOP_LOG"
 
 # ============================================================
 # Edge-boot gate (1.5.7)
@@ -494,6 +590,25 @@ fi
 # it cannot see. CI sets HARNESS_STRICT=1 (it installs the tools, so a
 # missing fixture there means something broke).
 HARNESS_STRICT="${HARNESS_STRICT:-0}"
+
+# Assert a captured boot did not panic PID 1.
+#
+# ⚠ THE EDGE AND AUTH PASSES NEVER CHECKED THIS. Pass 1 and the reactor gate
+# both grep for "Attempted to kill init|Kernel panic"; the other EIGHT boots
+# grepped only for the verity/password string they cared about. A PID-1 panic
+# in any of them was therefore invisible unless it also happened to suppress
+# that one string. This is not hypothetical — 1.6.1 found a SIGSEGV in
+# argonaut's watchdog that panicked PID 1, and it was found by a fixture, not
+# by the passes that were already booting through the same code.
+_assert_no_panic() {
+    # $1 = captured output, $2 = label
+    if echo "$1" | grep -aqE "Attempted to kill init|Kernel panic"; then
+        echo "  FAIL: [$2] PID 1 panicked"
+        echo "$1" | grep -aE "Attempted to kill init|Kernel panic" | head -2
+        fail=1
+    fi
+}
+
 _skip_or_fail() {
     if [ "$HARNESS_STRICT" = "1" ]; then
         echo "  FAIL: $1 (HARNESS_STRICT=1 — a skip is a failure here)"
@@ -530,6 +645,7 @@ else
 
     # 1. GOOD image must verify.
     GOOD_OUT=$(_edge_boot "${EDGE_DIR}/data.img" "")
+    _assert_no_panic "$GOOD_OUT" "edge good"
 
     # Distinguish a BROKEN FIXTURE from a real failure. kybernet reports
     # "veritysetup missing or unrunnable" (rc 127 / spawn failure) as a
@@ -540,8 +656,16 @@ else
     # Match the klog line, not the kmsg one: kmsg goes to /dev/kmsg and the
     # harness boots with loglevel=3, which keeps it off the serial console.
     if echo "$GOOD_OUT" | grep -aqF "veritysetup could not run"; then
-        echo "  SKIPPED: staged veritysetup could not run in the VM"
-        echo "           (incomplete library closure — fixture problem, not a kybernet failure)"
+        # ⚠ ROUTED THROUGH STRICT MODE, with its OWN message. This used to be a
+        # bare `echo SKIPPED` that set SKIP_EDGE=1 and nothing else — the one
+        # edge path that ignored HARNESS_STRICT. The run still went red, but
+        # indirectly and much later, because SKIP_EDGE=1 makes the auth block
+        # report "no auth fixture". So a broken shared-library closure inside
+        # the VM — precisely the multiarch failure the staging loop in
+        # build-initramfs.sh exists to prevent, i.e. the Ubuntu-specific one —
+        # was reported to the operator as a missing credential fixture. That is
+        # a full CI round trip spent diagnosing the wrong subsystem.
+        _skip_or_fail "staged veritysetup could not run in the VM (incomplete library closure — fixture problem, not a kybernet defect)"
         SKIP_EDGE=1
     fi
 
@@ -562,6 +686,7 @@ else
     cp "${EDGE_DIR}/data.img" "$CORRUPT_IMG"
     printf 'CORRUPTED' | dd of="$CORRUPT_IMG" bs=1 seek=2000 conv=notrunc status=none
     BAD_OUT=$(_edge_boot "$CORRUPT_IMG" "")
+    _assert_no_panic "$BAD_OUT" "edge corrupt"
     if echo "$BAD_OUT" | grep -aqF "dm-verity verification FAILED"; then
         echo "  OK: corrupted image fails verification"
     else
@@ -581,6 +706,7 @@ else
     #    to verify, so these are the only way back in — and an escape hatch
     #    that has never been executed is not an escape hatch.
     PERM_OUT=$(_edge_boot "$CORRUPT_IMG" "kybernet.edge=permissive")
+    _assert_no_panic "$PERM_OUT" "edge permissive"
     # ASCII-only needle: these logs are rendered through `cat -v`, which
     # escapes the em-dash in the source string into M-BM- byte sequences.
     if echo "$PERM_OUT" | grep -aqF "continuing despite the above"; then
@@ -595,6 +721,7 @@ else
     # permissive: the board still boots, but the verification still runs and
     # its result still reaches dmesg. The audit trail is the point.
     OFF_OUT=$(_edge_boot "$CORRUPT_IMG" "kybernet.edge=off")
+    _assert_no_panic "$OFF_OUT" "edge off"
     if echo "$OFF_OUT" | grep -aqF "DOWNGRADED to permissive"; then
         echo "  OK: kybernet.edge=off downgrades on a root_hash-pinned board"
     else
@@ -679,10 +806,26 @@ else
         local ok_out bad_out
 
         ok_out=$(_auth_boot "hunter2" "$initrd" || true)
+        _assert_no_panic "$ok_out" "$label correct-password"
         if echo "$ok_out" | grep -aqF "emergency shell: authenticated"; then
             echo "  OK: [$label] correct password authenticates"
         else
-            echo "  FAIL: [$label] correct password did not authenticate (the 1.5.4-1.5.7 brick)"
+            # Discriminate the real regression from a slow VM. Both produce the
+            # same missing "authenticated" line, but they mean opposite things:
+            # no prompt at all = the boot died earlier or the fixed 8 s wait in
+            # _auth_boot fired before the prompt appeared (nested virt, cold
+            # cache); a prompt with no verdict = the 1.5.4-1.5.7 brick, where
+            # the read hit EOF on fd 0 and treated it as a failed auth. Saying
+            # "brick" for the former sends the next person into emergency_auth
+            # for what is a timing problem in this script.
+            if echo "$ok_out" | grep -aqF "Password:"; then
+                echo "  FAIL: [$label] prompt appeared but correct password did not authenticate"
+                echo "        (this is the 1.5.4-1.5.7 brick shape — see CLAUDE.md rule 20)"
+            else
+                echo "  FAIL: [$label] the password prompt never appeared at all"
+                echo "        NOT the brick: the boot died before phase 6c, or the VM was"
+                echo "        too slow for _auth_boot's fixed 8 s pre-prompt wait."
+            fi
             echo "$ok_out" | grep -aiE 'password|authent|credential' | head -3
             fail=1
         fi
@@ -696,6 +839,7 @@ else
         fi
 
         bad_out=$(_auth_boot "wrongpass" "$initrd" || true)
+        _assert_no_panic "$bad_out" "$label wrong-password"
         if echo "$bad_out" | grep -aqF "AUTHENTICATION FAILED"; then
             echo "  OK: [$label] wrong password is rejected"
         else
@@ -784,6 +928,7 @@ else
     echo ""
     echo "=== HARNESS TEST: FAIL ==="
     echo "  full log: $LOG (preserved for inspection)"
+    echo "  timestamped: $TLOG (host ns prefix per line)"
     trap - EXIT
     exit 1
 fi

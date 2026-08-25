@@ -101,6 +101,31 @@ of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into
       so a service asking for a 5 s check gets the global interval.
 - [ ] **Unbounded arena growth on two reactor hot paths** — the 1.4.2 MEDIUM-7 class,
       reopened. In the one arena rule 8 says PID 1 never resets.
+- [ ] **Landlock has no harness fixture** — standing rule 27's own criterion, unmet.
+      `"landlock"` reaches `landlock_restrict_self` through `kyb_pre_exec`, but no
+      fixture sets an explicit rule list and nothing asserts from inside the child
+      that a path outside the allowed set is actually denied. `kyb-confined` covers
+      capabilities and `no_new_privs`, `kyb-seccomp` covers the filter; the third
+      confinement mechanism is the one with no fixture — which is exactly how the
+      `"seccomp": "basic"` defect survived three releases. Adding a `kyb-landlock`
+      service means bumping the `services parsed: N` and `removed service cgroups: N`
+      markers in `qemu/boot-test.sh`.
+- [ ] **The syscall-dominated benchmarks are normalised against the wrong reference.**
+      `bench-history.sh` scales everything by the `_calibration` reference loop, which
+      is pure userspace. The `getpid`/`getuid`/`is_root` rows are syscall-bound, so
+      their cost tracks the host's mitigation settings (KPTI, retpoline, nested virt)
+      and moves independently of the calibration loop — a runner change can flag them
+      as a regression with nothing in kybernet having changed. Fix is a second named
+      scale: record `getpid` as `CALIB_SYS_NAME` and normalise the syscall-heavy set
+      against that. Not yet fired; noted before it does. (Standing rule 37.)
+- [ ] **`seccomp: basic` is measured against a dynamically linked binary only.**
+      The dev box stages Arch's dynamic busybox; CI installs `busybox-static`, whose
+      glibc start-up issues `readlinkat("/proc/self/exe")` and `prctl` that the
+      dynamic path does not. Both are denied `EPERM` and glibc tolerates it, so
+      nothing fails — but the local green and the CI green attest to two different
+      syscall sets. Decide deliberately whether `basic` covers static linkage, and
+      measure whichever answer is chosen rather than widening the list to quiet a
+      harmless denial.
 
 ---
 

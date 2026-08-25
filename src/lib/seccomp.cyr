@@ -371,6 +371,20 @@ fn seccomp_basic_service() {
     # The rest is what glibc's loader needs before `main` — measured, not
     # guessed, by escalating an allowlist against a real dynamically linked
     # binary until it ran: access, newfstatat, pread64, prlimit64.
+    #
+    # ⚠ MEASURED AGAINST A DYNAMIC BINARY ONLY, AND CI EXERCISES A STATIC ONE.
+    # The dev box stages Arch's /usr/lib/initcpio/busybox (PIE against libc);
+    # ci.yml installs busybox-static. A static glibc start-up issues calls the
+    # dynamic path does not — readlinkat("/proc/self/exe") and prctl among
+    # them — and neither is on this list. That is survivable rather than fatal
+    # only because standing rule 28 made the default ERRNO(EPERM) instead of
+    # KILL_PROCESS: glibc tolerates both denials and the service still runs.
+    # But it means the green kyb-seccomp assertion locally and the green one
+    # in CI attest to two different syscall sets, and this list is measured
+    # against exactly one of them. Deliberately NOT widened here — adding
+    # syscalls to an allowlist to quiet a denial that costs nothing is how an
+    # allowlist stops meaning anything. Recorded so the next person measuring
+    # it knows which linkage the numbers came from.
     seccomp_allow(b, BS_EXECVE);
     #ifdef CYRIUS_ARCH_X86
     seccomp_allow(b, BS_ACCESS);          # aarch64 has no `access`

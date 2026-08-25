@@ -828,6 +828,15 @@ fn run_boot_stages() {
 # Service startup
 # ================================================================
 
+# Total wall-clock budget for settling EBUSY on the teardown sweep, across
+# ALL services. Deliberately a whole-sweep budget rather than per-cgroup: a
+# per-cgroup bound multiplies by the service count, and this runs on the path
+# to sys_reboot where the one unacceptable outcome is not arriving.
+enum CgroupSettle {
+    CG_SETTLE_BUDGET_MS = 150;
+    CG_SETTLE_STEP_MS = 5;
+}
+
 # Tear down every service cgroup argonaut knows about.
 #
 # Called from do_shutdown after init_stop_all. Services have been SIGTERMed
@@ -845,17 +854,62 @@ fn run_boot_stages() {
 # Best-effort throughout: this runs on the shutdown path, where a failed
 # rmdir must not stop us reaching sys_reboot. Names come from argonaut's
 # registry as cstrs, which is what the cgroup helpers want.
+# rmdir a service cgroup, absorbing the SIGKILL-delivery race.
+#
+# ⚠ `cgroup.kill` is ASYNCHRONOUS. It sets the kill bit and returns; the
+# kernel then walks the cgroup delivering SIGKILL and the tasks exit on their
+# own schedule. rmdir on a cgroup that still holds a task fails EBUSY. So the
+# old `kill_cgroup(); remove_service_cgroup();` pair on adjacent lines was a
+# race whose outcome depended on whether the reaping happened to land inside
+# the few microseconds between two syscalls.
+#
+# It was not a harmless one. The harness asserted the racy count as an exact
+# literal ("removed service cgroups: 8"), so the gate encoded the bug: 8 meant
+# "one cgroup leaked and we expected it to". Measured across kernels, 8 was
+# not even stable — the same tree yields 9 on a faster kernel, on a slower
+# one, or under load. Retrying EBUSY makes the answer 9 always, and 9 is the
+# correct answer: every cgroup torn down.
+#
+# Only EBUSY is retried. Every other errno is terminal — ENOENT means someone
+# else removed it, and retrying either of those just burns the budget.
+#
+# ⚠ `err_code_of`, NOT `err_code`. They are not variants of each other:
+# err_code(ret) is `0 - ret` and takes a RAW negative syscall return, while
+# err_code_of(res) reads the payload out of a tagged Result box. remove_service_cgroup
+# returns a box, so err_code() on it negates the POINTER — a large negative
+# number that never equals EBUSY, so the retry loop silently never ran and the
+# teardown behaved exactly as it had before the fix. Both names are in scope
+# here (syscalls + result), neither is a compile error at the call site, and
+# the only symptom is the bug you were trying to fix appearing to persist.
+fn _remove_cgroup_settled(nm, deadline) {
+    var r = remove_service_cgroup(nm);
+    if (is_ok(r) == 1) { return 1; }
+    while (err_code_of(r) == EBUSY && monotonic_ms() < deadline) {
+        sleep_ms(CG_SETTLE_STEP_MS);
+        r = remove_service_cgroup(nm);
+        if (is_ok(r) == 1) { return 1; }
+    }
+    return 0;
+}
+
 fn remove_all_service_cgroups() {
     if (g_init == 0) { return 0; }
     var names = init_service_names(g_init);
     var n = vec_len(names);
     var removed = 0;
+    # One deadline for the whole sweep — see CG_SETTLE_BUDGET_MS.
+    var deadline = monotonic_ms() + CG_SETTLE_BUDGET_MS;
     for (var i = 0; i < n; i = i + 1) {
         var nm = vec_get(names, i);
         kill_cgroup(nm);
-        if (is_ok(remove_service_cgroup(nm)) == 1) { removed = removed + 1; }
+        removed = removed + _remove_cgroup_settled(nm, deadline);
     }
+    # Report the shortfall too. "removed 8" on its own reads like a success
+    # line; it is the leak that the exact-count gate used to bless.
     if (removed > 0) { klog2("removed service cgroups: ", _u64_str(removed)); }
+    if (removed < n) {
+        klog2("service cgroups still busy at shutdown: ", _u64_str(n - removed));
+    }
     return removed;
 }
 

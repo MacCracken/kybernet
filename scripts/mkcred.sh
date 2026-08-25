@@ -123,14 +123,21 @@ if [ "${1:-}" = "--check" ]; then
     exit 0
 fi
 
-# --- toolchain ---------------------------------------------------------------
-command -v openssl >/dev/null 2>&1 || die "openssl not found (need 3.2+ for ARGON2ID)"
-openssl list -kdf-algorithms 2>/dev/null | grep -qi ARGON2ID \
-    || die "this openssl has no ARGON2ID KDF — need OpenSSL 3.2 or newer ($(openssl version))"
+# --- parameter bounds FIRST, toolchain second --------------------------------
+#
+# ⚠ ORDER MATTERS, and getting it wrong made a CI check fake. The openssl
+# ARGON2ID probe used to run here, before the bounds — so on a runner with
+# OpenSSL 3.0 (Ubuntu 24.04) EVERY invocation died on the probe, including the
+# five deliberately-out-of-range ones ci.yml asserts are refused. All five
+# exited non-zero for the wrong reason, the check saw five refusals, and it
+# printed success while testing nothing. On a dev box with OpenSSL 3.6 the
+# same five refused correctly, so the divergence was invisible locally.
+#
+# Validating parameters needs no crypto. Do it first, always, everywhere.
 
-# ⚠ Same base-prefix hazard as `--check`: `T=08` would make every `$(( ))`
-# below a fatal "value too great for base", and `set -e` does not stop a
-# failing command inside a `[ … ] || die` list. Normalise first, once.
+# Same base-prefix hazard as `--check`: `T=08` would make every `$(( ))` below
+# a fatal "value too great for base", and `set -e` does not stop a failing
+# command inside a `[ … ] || die` list. Normalise first, once.
 case "$T$M$P$SALT_BYTES$TAG_BYTES" in *[!0-9]*) die "T/M/P/SALT_BYTES/TAG_BYTES must be decimal integers" ;; esac
 T=$((10#$T)); M=$((10#$M)); P=$((10#$P))
 SALT_BYTES=$((10#$SALT_BYTES)); TAG_BYTES=$((10#$TAG_BYTES))
@@ -143,6 +150,13 @@ SALT_BYTES=$((10#$SALT_BYTES)); TAG_BYTES=$((10#$TAG_BYTES))
 [ "$SALT_BYTES" -le 64 ] || die "SALT_BYTES=$SALT_BYTES above kybernet's 64 — the record would be REJECTED at boot"
 [ "$TAG_BYTES" -ge 32 ] || die "TAG_BYTES=$TAG_BYTES below RFC 9106 §4's 32"
 [ "$TAG_BYTES" -le 64 ] || die "TAG_BYTES=$TAG_BYTES above kybernet's 64 — the record would be REJECTED at boot"
+
+# Only now does anything need openssl. Note the harness does NOT come through
+# here — qemu/mkcred-fixture.cyr mints the gate's credential with sigil's own
+# Argon2id, precisely so a release gate never depends on a host capability.
+command -v openssl >/dev/null 2>&1 || die "openssl not found (need 3.2+ for ARGON2ID)"
+openssl list -kdf-algorithms 2>/dev/null | grep -qi ARGON2ID \
+    || die "this openssl has no ARGON2ID KDF — need OpenSSL 3.2 or newer ($(openssl version))"
 
 # --- password ----------------------------------------------------------------
 # Read from a tty with echo off. Taking it as an argv value instead would put

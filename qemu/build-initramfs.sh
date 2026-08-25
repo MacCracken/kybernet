@@ -69,22 +69,51 @@ if [ -n "$BUSYBOX" ]; then
     ln -sf /bin/sh "${INITRAMFS_DIR}/usr/bin/agnoshi"
     echo "  bundled busybox from $BUSYBOX"
 
-    # Arch ships busybox dynamically linked. If detected, copy
-    # /lib64/ld-linux + the libc family into the initramfs so
-    # shell-init wrappers can exec it. argonaut hit this same
-    # wall at 1.6.2 and ships the same workaround — pattern lifted.
-    if file "$BUSYBOX" 2>/dev/null | grep -q "dynamically linked"; then
-        for lib in $(ldd "$BUSYBOX" 2>/dev/null | awk '/=>/ {print $3} /^\s*\//{print $1}'); do
+    # Arch ships busybox dynamically linked; Ubuntu's busybox-static does not.
+    # If dynamic, copy /lib64/ld-linux + the libc family into the initramfs so
+    # shell-init wrappers can exec it. argonaut hit this same wall at 1.6.2 and
+    # ships the same workaround — pattern lifted.
+    #
+    # ⚠ TWO PORTABILITY TRAPS, both of which fail SILENTLY and both of which
+    # produce the identical symptom: an initramfs whose /bin/sh ENOENTs at exec,
+    # i.e. seven of nine services dying with no diagnostic anywhere.
+    #
+    #   1. This used to branch on `file ... | grep dynamically linked`. `file` is
+    #      not in ci.yml's apt list — it is base-image only. No `file` -> empty
+    #      pipe -> `if` false -> libc never staged, no warning. `ldd` is in
+    #      libc-bin (always present) and exits non-zero on a static binary, which
+    #      is exactly the question being asked. One fewer dependency.
+    #   2. The lib harvest used `awk '/^\s*\//'`. `\s` is a GNU extension, NOT
+    #      POSIX ERE. Ubuntu's /usr/bin/awk is mawk: same input, gawk emits the
+    #      loader line and mawk emits nothing, exit 0, no warning. Match the
+    #      absolute path with grep and pick the loader by name instead — the
+    #      shape already used for veritysetup below.
+    if ldd "$BUSYBOX" >/dev/null 2>&1; then
+        LIBS=$(ldd "$BUSYBOX" 2>/dev/null | awk '{print $3}' | grep '^/' || true)
+        LOADER=$(ldd "$BUSYBOX" 2>/dev/null | awk '/ld-linux|ld64|ld-musl/{print $1}' || true)
+        for lib in $LIBS $LOADER; do
             [ -n "$lib" ] || continue
             [ -f "$lib" ] || continue
             tgt_dir="${INITRAMFS_DIR}$(dirname "$lib")"
             mkdir -p "$tgt_dir"
-            cp "$lib" "$tgt_dir/"
+            cp -L "$lib" "$tgt_dir/"
         done
         echo "  bundled dynamic-loader + libc (busybox is dynamically linked)"
     fi
 else
-    echo "  WARNING: busybox not found — boot-shutdown/boot-crash tests unavailable (harness mode unaffected)"
+    # ⚠ NOT "harness mode unaffected" — that comment was written in 1.1.4 when
+    # busybox really was only for the boot-shutdown/boot-crash variants. Since
+    # 1.5.0 the primary harness stages nine services and every one of them execs
+    # a busybox applet (/bin/true, /bin/sleep, /bin/sh). Worse, the whole
+    # config.json heredoc below sits inside a second `[ -n "$BUSYBOX" ]` guard,
+    # so no busybox meant no /etc/kybernet at all — and the next unguarded write
+    # into that directory aborted under `set -e` complaining about a config file,
+    # 200 lines from the actual cause. Fail here, where the reason is legible.
+    echo "ERROR: busybox not found — searched /usr/lib/initcpio/busybox," >&2
+    echo "       /usr/bin/busybox, /bin/busybox. Install busybox-static." >&2
+    echo "       Every harness service execs a busybox applet; there is no" >&2
+    echo "       degraded mode that still proves anything." >&2
+    exit 1
 fi
 
 # Stage a real kybernet config with real services (1.5.0).
@@ -119,13 +148,16 @@ fi
 # later, PID 1's own reaper must collect it — reap_and_log's path, not
 # argonaut's init_reap_services.
 #
-# ⚠ The delay is 0.2 s and not 1 s deliberately. The boot pass shuts down at
-# ~600 ms, and a child still alive inside kyb-orphan's cgroup at that point
-# makes the teardown's rmdir return EBUSY — `removed service cgroups` then
-# reports one fewer than were created. That is a real race in the teardown
-# (kill_cgroup does not wait for the processes to actually die before
-# remove_service_cgroup runs) and it is on the roadmap for v1.6.2; this
-# fixture is not the place to hold it open. That script has been retired: it booted
+# ⚠ The delay is 0.2 s and not 1 s deliberately: it has to outlive the boot
+# pass's ~600 ms shutdown so there is genuinely an orphan to reap, without
+# being so long that it dominates the run.
+#
+# It used to also be the thing that made `removed service cgroups` report one
+# fewer than were created — a child still alive inside kyb-orphan's cgroup at
+# teardown makes rmdir return EBUSY, because kill_cgroup does not wait for
+# SIGKILL to land before remove_service_cgroup runs. That teardown race was
+# fixed at 1.6.1 (bounded EBUSY retry in _remove_cgroup_settled), so the count
+# is now 9 of 9 regardless of how this fixture is timed. That script has been retired: it booted
 # with `-m 256M`, which audit rule 8 says fails alloc_init's mmap outright,
 # so it would have panicked before testing anything, and its header still
 # described a kybernet without service management.
@@ -216,9 +248,12 @@ fi
 # the 3000 ms budget was calibrated against a shutdown with no work to do.
 # 400 ms keeps the graceful-stop path exercised without spending the budget
 # waiting for it.
-if [ -n "$BUSYBOX" ]; then
-    mkdir -p "${INITRAMFS_DIR}/etc/kybernet"
-    cat > "${INITRAMFS_DIR}/etc/kybernet/config.json" << 'CFGEOF'
+# The `[ -n "$BUSYBOX" ]` guard that used to wrap this block is gone: a
+# missing busybox is now fatal above, so the guard was provably always
+# true — and while it stood, no busybox meant no /etc/kybernet directory
+# and an abort 200 lines later blaming the edge config.
+mkdir -p "${INITRAMFS_DIR}/etc/kybernet"
+cat > "${INITRAMFS_DIR}/etc/kybernet/config.json" << 'CFGEOF'
 {
   "boot_mode": "recovery",
   "log_to_console": true,
@@ -319,8 +354,12 @@ if [ -n "$BUSYBOX" ]; then
   ]
 }
 CFGEOF
-    echo "  staged /etc/kybernet/config.json (2 services, 1.5.0 harness)"
-fi
+# Counted, not hardcoded — it said "2 services" from 1.5.0 until 1.6.1
+# while staging nine, which is the kind of stale number that makes a log
+# line worse than no log line.
+_SVC_N=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1]))['services']))" \
+    "${INITRAMFS_DIR}/etc/kybernet/config.json" 2>/dev/null || echo "?")
+echo "  staged /etc/kybernet/config.json (${_SVC_N} services)"
 
 # Minimal /etc/hosts so any resolver lookups during boot don't fail
 # on missing localhost.
@@ -336,6 +375,16 @@ sudo mknod "${INITRAMFS_DIR}/dev/console" c 5 1 2>/dev/null || true
 sudo mknod "${INITRAMFS_DIR}/dev/null"    c 1 3 2>/dev/null || true
 sudo mknod "${INITRAMFS_DIR}/dev/ttyS0"   c 4 64 2>/dev/null || true
 sudo mknod "${INITRAMFS_DIR}/dev/kmsg"    c 1 11 2>/dev/null || true
+# Say which of the two image shapes was just built. `|| true` on each mknod
+# means this silently produces EITHER an image with four device nodes (CI:
+# passwordless sudo) or one with none (a dev box where sudo prompts) — two
+# materially different initramfses, previously indistinguishable from the log.
+if [ -c "${INITRAMFS_DIR}/dev/console" ]; then
+    echo "  /dev nodes: created (console, null, ttyS0, kmsg)"
+else
+    echo "  /dev nodes: SKIPPED — no CAP_MKNOD (sudo unavailable or prompting)"
+    echo "              the kernel mounts devtmpfs, so the boot still works"
+fi
 sudo chmod 666 "${INITRAMFS_DIR}/dev/console" "${INITRAMFS_DIR}/dev/null" "${INITRAMFS_DIR}/dev/ttyS0" "${INITRAMFS_DIR}/dev/kmsg" 2>/dev/null || true
 
 # ============================================================
@@ -361,12 +410,22 @@ sudo chmod 666 "${INITRAMFS_DIR}/dev/console" "${INITRAMFS_DIR}/dev/null" "${INI
 EDGE_DIR="${SCRIPT_DIR}/edge"
 if command -v veritysetup >/dev/null 2>&1; then
     rm -rf "$EDGE_DIR"; mkdir -p "$EDGE_DIR"
-    # 1 MiB, not 4: CI runners have no KVM, so the edge passes run under
-    # TCG where every hashed block is emulated. 1 MiB is still a real
-    # Merkle tree over 256 blocks — the round trip is genuine, just cheap.
+    # 1 MiB, not 4. This used to say "CI runners have no KVM, so the edge
+    # passes run under TCG" — which contradicts ci.yml, where the prereq step
+    # requires /dev/kvm and skips the job without it. Both comments could not
+    # be right and one of them was going to mislead someone. The real reason
+    # to keep it at 1 MiB is that it is enough: a genuine Merkle tree over 256
+    # blocks exercises the whole format/verify round trip, and growing it buys
+    # nothing but wall time — which matters more, not less, under the nested
+    # virtualisation CI actually runs on.
     dd if=/dev/urandom of="${EDGE_DIR}/data.img" bs=1M count=1 status=none
     truncate -s 1M "${EDGE_DIR}/hash.img"
-    EDGE_ROOT_HASH=$(veritysetup format "${EDGE_DIR}/data.img" "${EDGE_DIR}/hash.img" 2>/dev/null \
+    # stderr kept in a file, not discarded: when this produces no root hash the
+    # else arm below drops all three fixtures and every dependent pass turns
+    # into a SKIP (or, under HARNESS_STRICT, a failure) whose stated reason is
+    # "no fixture" — with veritysetup's actual complaint thrown away.
+    _VS_ERR="${EDGE_DIR}/.veritysetup-format.err"
+    EDGE_ROOT_HASH=$(veritysetup format "${EDGE_DIR}/data.img" "${EDGE_DIR}/hash.img" 2>"$_VS_ERR" \
         | awk '/Root hash/{print $3}')
 
     if [ -n "$EDGE_ROOT_HASH" ] && [ ${#EDGE_ROOT_HASH} -eq 64 ]; then
@@ -460,12 +519,9 @@ c['emergency_require_auth'] = True
 c['emergency_password_hash'] = sys.argv[2]
 p.write_text(json.dumps(c, indent=2))
 AUTHPY
+        # GNU cpio only — see the note at the final image below.
         ( cd "$AUTH_STAGE"
-          if command -v bsdcpio >/dev/null 2>&1; then
-              find . | bsdcpio -o -H newc 2>/dev/null | gzip > "${SCRIPT_DIR}/initramfs-auth.cpio.gz"
-          else
-              find . | cpio -o -H newc 2>/dev/null | gzip > "${SCRIPT_DIR}/initramfs-auth.cpio.gz"
-          fi )
+          find . | cpio -o -H newc 2>/dev/null | gzip > "${SCRIPT_DIR}/initramfs-auth.cpio.gz" )
         echo "  staged emergency-auth fixture (legacy SHA-256)"
 
         # Emergency-auth fixture, KDF format (1.5.9). A THIRD cpio, not a
@@ -489,17 +545,46 @@ AUTHPY
         sudo chmod 666 "${KDF_STAGE}/dev/console" "${KDF_STAGE}/dev/null" \
             "${KDF_STAGE}/dev/ttyS0" "${KDF_STAGE}/dev/kmsg" 2>/dev/null || true
 
-        # ALLOW_WEAK because the gate's password is "hunter2" — deliberately
-        # the same string the legacy fixture uses, so the two boots differ in
-        # exactly one variable: the stored credential format. mkcred.sh
-        # otherwise refuses anything under 12 characters, which is the right
-        # default for a real board and the wrong one for a test vector.
-        if ! KDF_REC=$(ALLOW_WEAK=1 KYB_PASSWORD='hunter2' \
-                bash "${SCRIPT_DIR}/../scripts/mkcred.sh" 2>/dev/null); then
-            echo "  WARNING: mkcred.sh failed (openssl 3.2+ with ARGON2ID needed)"
-            echo "  WARNING: skipping the KDF emergency-auth fixture"
-            KDF_REC=""
+        # ⚠ GENERATED WITH KYBERNET'S OWN ARGON2ID, not with openssl.
+        #
+        # This used to call scripts/mkcred.sh, which drives
+        # `openssl kdf ... ARGON2ID`. That is the right tool for an OPERATOR
+        # and the wrong dependency for a gate: ARGON2ID landed in OpenSSL 3.2
+        # and Ubuntu 24.04 runners ship 3.0.x, so the fixture was dropped, the
+        # argon2id pass skipped, and HARNESS_STRICT=1 failed the build — the
+        # gate demanding a property the environment could not supply.
+        #
+        # qemu/mkcred-fixture.cyr uses sigil's Argon2id, the same
+        # implementation emergency_auth.cyr verifies with, so any machine that
+        # can build kybernet can mint the fixture. Verified byte-identical to
+        # OpenSSL 3.6 at these parameters. The independent cross-check stays
+        # in src/test.cyr, which carries OpenSSL-generated vectors — see that
+        # file's header for why generating and verifying with one
+        # implementation is not a check.
+        #
+        # A failure here is FATAL, not a warning. Silently dropping the
+        # fixture is what let this pass go unrun; if the generator cannot
+        # build or run, the staging is broken and should say so.
+        MKCRED_BIN="${PROJECT_DIR}/build/mkcred-fixture"
+        # stdout to /dev/null, stderr KEPT. This arm is a hard `exit 1` that
+        # aborts the whole initramfs build; swallowing the compiler diagnostic
+        # made its entire output one line that says only that it failed.
+        if ! (cd "$PROJECT_DIR" && cyrius build qemu/mkcred-fixture.cyr "$MKCRED_BIN" >/dev/null); then
+            echo "  ERROR: could not build qemu/mkcred-fixture.cyr (compiler output above)"
+            exit 1
         fi
+        if ! KDF_REC=$("$MKCRED_BIN"); then
+            echo "  ERROR: mkcred-fixture failed to mint a credential"
+            exit 1
+        fi
+        case "$KDF_REC" in
+            'v1$'*) ;;
+            *) echo "  ERROR: mkcred-fixture emitted something that is not a v1 record: $KDF_REC"; exit 1 ;;
+        esac
+        # Cheap belt-and-braces: the shell validator agrees the record is one
+        # kybernet will accept, before it is baked into an image.
+        bash "${SCRIPT_DIR}/../scripts/mkcred.sh" --check "$KDF_REC" >/dev/null || {
+            echo "  ERROR: mkcred-fixture emitted a record mkcred.sh --check rejects"; exit 1; }
         if [ -n "$KDF_REC" ]; then
             python3 - "$KDF_STAGE" "$KDF_REC" << 'KDFPY'
 import sys, json, pathlib
@@ -510,25 +595,23 @@ c['emergency_password_hash'] = sys.argv[2]
 p.write_text(json.dumps(c, indent=2))
 KDFPY
             ( cd "$KDF_STAGE"
-              if command -v bsdcpio >/dev/null 2>&1; then
-                  find . | bsdcpio -o -H newc 2>/dev/null | gzip > "${SCRIPT_DIR}/initramfs-auth-kdf.cpio.gz"
-              else
-                  find . | cpio -o -H newc 2>/dev/null | gzip > "${SCRIPT_DIR}/initramfs-auth-kdf.cpio.gz"
-              fi )
+              find . | cpio -o -H newc 2>/dev/null | gzip > "${SCRIPT_DIR}/initramfs-auth-kdf.cpio.gz" )
             echo "  staged emergency-auth fixture (argon2id v1)"
         else
             rm -f "${SCRIPT_DIR}/initramfs-auth-kdf.cpio.gz"
         fi
 
         ( cd "$EDGE_STAGE"
-          if command -v bsdcpio >/dev/null 2>&1; then
-              find . | bsdcpio -o -H newc 2>/dev/null | gzip > "${SCRIPT_DIR}/initramfs-edge.cpio.gz"
-          else
-              find . | cpio -o -H newc 2>/dev/null | gzip > "${SCRIPT_DIR}/initramfs-edge.cpio.gz"
-          fi )
+          find . | cpio -o -H newc 2>/dev/null | gzip > "${SCRIPT_DIR}/initramfs-edge.cpio.gz" )
         echo "  staged edge fixture (root_hash=${EDGE_ROOT_HASH:0:16}...)"
     else
         echo "  WARNING: veritysetup format produced no root hash — edge pass will SKIP"
+        if [ -s "$_VS_ERR" ]; then
+            echo "           veritysetup said:"
+            sed 's/^/             /' "$_VS_ERR" | head -5
+        else
+            echo "           (veritysetup printed nothing to stderr)"
+        fi
         _drop_stale_fixtures "veritysetup format produced no root hash"
     fi
 else
@@ -537,14 +620,14 @@ else
 fi
 
 cd "${INITRAMFS_DIR}"
-# Prefer bsdcpio (libarchive) where present; fall back to GNU cpio so the
-# harness builds on stock CI runners that ship only `cpio`. Both emit the
-# `newc` format the kernel's initramfs loader expects.
-if command -v bsdcpio >/dev/null 2>&1; then
-    find . | bsdcpio -o -H newc 2>/dev/null | gzip > "${SCRIPT_DIR}/initramfs.cpio.gz"
-else
-    find . | cpio -o -H newc 2>/dev/null | gzip > "${SCRIPT_DIR}/initramfs.cpio.gz"
-fi
+# GNU cpio only. This used to prefer bsdcpio (libarchive) where present and
+# fall back to `cpio` — which meant the dev box (libarchive installed) and CI
+# (only `cpio`, from the apt list) built their images with DIFFERENT archivers.
+# Both emit `newc` and both boot, but the bytes differ, so a local image and a
+# CI image were never comparable and a bug in one archiver's output could not
+# be reproduced across the two. `cpio` is present on both; pick it and stop
+# having two shapes.
+find . | cpio -o -H newc 2>/dev/null | gzip > "${SCRIPT_DIR}/initramfs.cpio.gz"
 
 INIT_SIZE=$(wc -c < "${INITRAMFS_DIR}/sbin/init")
 TOTAL_SIZE=$(du -h "${SCRIPT_DIR}/initramfs.cpio.gz" | cut -f1)
