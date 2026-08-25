@@ -87,6 +87,18 @@ fi
 # and get reaped through the normal SIGCHLD path. kyb-dep is a dependency
 # of kyb-svc, so a correct wave resolution must start kyb-dep first.
 #
+# kyb-confined is the 1.5.2 proof. It carries a real security policy —
+# drop every capability, set no_new_privs — and then reports its OWN
+# /proc/self/status to the console, so the harness can assert the policy
+# actually took effect in the child rather than trusting that kyb_pre_exec
+# was called. It writes to /dev/console explicitly because argonaut
+# redirects a service's stdout/stderr to /dev/null.
+#
+# This is also the privileged validation of drop_cap_sets() that the unit
+# suite cannot do: under QEMU kybernet is genuinely PID 1 running as root,
+# so capset(2) really executes instead of short-circuiting on the euid
+# check.
+#
 # shutdown_timeout_ms is deliberately short. Now that services actually
 # run, shutdown really does SIGTERM them and poll in 50 ms steps up to the
 # timeout — the mode defaults include a long-lived shell (agnoshi -> busybox
@@ -116,6 +128,18 @@ if [ -n "$BUSYBOX" ]; then
       "binary": "/bin/true",
       "type": "oneshot",
       "restart": "never"
+    },
+    {
+      "name": "kyb-confined",
+      "description": "reports its own confinement to the console",
+      "binary": "/bin/sh",
+      "args": ["-c", "grep -E '^(CapEff|NoNewPrivs)' /proc/self/status > /dev/console 2>&1"],
+      "type": "oneshot",
+      "restart": "never",
+      "security": {
+        "no_new_privs": true,
+        "capabilities": []
+      }
     }
   ]
 }

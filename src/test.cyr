@@ -450,6 +450,126 @@ fn test_required_stage_failure_propagates() {
     return 0;
 }
 
+# ---------------------------------------------------------------------
+# v1.5.2 — per-service security profiles, expressed as config data.
+fn test_security_profile_parse() {
+    println("--- security profiles (1.5.2) ---");
+
+    var doc = json_v_parse(_doc3(
+        "{\"services\":[{\"name\":\"s\",\"binary\":\"/bin/s\",\"security\":{",
+        "\"no_new_privs\":true,\"capabilities\":[\"cap_net_bind_service\",\"cap_kill\"],",
+        "\"landlock\":[{\"path\":\"/usr\",\"access\":\"read-exec\"}],\"seccomp\":\"basic\"}}]}"));
+    var defs = svc_defs_from_json(doc);
+    assert_eq(vec_len(defs), 1, "sec: service parsed");
+    var sd = vec_get(defs, 0);
+
+    # Capabilities are a KEEP-list, carried as an agnostik capability_set.
+    var caps = svc_def_capabilities(sd);
+    assert(caps != 0, "sec: capability set built");
+    var keep = capset_bounding(caps);
+    assert_eq(vec_len(keep), 2, "sec: two capabilities kept");
+    # The values must be KERNEL capability numbers — this is the assertion
+    # that would have caught the pre-1.5.2 collision, where argonaut's
+    # CAP_NET_BIND_SERVICE was 0 and CAP_SYS_ADMIN was 1.
+    assert_eq(vec_get(keep, 0), 10, "sec: cap_net_bind_service = 10 (kernel)");
+    assert_eq(vec_get(keep, 1), 5, "sec: cap_kill = 5 (kernel)");
+
+    # Landlock rules land in an agnostik sandbox_config.
+    var ll = svc_def_landlock(sd);
+    assert(ll != 0, "sec: sandbox config built");
+    assert_eq(vec_len(sandbox_fs_rules(ll)), 1, "sec: one fs rule");
+    assert_eq(fsrule_access(vec_get(sandbox_fs_rules(ll), 0)), 3, "sec: read-exec = 3");
+
+    # seccomp is a NAMED profile, not a hand-assembled syscall list.
+    var pol = svc_def_seccomp(sd);
+    assert(pol != 0, "sec: policy built");
+    assert_eq(kyb_policy_kind(pol), SECCOMP_BASIC, "sec: seccomp basic");
+    assert_eq(kyb_policy_no_new_privs(pol), 1, "sec: no_new_privs on");
+    return 0;
+}
+
+fn test_security_profile_defaults_and_rejection() {
+    println("--- security profile rejection (1.5.2) ---");
+
+    # No security block: all three fields stay 0 and the hook is a no-op,
+    # so a service that never opted in behaves exactly as before 1.5.2.
+    var plain = svc_defs_from_json(json_v_parse(_doc2(
+          "{\"services\":[{\"name\":\"p\",", "\"binary\":\"/bin/p\"}]}")));
+    assert_eq(vec_len(plain), 1, "sec: plain service parses");
+    assert_eq(svc_def_capabilities(vec_get(plain, 0)), 0, "sec: no caps by default");
+    assert_eq(svc_def_seccomp(vec_get(plain, 0)), 0, "sec: no policy by default");
+
+    # An EMPTY capability list means drop everything — distinct from absent.
+    var dropall = svc_defs_from_json(json_v_parse(_doc2(
+          "{\"services\":[{\"name\":\"d\",\"binary\":\"/bin/d\",",
+          "\"security\":{\"capabilities\":[]}}]}")));
+    assert_eq(vec_len(dropall), 1, "sec: drop-all parses");
+    var dcaps = svc_def_capabilities(vec_get(dropall, 0));
+    assert(dcaps != 0, "sec: empty list still builds a set");
+    assert_eq(vec_len(capset_bounding(dcaps)), 0, "sec: keep-list empty = drop all");
+    # no_new_privs defaults ON for anything that asked to be confined.
+    assert_eq(kyb_policy_no_new_privs(svc_def_seccomp(vec_get(dropall, 0))), 1, "sec: nnp defaults on");
+
+    # --- every malformed profile must REJECT THE SERVICE, never start it
+    # --- unconfined. Running with confinement that could not be parsed is
+    # --- strictly worse than not running.
+    var badcap = json_v_parse(_doc2(
+        "{\"services\":[{\"name\":\"b\",\"binary\":\"/bin/b\",",
+        "\"security\":{\"capabilities\":[\"CAP_SYS_ADMIN\"]}}]}"));
+    assert_eq(vec_len(svc_defs_from_json(badcap)), 0, "sec: uppercase cap name rejected");
+
+    var badcap2 = json_v_parse(_doc2(
+        "{\"services\":[{\"name\":\"b\",\"binary\":\"/bin/b\",",
+        "\"security\":{\"capabilities\":[\"cap_not_real\"]}}]}"));
+    assert_eq(vec_len(svc_defs_from_json(badcap2)), 0, "sec: unknown cap rejected");
+
+    var badacc = json_v_parse(_doc2(
+        "{\"services\":[{\"name\":\"b\",\"binary\":\"/bin/b\",\"security\":{",
+        "\"landlock\":[{\"path\":\"/usr\",\"access\":\"rwx\"}]}}]}"));
+    assert_eq(vec_len(svc_defs_from_json(badacc)), 0, "sec: unknown access rejected");
+
+    var badsec = json_v_parse(_doc2(
+        "{\"services\":[{\"name\":\"b\",\"binary\":\"/bin/b\",",
+        "\"security\":{\"seccomp\":\"paranoid\"}}]}"));
+    assert_eq(vec_len(svc_defs_from_json(badsec)), 0, "sec: unknown seccomp profile rejected");
+
+    var nopath = json_v_parse(_doc2(
+        "{\"services\":[{\"name\":\"b\",\"binary\":\"/bin/b\",",
+        "\"security\":{\"landlock\":[{\"access\":\"read\"}]}}]}"));
+    assert_eq(vec_len(svc_defs_from_json(nopath)), 0, "sec: landlock rule without path rejected");
+    return 0;
+}
+
+# The capability numbers kybernet links must be the KERNEL's. Both agnostik
+# and argonaut define `enum LinuxCapability` with the same member names, and
+# kybernet links both — so "last definition wins" decided which numbers the
+# privilege drop actually used. Before 1.5.2 argonaut's won and they were an
+# arbitrary 13-entry ordering: CAP_SYS_ADMIN was 1, so "keep CAP_SYS_ADMIN"
+# kept CAP_DAC_OVERRIDE. `1 << cap` goes straight to capset(2).
+fn test_capability_numbers_are_kernel() {
+    println("--- capability numbers (1.5.2) ---");
+    assert_eq(CAP_CHOWN, 0, "cap: chown 0");
+    assert_eq(CAP_DAC_OVERRIDE, 1, "cap: dac_override 1");
+    assert_eq(CAP_KILL, 5, "cap: kill 5");
+    assert_eq(CAP_SETUID, 7, "cap: setuid 7");
+    assert_eq(CAP_NET_BIND_SERVICE, 10, "cap: net_bind_service 10");
+    assert_eq(CAP_NET_ADMIN, 12, "cap: net_admin 12");
+    assert_eq(CAP_SYS_CHROOT, 18, "cap: sys_chroot 18");
+    assert_eq(CAP_SYS_PTRACE, 19, "cap: sys_ptrace 19");
+    assert_eq(CAP_SYS_ADMIN, 21, "cap: sys_admin 21");
+    assert_eq(CAP_SYS_TIME, 25, "cap: sys_time 25");
+    assert_eq(CAP_FOWNER, 3, "cap: fowner 3");
+    assert_eq(CAP_FSETID, 4, "cap: fsetid 4");
+    assert_eq(CAP_SETGID, 6, "cap: setgid 6");
+    assert_eq(CAP_NET_RAW, 13, "cap: net_raw 13");
+    # The tail agnostik had shifted by two before its 1.4.1.
+    assert_eq(CAP_SYSLOG, 34, "cap: syslog 34");
+    assert_eq(CAP_AUDIT_READ, 37, "cap: audit_read 37");
+    assert_eq(CAP_BPF, 39, "cap: bpf 39");
+    assert_eq(CAP_CHECKPOINT_RESTORE, 40, "cap: checkpoint_restore 40");
+    return 0;
+}
+
 fn test_fileops() {
     println("--- fileops ---");
     var r = sys_mkdir("/tmp/cyr_ktest2", 0x1C0);
@@ -1175,6 +1295,9 @@ fn main() {
     test_boot_stage_security_requires_hook();
     test_boot_stage_service_groups();
     test_required_stage_failure_propagates();
+    test_security_profile_parse();
+    test_security_profile_defaults_and_rejection();
+    test_capability_numbers_are_kernel();
     test_eventloop_setup_full();
     test_reaper_macros();
     test_signal_buffer();

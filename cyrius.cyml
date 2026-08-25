@@ -71,7 +71,7 @@ modules = ["dist/sigil-mldsa.cyr", "src/sha_ni.cyr", "src/sha256.cyr", "src/hex.
 
 [deps.agnostik]
 git = "https://github.com/MacCracken/agnostik.git"
-tag = "1.4.0"
+tag = "1.5.0"
 modules = ["dist/agnostik.cyr"]
 
 [deps.libro]
@@ -85,7 +85,7 @@ modules = ["dist/libro.cyr"]
 # omitted — kybernet IS PID 1; that harness is argonaut's own test rig.
 [deps.argonaut]
 git = "https://github.com/MacCracken/argonaut.git"
-tag = "1.10.1"
+tag = "1.11.0"
 modules = [
     "src/types.cyr",
     "src/boot.cyr",

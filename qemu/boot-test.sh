@@ -97,6 +97,10 @@ echo ""
 
 LOG=$(mktemp /tmp/kybernet-harness.XXXXXX.log)
 trap "rm -f $LOG" EXIT
+# KEEP_LOG=1 preserves the raw serial capture. The display pipeline below
+# only shows `kybernet:` lines, so anything a SERVICE writes to the console
+# (see the confinement gate) is in the log but not on screen.
+[ -n "${KEEP_LOG:-}" ] && trap - EXIT
 
 START_NS=$(date +%s%N)
 
@@ -140,7 +144,7 @@ for marker in \
     "kybernet: services started" \
     "kybernet: harness done" \
     "kybernet: shutdown" \
-    "kybernet: config: services parsed: 2" \
+    "kybernet: config: services parsed: 3" \
     "kybernet:   completed (oneshot): kyb-dep" \
     "kybernet:   completed (oneshot): kyb-svc" \
     "kybernet: boot: skipped (not applicable): Start udev device manager"; do
@@ -154,6 +158,35 @@ done
 
 if grep -aqE "Attempted to kill init|Kernel panic" "$LOG"; then
     echo "  FAIL: kernel panicked — kybernet returned from main while PID 1"
+    fail=1
+fi
+
+# ---------------------------------------------------------------------
+# Confinement gate (1.5.2). The `kyb-confined` service in the staged config
+# carries a real security policy — drop every capability, set no_new_privs
+# — and reports its OWN /proc/self/status to /dev/console. So this asserts
+# the policy actually took effect in the child, rather than trusting that
+# kyb_pre_exec was invoked.
+#
+# It is also the only privileged validation of drop_cap_sets() available:
+# the unit suite runs unprivileged, where every capability path
+# short-circuits on the euid check, so capset(2) never actually executes
+# there. Under QEMU kybernet is genuinely PID 1 as root and it does.
+# No end-anchor: RUNTIME_OUT is built with `cat -v`, which renders the
+# serial CR as a literal two-character "^M" BEFORE the tr, so every line
+# ends in that text rather than in a real \r. Match the 16 hex zeros
+# exactly instead.
+if echo "$RUNTIME_OUT" | grep -qE '^CapEff:[[:space:]]*0{16}'; then
+    echo "  OK: kyb-confined dropped all capabilities (CapEff=0)"
+else
+    echo "  FAIL: kyb-confined did not drop capabilities"
+    echo "$RUNTIME_OUT" | grep -aE '^CapEff:' | head -2
+    fail=1
+fi
+if echo "$RUNTIME_OUT" | grep -qE '^NoNewPrivs:[[:space:]]*1'; then
+    echo "  OK: kyb-confined has no_new_privs set"
+else
+    echo "  FAIL: kyb-confined missing no_new_privs"
     fail=1
 fi
 

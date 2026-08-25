@@ -42,8 +42,15 @@ fn kyb_pre_exec(svc_def) {
     # imposed on services that never asked to be confined.
     if (caps == 0 && ll == 0 && sc == 0) { return 0; }
 
-    # 1. no_new_privs
-    if (is_err_result(set_no_new_privs()) == 1) { return 1; }
+    # 1. no_new_privs. Defaults on for any confined service (both Landlock
+    #    and seccomp require it, and it is what stops a setuid binary
+    #    handing the privileges straight back on exec); a policy may opt
+    #    out explicitly. 1.5.2.
+    var want_nnp = 1;
+    if (sc != 0) { want_nnp = kyb_policy_no_new_privs(sc); }
+    if (want_nnp == 1) {
+        if (is_err_result(set_no_new_privs()) == 1) { return 1; }
+    }
 
     # 2. capabilities
     if (caps != 0) {
@@ -55,9 +62,15 @@ fn kyb_pre_exec(svc_def) {
         if (is_err_result(sandbox_from_config(ll)) == 1) { return 1; }
     }
 
-    # 4. seccomp — last
+    # 4. seccomp — last. `sc` is kybernet's KybSeccompPolicy (argonaut
+    #    treats the field as opaque), naming a profile rather than carrying
+    #    a raw syscall list: a filter is not something to hand-assemble in
+    #    a config file, and a wrong one is a service that dies on its first
+    #    read().
     if (sc != 0) {
-        if (is_err_result(seccomp_apply_profile(sc)) == 1) { return 1; }
+        if (kyb_policy_kind(sc) == SECCOMP_BASIC) {
+            if (is_err_result(seccomp_apply(seccomp_basic_service())) == 1) { return 1; }
+        }
     }
 
     return 0;

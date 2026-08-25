@@ -36,7 +36,7 @@ Requires Cyrius 6.5.35 (`cyriusly install 6.5.35 && cyriusly use 6.5.35`).
 ```sh
 cyrius deps                                # Resolve deps from cyrius.cyml into lib/
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet   # Build (DCE recommended)
-cyrius test src/test.cyr                   # Run 255 tests
+cyrius test src/test.cyr                   # Run 296 tests
 cyrius bench src/bench.cyr                 # Run benchmarks
 ```
 
@@ -69,16 +69,16 @@ cyrius bench src/bench.cyr                 # Run benchmarks
   exec via argonaut 1.9.0's pre-exec hook. Order is no_new_privs → capabilities
   → Landlock → seccomp, and it **fails closed**: a policy that cannot be applied
   aborts the child rather than launching the service unconfined. Policy is
-  **opt-in per service** (`seccomp` / `landlock` / `capabilities` on the service
-  definition, all 0 by default), so a service without a profile behaves exactly
-  as before. Authoring profiles for the default AGNOS services is the v1.5.2
-  roadmap item.
+  **opt-in per service**, written as config data — a `security` block naming a
+  capabilities keep-list, Landlock rules and a seccomp profile. A service
+  without one behaves exactly as before. The QEMU harness boots a confined
+  service that reports its own `/proc/self/status` and asserts `CapEff=0`.
 - **Audit logging** — cryptographic audit chain via libro (SHA-256 hash-linked)
 - **Result/Option everywhere** — proper error handling via tagged unions
 - **Data-driven mount table** — not hardcoded per-mount calls
 - **sd_notify compatible** — READY, STOPPING, WATCHDOG, STATUS messages via epoll
 - **String builder** for path construction and logging
-- **255 tests**, 51 benchmarks
+- **296 tests**, 51 benchmarks
 
 ## Dependencies
 
@@ -87,9 +87,9 @@ Resolved via `cyrius.cyml` (locked in `cyrius.lock`):
 | Dep | Version | What |
 |-----|---------|------|
 | sigil | 3.12.9 | TPM / crypto trust surface (thin sub-bundles only) |
-| agnostik | 1.4.0 | Shared AGNOS types (security, agent, error) |
+| agnostik | 1.5.0 | Shared AGNOS types (security, agent, error) |
 | libro | 2.8.12 | Cryptographic audit chain |
-| argonaut | 1.10.1 | Service lifecycle, boot stages, health, audit, pre-exec hook |
+| argonaut | 1.11.0 | Service lifecycle, boot stages, health, audit, pre-exec hook |
 
 `patra` and `sakshi` are **not** declared as git deps — cyrius 6.5.20+ ships
 them in the stdlib snapshot, and a git pin would silently downgrade the

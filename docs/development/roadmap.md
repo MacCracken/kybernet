@@ -132,26 +132,37 @@ Ordered by what unblocks what.
 - [x] Bench gate got a `MIN_DELTA_NS` noise floor — three releases of
       1-2 ns false regressions on sub-10 ns benchmarks
 
-### v1.5.2 — per-service security profiles (completes audit HIGH-1)
+### v1.5.2 — per-service security profiles ✅ (2026-08-25)
 
-1.4.3 delivered the *mechanism*: argonaut 1.9.0's pre-exec hook plus
-kybernet's `kyb_pre_exec`, applying no_new_privs → capabilities → Landlock →
-seccomp per service, fail-closed. No default AGNOS service carries a profile
-yet, so the hook is a no-op in practice — deliberately, since a uniform
-allowlist applied to every service is how you make a system unbootable.
+Completes audit HIGH-1's follow-through: the mechanism landed at 1.4.3, the
+profiles land here.
 
-- [ ] Author seccomp + Landlock + capability profiles for the default AGNOS
-      services (daimon, hoosh, agnoshi, aethersafha, Synapse)
-- [ ] Express them in config so profiles are data, not code
-- [ ] **Validate `drop_cap_sets()` on privileged hardware** — the `capset(2)`
-      path added at 1.4.2 cannot be exercised by the suite, which runs
-      unprivileged where every path short-circuits on the euid check
-- [ ] **Validate the aarch64 seccomp syscall table on real hardware** — eight
-      values (`mprotect`, `rt_sigreturn`, `accept`, `sendto`, `sigaltstack`,
-      `clock_gettime`, `set_robust_list`, `rseq`) come from asm-generic and are
-      not cross-checkable against the cyrius stdlib
-- [ ] Harness variant that boots a service under a real profile and asserts it
-      both starts and is actually confined
+- [x] Profiles expressed as **config data** (`security` block per service:
+      capabilities keep-list, Landlock rules, named seccomp profile,
+      no_new_privs) — changing what a service may do no longer means
+      rebuilding PID 1
+- [x] **Fixed: capability numbers were not kernel capability numbers.**
+      agnostik and argonaut both define `enum LinuxCapability` with the same
+      member names; kybernet links both and argonaut's won — an arbitrary
+      13-entry order where `CAP_SYS_ADMIN` was 1. `1 << cap` goes straight
+      to `capset(2)`, so "keep CAP_SYS_ADMIN" kept `CAP_DAC_OVERRIDE`.
+      Corrected in argonaut 1.11.0 and agnostik 1.5.0 (which also omitted
+      `CAP_MAC_OVERRIDE`/`CAP_MAC_ADMIN`, shifting its tail by two)
+- [x] agnostik `capability_name`/`capability_parse` so names are the kernel
+      spelling operators already know
+- [x] Malformed profiles reject the service rather than starting it
+      unconfined
+- [x] **`drop_cap_sets()` validated on privileged hardware** — the harness
+      boots a confined service that reports its own `/proc/self/status`;
+      asserts `CapEff=0` and `NoNewPrivs=1`, and the gate was verified to
+      fail (`CapEff: 000001ffffffffff`) with the drop disabled
+- [ ] **aarch64 seccomp syscall table still unvalidated on real hardware** —
+      eight values from asm-generic that the cyrius stdlib does not export.
+      The harness is x86_64/KVM only. Carried forward; gates enabling a
+      seccomp profile on an aarch64 deployment, not a release
+- [ ] Profiles for the real AGNOS services (daimon, hoosh, agnoshi,
+      aethersafha, ifran) — needs the actual syscall/filesystem surface of
+      each, which is a per-service investigation rather than kybernet work
 
 ### v1.5.3 — lifecycle cleanup and observability
 
@@ -199,6 +210,9 @@ v1.2.1 above; now that argonaut is in scope for edits, that is unblocked.
 - **Binary signing on release** — pinned until libro 2.6+ signing/timestamping is consumer-driven from outside kybernet's tree
 
 ## History
+
+### v1.5.2 — Per-service security profiles (2026-08-25)
+Profiles as config data; capability numbers corrected across agnostik/argonaut (both disagreed with the kernel, and kybernet's privilege drop fed them to capset(2)); harness proves confinement as root. 296 tests.
 
 ### v1.5.1 — Boot stages that do something (2026-08-25)
 execute_boot_stage was `return 1` for all eleven arms, so init_mark_step_failed and the emergency path were dead code. Stages now return OK/SKIP/FAIL and check real state; argonaut 1.10.1 added the SKIPPED marker that made an honest third answer possible. Bench gate gained a noise floor. 255 tests.

@@ -6,7 +6,7 @@
 
 - **Type**: Cyrius binary (PID 1 init)
 - **License**: GPL-3.0-only
-- **Version**: 1.5.1
+- **Version**: 1.5.2
 - **Language**: Cyrius 6.5.35 (the whole AGNOS pack front — kybernet/argonaut/libro/agnostik — pins 6.5.35; via `~/.cyrius/bin/cyrius`, `cyriusly use 6.5.35`)
 - **Tools**: `owl` to read .cyr files, `cyim` to write/edit .cyr files
 
@@ -14,14 +14,14 @@
 
 The helmsman that steers the Argo. Manages system boot, essential mounts, signal handling, zombie reaping, cgroup isolation, orderly shutdown, and (1.2.0+) edge-boot pre-flight verification. Delegates service lifecycle to argonaut. All in Cyrius — no Rust, no C, no libc.
 
-**Security enforcement is delivered as of 1.4.3, but policy is opt-in.** `src/lib/service_sandbox.cyr`'s `kyb_pre_exec` is registered with argonaut 1.9.0's `argonaut_set_pre_exec_hook` and runs in the child between fork and exec, applying no_new_privs → capabilities → Landlock → seccomp, failing closed. It reads the per-service `seccomp` / `landlock` / `capabilities` fields on argonaut's `ServiceDefinition`; **all three default to 0 and no default AGNOS service sets them yet**, so the hook is currently a no-op in practice. Say "the mechanism is wired, profiles are the v1.5.2 item" — not "kybernet sandboxes services".
+**Security enforcement is delivered, and profiles are config data as of 1.5.2.** `src/lib/service_sandbox.cyr`'s `kyb_pre_exec` is registered with argonaut 1.9.0's `argonaut_set_pre_exec_hook` and runs in the child between fork and exec, applying no_new_privs → capabilities → Landlock → seccomp, failing closed. It reads the per-service `seccomp` / `landlock` / `capabilities` fields on argonaut's `ServiceDefinition`; they are populated from the per-service `security` block in `/etc/kybernet/config.json` (see `src/lib/svc_config.cyr`). A service with no `security` block gets a strict no-op, so policy stays opt-in. ⚠ **Capability names map to KERNEL capability numbers** — `1 << cap` goes to `capset(2)`. agnostik and argonaut both define `enum LinuxCapability` with identical member names; both were wrong and both were corrected (agnostik 1.5.0, argonaut 1.11.0) to the kernel table, so the duplicate definition is now value-identical. If you ever see a `duplicate symbol 'CAP_*' redefined with conflicting value` warning again, they have diverged and the privilege drop is operating on the wrong capabilities.
 
 ## Build
 
 ```sh
 cyrius deps                                  # Resolve deps from cyrius.cyml into lib/
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet   # Build (DCE recommended)
-cyrius test src/test.cyr                     # Run 255 tests
+cyrius test src/test.cyr                     # Run 296 tests
 cyrius bench src/bench.cyr                   # Run benchmarks
 bash scripts/bench-history.sh                # Record bench history + ≥15% regression gate (MANDATORY on every release)
 cyrius build --aarch64 src/main.cyr build/kybernet-aarch64   # Cross-build aarch64
@@ -37,7 +37,7 @@ kybernet/
 ├── VERSION, CLAUDE.md, README.md, CHANGELOG.md, LICENSE
 ├── src/
 │   ├── main.cyr           # Globals + boot sequence + event loop + harness gate
-│   ├── test.cyr           # Integration tests (255 assertions)
+│   ├── test.cyr           # Integration tests (296 assertions)
 │   ├── bench.cyr          # Microbenchmarks
 │   └── lib/
 │       ├── log.cyr        # klog / klog2 / kmsg / slog (factored out at 1.2.0)
@@ -88,10 +88,10 @@ Dependencies are resolved by `cyrius deps` from `cyrius.cyml` and locked in `cyr
 Do **not** add a `path = "../<dep>"` alongside `git`/`tag`. When `path` resolves, cyrius makes `git`/`tag` fully inert *and* skips commit-pin verification — local builds then compile against the sibling working tree, and an unreleased tag passes every local gate before hard-failing CI. Removed at 1.4.1.
 
 - **sigil 3.12.9** — **THIN surface, NOT the monolithic `dist/sigil.cyr`** (the monolith's x509/RSA bignum banks add static `.bss` that DCE cannot strip). `[deps.sigil] modules` = `dist/sigil-mldsa.cyr` + `src/sha_ni.cyr` + `src/sha256.cyr` + `src/hex.cyr` (the crypto set libro's merkle/audit path needs transitively — **mirrors libro's own sigil block**; mandatory because cyrius dedups the two same-named `sigil` deps to kybernet's root list, so it must cover libro's `ed25519`/`hex`/`SIG_ALG_ED25519`) **+ `dist/sigil-tpm.cyr`** (the `tpm` distlib profile — `tpm_detect`/`tpm_read_pcr`/`TPM_SHA256`, all three called from `src/lib/edge_boot.cyr`). Note libro moved sigil-tpm to an *optional* `[deps.sigil_tpm]` behind a `tpm` feature; kybernet does not enable that feature and supplies sigil-tpm through its own block. dm-verity is **not** sourced from sigil (no dm-verity profile; raw `src/dmverity.cyr` has an unguarded cross-repo include) — `_eb_dmverity_supported` in `src/lib/edge_boot.cyr` is a local probe. sigil banks per-thread crypto scratch over TLS — the reason for the `thread_local` pin + explicit include.
-- **agnostik 1.4.0** — `dist/agnostik.cyr` (full bundle). NOTE its error kinds are namespaced `STIK_ERR_*` — do **not** use bare `ERR_*` names (they collide with sigil's/sakshi's enums). 1.4.0 added a `*_parse()` inverse for all 31 enums that had `*_name()`; they return `Err(STIK_ERR_INVALID_ARGUMENT)` on an unrecognised string rather than defaulting to a sentinel.
+- **agnostik 1.5.0** — `dist/agnostik.cyr` (full bundle). NOTE its error kinds are namespaced `STIK_ERR_*` — do **not** use bare `ERR_*` names (they collide with sigil's/sakshi's enums). 1.4.0 added a `*_parse()` inverse for all 31 enums that had `*_name()`; they return `Err(STIK_ERR_INVALID_ARGUMENT)` on an unrecognised string rather than defaulting to a sentinel. ⚠ **1.5.0 corrected `enum LinuxCapability`** — it omitted `CAP_MAC_OVERRIDE`/`CAP_MAC_ADMIN`, shifting everything above 31 by two — and added `capability_name`/`capability_parse`.
 - **libro 2.8.12** — `dist/libro.cyr` (full bundle). Pulls a thin sigil surface itself. ⚠ 2.8.11/2.8.12 changed the audit-chain **on-disk preimage**: chains written by libro ≤ 2.8.10 will not verify. Only affects `config.audit_persist` deployments (default off) — kybernet makes zero direct `audit_*` calls and imports argonaut's audit modules only to close the compile-time symbol graph.
 - **patra** — no longer an explicit dep. Comes from the stdlib fold (1.13.10) via `[deps].stdlib`; libro pulls it transitively too. kybernet calls no `patra_*` symbol directly.
-- **argonaut 1.10.1** — selective imports (no dist bundle shipped); same 11-module import list. 1.9.0 added `argonaut_set_pre_exec_hook()` (the seam kybernet's `kyb_pre_exec` uses) plus `svc_def_seccomp`/`svc_def_landlock`/`svc_def_capabilities` accessors. 1.10.0 added the enum `*_parse` inverses kybernet's config parser uses, `init_service_defs`/`init_service_names`, the `svc_def_set_*` field setters, and `svc_hc_*` HealthCheck accessors — note the `svc_hc_` prefix: bare `hc_retries`/`hc_timeout`/`hc_interval` are agnostik's, for a DIFFERENT struct layout, and kybernet links both. 1.10.1 added `init_mark_step_skipped` (the third boot-step state), `init_service_ready`, `init_boot_sequence` and `config_set_boot_mode`. All additive and layout-neutral. ⚠ 1.8.6 changed `audit_log_verify_inclusion`/`audit_log_verify_consistency` to take the trusted root explicitly — kybernet calls neither, and cyrius 6.5.1 makes a wrong-arity call a hard compile error, so a stale call site cannot survive the build. kybernet imports argonaut source modules (not its vendored `lib/`):
+- **argonaut 1.11.0** — selective imports (no dist bundle shipped); same 11-module import list. 1.9.0 added `argonaut_set_pre_exec_hook()` (the seam kybernet's `kyb_pre_exec` uses) plus `svc_def_seccomp`/`svc_def_landlock`/`svc_def_capabilities` accessors. 1.10.0 added the enum `*_parse` inverses kybernet's config parser uses, `init_service_defs`/`init_service_names`, the `svc_def_set_*` field setters, and `svc_hc_*` HealthCheck accessors — note the `svc_hc_` prefix: bare `hc_retries`/`hc_timeout`/`hc_interval` are agnostik's, for a DIFFERENT struct layout, and kybernet links both. 1.10.1 added `init_mark_step_skipped` (the third boot-step state), `init_service_ready`, `init_boot_sequence` and `config_set_boot_mode`. ⚠ **1.11.0 corrected `enum LinuxCapability` to kernel numbers** (it was a 13-entry arbitrary order where `CAP_SYS_ADMIN` was 1) and added `capability_parse`. All additive and layout-neutral. ⚠ 1.8.6 changed `audit_log_verify_inclusion`/`audit_log_verify_consistency` to take the trusted root explicitly — kybernet calls neither, and cyrius 6.5.1 makes a wrong-arity call a hard compile error, so a stale call site cannot survive the build. kybernet imports argonaut source modules (not its vendored `lib/`):
   - `src/types.cyr` + `src/boot.cyr` + `src/services.cyr` + `src/process_mgmt.cyr`
   - `src/resolver.cyr` + `src/health.cyr` + `src/notify.cyr` + `src/tmpfiles.cyr`
   - `src/audit.cyr` + `src/audit_ext.cyr` + `src/init.cyr`
@@ -101,7 +101,7 @@ Do **not** add a `path = "../<dep>"` alongside `git`/`tag`. When `path` resolves
 
 1. Make changes to `src/main.cyr` or `src/lib/*.cyr`
 2. Build: `CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet`
-3. Test: `cyrius test src/test.cyr` (255 tests must pass)
+3. Test: `cyrius test src/test.cyr` (296 tests must pass)
 4. Cross-build: `cyrius build --aarch64 src/main.cyr build/kybernet-aarch64` (verify both arches)
 5. Harness (when KVM available): `bash qemu/boot-test.sh` (asserts marker set + budget)
 5b. **On a version bump: `bash scripts/bench-history.sh`** — records per-benchmark ns/op to `benches/history.csv` and exits non-zero on a ≥15% regression vs the previous run. Review and explain (or fix) any flagged delta before cutting.
@@ -139,7 +139,7 @@ Every version bump runs all of these, in this order, and they must all be green 
 rm -rf lib && cyrius deps && cyrius deps --verify   # expect: N verified, 0 failed
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet
 cyrius build --aarch64 src/main.cyr build/kybernet-aarch64
-cyrius test src/test.cyr                            # 255 tests, 0 failed
+cyrius test src/test.cyr                            # 296 tests, 0 failed
 bash scripts/bench-history.sh                       # ≥15% regression gate
 bash qemu/boot-test.sh                              # needs KVM
 ```
@@ -155,4 +155,4 @@ Plus a **sibling-free reproduction** — the only gate that catches a tag which 
 - Do not add C, Rust, or assembly files — everything is Cyrius
 - Do not reference `../cyrius/` repo — use installed toolchain at `~/.cyrius/`
 - Do not bump a dep tag to a value > the highest existing git tag (CI clones from `git + tag`; an unreleased VERSION-file value fails resolution — see 1.1.0 CHANGELOG note)
-- Test after every change (255 tests + harness when KVM available)
+- Test after every change (296 tests + harness when KVM available)

@@ -7,6 +7,124 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.5.2] — 2026-08-25
+
+**Per-service security profiles, as config data — and the capability
+numbers they depend on were wrong.** Requires **argonaut 1.11.0** and
+**agnostik 1.5.0**. Suite 255 → 296 assertions, 0 failures.
+
+1.4.3 delivered the mechanism (argonaut's pre-exec hook + `kyb_pre_exec`)
+but no service carried a policy, so the hook was a no-op in practice. This
+is where profiles become real. Completes audit HIGH-1's follow-through.
+
+### Fixed — capability numbers were not kernel capability numbers
+
+The security fix in this release, and it was live the moment capability
+policy stopped being decorative.
+
+**agnostik and argonaut both define `enum LinuxCapability`, with the same
+member names.** kybernet links both, so "last definition wins" silently
+decided which numbers the privilege drop used — argonaut's, which were a
+13-entry list in an arbitrary order: `CAP_NET_BIND_SERVICE` = 0,
+`CAP_SYS_ADMIN` = 1, `CAP_SETUID` = 5. The kernel's are 10, 21 and 7.
+
+`drop_caps_from_set` builds a mask with `1 << cap` and feeds it to
+`capset(2)`. So **"keep `CAP_SYS_ADMIN`" retained kernel capability 1 —
+`CAP_DAC_OVERRIDE` — and dropped `CAP_SYS_ADMIN`.** Every capability name an
+operator could write meant a different capability than they wrote.
+
+agnostik's numbering was wrong too, in its own way: `CAP_MAC_OVERRIDE` (32)
+and `CAP_MAC_ADMIN` (33) were **absent entirely**, shifting everything above
+31 down by two, and `CAP_AUDIT_READ`/`CAP_AUDIT_CONTROL` were transposed.
+
+Both are corrected upstream (argonaut 1.11.0, agnostik 1.5.0) to the kernel
+table with explicit values. Because they now agree, the toolchain no longer
+reports a conflicting-value collision on any `CAP_*` symbol — previously a
+standing wall of `duplicate symbol ... redefined with conflicting value`
+warnings that had been treated as noise for releases. Filed in the
+2026-08-24 audit as `cap-ordinal-vs-kernel-number`.
+
+### Added — profiles are data, not code
+
+A profile lives in `/etc/kybernet/config.json`, so changing what a service
+may do does not mean rebuilding PID 1:
+
+```json
+"security": {
+  "no_new_privs": true,
+  "capabilities": ["cap_net_bind_service"],
+  "landlock":     [{"path": "/usr", "access": "read-exec"}],
+  "seccomp":      "basic"
+}
+```
+
+- **`capabilities` is a KEEP-list.** Present-and-empty means drop
+  everything; absent means no capability policy at all. Names are the
+  lowercase kernel spelling (`cap_sys_admin`) that `capsh(1)` and
+  `capability(7)` use, parsed by agnostik's new `capability_parse`.
+- **`landlock`** becomes an agnostik `sandbox_config`; `access` is
+  `none` / `read` / `read-write` / `read-exec`.
+- **`seccomp` names a profile** rather than carrying a raw syscall list — a
+  BPF filter is not something to hand-assemble in a config file, and a wrong
+  one is a service that dies on its first `read()`.
+- **`no_new_privs` defaults on** for anything that asked to be confined:
+  both Landlock and seccomp require it, and it is what stops a setuid binary
+  handing the privileges straight back on exec.
+
+**Every malformed profile rejects the service.** An unknown capability name,
+an unknown access mode, an unknown seccomp profile, a Landlock rule without
+a path — all refuse to start it. Running a service whose confinement could
+not be parsed is strictly worse than not running it, and silently ignoring a
+capability name is how you come to believe a service is confined when it is
+not.
+
+### Added — the harness proves confinement, as root
+
+The staged config gains `kyb-confined`, which carries a real policy (drop
+every capability, set `no_new_privs`) and then reports its **own**
+`/proc/self/status` to `/dev/console`. `boot-test.sh` asserts:
+
+```
+OK: kyb-confined dropped all capabilities (CapEff=0)
+OK: kyb-confined has no_new_privs set
+```
+
+So the gate checks the policy *took effect in the child*, rather than
+trusting that `kyb_pre_exec` was called.
+
+This is also **the privileged validation of `drop_cap_sets()`** the roadmap
+carried as an open item. The unit suite runs unprivileged, where every
+capability path short-circuits on the euid check and `capset(2)` never
+executes; under QEMU kybernet is genuinely PID 1 as root and it does.
+
+Verified the gate can fail: with the capability drop disabled the same boot
+reports `CapEff: 000001ffffffffff` — the full root set — and the harness
+fails. That value is bits 0–40, which independently confirms the kernel's
+41 capabilities and the corrected `CAP_LAST_CAP`.
+
+### Tests
+
+- `test_security_profile_parse` — capabilities land as **kernel** numbers
+  (10 for `cap_net_bind_service`, 5 for `cap_kill` — the assertion that
+  would have caught the collision), Landlock rules and access mapping, and
+  the named seccomp profile.
+- `test_security_profile_defaults_and_rejection` — absent block is a strict
+  no-op, empty capability list means drop-all, `no_new_privs` defaults on,
+  and five malformed-profile shapes each reject the service.
+- `test_capability_numbers_are_kernel` — 18 values pinned against the kernel
+  table, including the tail agnostik had shifted.
+- agnostik `test_v141_capability_numbers.tcyr` — 35 assertions, full
+  roundtrip over all 41 members.
+
+### Still open from the roadmap item
+
+The aarch64 seccomp syscall table (eight values from asm-generic that the
+cyrius stdlib does not export) remains **unvalidated on real aarch64
+hardware** — the harness is x86_64/KVM only. Unchanged from 1.4.2; carried
+forward.
+
+---
+
 ## [1.5.1] — 2026-08-25
 
 **Boot stages that do something.** Requires **argonaut 1.10.1**. Suite

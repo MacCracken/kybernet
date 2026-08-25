@@ -144,6 +144,11 @@ fn svc_def_from_json(obj) {
     if (hc == 0 - 1) { return 0; }
     if (hc != 0) { svc_def_set_health_check(sd, hc); }
 
+    # A malformed security block rejects the service. Starting a service
+    # whose confinement could not be parsed is strictly worse than not
+    # starting it. 1.5.2.
+    if (svc_apply_security_json(sd, obj) == 0) { return 0; }
+
     return sd;
 }
 
@@ -176,4 +181,126 @@ fn svc_defs_from_json(root) {
         }
     }
     return out;
+}
+
+# =======================================================================
+# Per-service security policy (1.5.2)
+# =======================================================================
+#
+# 1.4.3 delivered the mechanism — argonaut's pre-exec hook plus
+# kyb_pre_exec — but no service carried a policy, so the hook was a no-op
+# in practice. This is where profiles become real, and deliberately as
+# DATA: a profile lives in /etc/kybernet/config.json, not in kybernet's
+# source, so changing what a service may do does not mean rebuilding PID 1.
+#
+#   "security": {
+#     "no_new_privs": true,
+#     "capabilities": ["cap_net_bind_service"],
+#     "landlock":     [ {"path": "/usr", "access": "read-exec"},
+#                       {"path": "/var/lib/daimon", "access": "read-write"} ],
+#     "seccomp":      "basic"
+#   }
+#
+# `capabilities` is a KEEP-list: present-and-empty means drop everything,
+# absent means no capability policy at all. Names are the lowercase kernel
+# spelling (`cap_sys_admin`) that capsh(1) and capability(7) use, parsed by
+# agnostik's capability_parse — so a config written against Linux
+# documentation works unmodified, and an unrecognised name is rejected
+# rather than silently ignored. Silently ignoring a capability name is how
+# you end up believing a service is confined when it is not.
+
+enum SeccompKind {
+    SECCOMP_NONE = 0;
+    SECCOMP_BASIC = 1;
+}
+
+# kybernet's own policy object; argonaut treats svc_def_seccomp as opaque.
+struct KybSeccompPolicy { kind; no_new_privs; }
+
+fn kyb_seccomp_policy_new(kind, nnp) {
+    var p = alloc(16);
+    store64(p, kind);
+    store64(p + 8, nnp);
+    return p;
+}
+
+fn kyb_policy_kind(p)          { return load64(p); }
+fn kyb_policy_no_new_privs(p)  { return load64(p + 8); }
+
+fn _access_from_name(s) {
+    if (str_eq_cstr(s, "none") == 1)       { return 0; }
+    if (str_eq_cstr(s, "read") == 1)       { return 1; }
+    if (str_eq_cstr(s, "read-write") == 1) { return 2; }
+    if (str_eq_cstr(s, "read-exec") == 1)  { return 3; }
+    return 0 - 1;
+}
+
+fn _seccomp_kind_from_name(s) {
+    if (str_eq_cstr(s, "none") == 1)  { return SECCOMP_NONE; }
+    if (str_eq_cstr(s, "basic") == 1) { return SECCOMP_BASIC; }
+    return 0 - 1;
+}
+
+# Apply a "security" block to `sd`. Returns 1 on success, 0 if the block is
+# malformed — the caller then rejects the whole service. Refusing to start a
+# service whose confinement could not be understood is the only safe
+# reading: the alternative is running it unconfined.
+fn svc_apply_security_json(sd, obj) {
+    var sec = json_v_obj_get(obj, "security");
+    if (sec == 0) { return 1; }
+    if (json_v_is_obj(sec) == 0) { return 0; }
+
+    # --- capabilities (keep-list) ---
+    var capv = json_v_obj_get(sec, "capabilities");
+    if (capv != 0) {
+        if (json_v_is_arr(capv) == 0) { return 0; }
+        var caps = capability_set_new();
+        var keep = capset_bounding(caps);
+        var cn = json_v_arr_len(capv);
+        for (var ci = 0; ci < cn; ci = ci + 1) {
+            var e = json_v_arr_get(capv, ci);
+            if (e == 0) { return 0; }
+            if (json_v_is_str(e) == 0) { return 0; }
+            var cr = capability_parse(json_v_str(e));
+            if (is_err_result(cr) == 1) { return 0; }
+            vec_push(keep, result_unwrap(cr));
+        }
+        svc_def_set_capabilities(sd, caps);
+    }
+
+    # --- landlock filesystem rules ---
+    var llv = json_v_obj_get(sec, "landlock");
+    if (llv != 0) {
+        if (json_v_is_arr(llv) == 0) { return 0; }
+        var sbx = sandbox_config_new();
+        var rules = sandbox_fs_rules(sbx);
+        var ln = json_v_arr_len(llv);
+        for (var li = 0; li < ln; li = li + 1) {
+            var r = json_v_arr_get(llv, li);
+            if (r == 0) { return 0; }
+            if (json_v_is_obj(r) == 0) { return 0; }
+            var path = _cfg_str(r, "path", 0);
+            if (path == 0) { return 0; }
+            if (str_len(path) == 0) { return 0; }
+            var acc_s = _cfg_str(r, "access", 0);
+            if (acc_s == 0) { return 0; }
+            var acc = _access_from_name(acc_s);
+            if (acc < 0) { return 0; }
+            vec_push(rules, filesystem_rule_new(str_data(path), acc));
+        }
+        svc_def_set_landlock(sd, sbx);
+    }
+
+    # --- seccomp profile + no_new_privs ---
+    var kind = SECCOMP_NONE;
+    var sc_s = _cfg_str(sec, "seccomp", 0);
+    if (sc_s != 0) {
+        kind = _seccomp_kind_from_name(sc_s);
+        if (kind < 0) { return 0; }
+    }
+    # Defaults to on: a service that asked to be confined at all wants the
+    # setuid-escalation door shut, and both Landlock and seccomp require it.
+    var nnp = _cfg_bool(sec, "no_new_privs", 1);
+    svc_def_set_seccomp(sd, kyb_seccomp_policy_new(kind, nnp));
+    return 1;
 }
