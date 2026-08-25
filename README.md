@@ -45,7 +45,7 @@ Requires Cyrius 6.5.35 (`cyriusly install 6.5.35 && cyriusly use 6.5.35`).
 ```sh
 cyrius deps                                # Resolve deps from cyrius.cyml into lib/
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet   # Build (DCE recommended)
-cyrius test src/test.cyr                   # Run 567 tests
+cyrius test src/test.cyr                   # Run 608 tests
 cyrius bench src/bench.cyr                 # Run benchmarks
 ```
 
@@ -53,28 +53,28 @@ cyrius bench src/bench.cyr                 # Run benchmarks
 
 | Module | Lines | What |
 |--------|-------|------|
-| main | 1393 | Boot sequence, argonaut init, event loop, emergency shell, shutdown |
-| edge_boot | 567 | Verified-boot pre-flight: TPM PCR, dm-verity verification |
-| cgroup | 555 | Cgroup v2 controllers, paths, limits, move, kill, teardown |
-| svc_config | 493 | JSON → ServiceDefinition; security, limits and edge blocks |
-| emergency_auth | 478 | Argon2id credential: record format, parameter bounds, legacy migration |
+| main | 1478 | Boot sequence, argonaut init, event loop, emergency shell, shutdown |
+| edge_boot | 580 | Verified-boot pre-flight: TPM PCR, dm-verity verification |
+| cgroup | 564 | Cgroup v2 controllers, paths, limits, move, kill, teardown |
+| svc_config | 538 | JSON → ServiceDefinition; security, limits and edge blocks |
+| emergency_auth | 520 | Argon2id credential: record format, parameter bounds, legacy migration |
 | sandbox | 325 | Landlock filesystem sandboxing (builder pattern) |
-| seccomp | 306 | Seccomp BPF filter builder + loader |
+| seccomp | 393 | Seccomp BPF filter builder + loader |
 | eventloop | 268 | epoll, timerfds, arch-gated `struct epoll_event` ABI |
 | privdrop | 247 | Capability dropping + no_new_privs + agnostik bridge |
 | log | 182 | klog / klog2 / kmsg / slog |
-| boot_stages | 171 | Per-stage work with OK / SKIP / FAIL status |
+| boot_stages | 186 | Per-stage work with OK / SKIP / FAIL status |
 | mount | 163 | Data-driven essential mount table |
-| service_sandbox | 134 | Per-service pre-exec: cgroup join → no_new_privs → caps → Landlock → seccomp |
+| service_sandbox | 153 | Per-service pre-exec: cgroup join → no_new_privs → caps → Landlock → seccomp |
 | notify | 134 | sd_notify socket (READY, STOPPING, WATCHDOG, STATUS, RELOADING) |
 | termios | 120 | Console echo suppression (hand-rolled ioctl/termios) |
 | restart_queue | 100 | Deferred restarts, static storage |
 | signals | 83 | Block 5 signals, create signalfd, classify |
-| console | 81 | stdio redirect; interactive `/dev/console` open |
+| console | 113 | stdio redirect; interactive `/dev/console` open |
 | reaper | 75 | Non-blocking waitpid loop, structured results |
 | cmdline | 56 | `/proc/cmdline` token scanning |
 
-**5,931 lines of Cyrius** across `main.cyr` + 19 modules.
+**6,278 lines of Cyrius** across `main.cyr` + 19 modules.
 
 ## Features
 
@@ -131,7 +131,7 @@ cyrius bench src/bench.cyr                 # Run benchmarks
 - **Data-driven mount table** — not hardcoded per-mount calls
 - **sd_notify compatible** — READY, STOPPING, WATCHDOG, STATUS, RELOADING messages via epoll
 - **String builder** for path construction and logging
-- **567 tests**, 54 benchmarks
+- **608 tests**, 54 benchmarks
 
 ## Dependencies
 
@@ -170,13 +170,13 @@ boot. With the working lane moved onto the caller's arena it costs +25 KB.
 ## Testing
 
 ```sh
-cyrius test src/test.cyr            # 567 assertions
+cyrius test src/test.cyr            # 608 assertions
 bash scripts/bench-history.sh       # 54 benchmarks + regression gate
 bash qemu/boot-test.sh              # PID-1 boot harness (needs KVM)
 ```
 
 The QEMU harness is the gate that matters: it boots kybernet as real PID 1 and
-asserts 42 properties across four passes — the boot sequence, the reactor
+asserts 44 properties across four passes — the boot sequence, the reactor
 (that it sleeps rather than spins), dm-verity verification against a real
 image pair on virtio disks, and the emergency-auth prompt with a password fed
 over the serial line. Pass 4 runs against **both** credential formats: the

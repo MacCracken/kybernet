@@ -7,6 +7,164 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.6.0] — 2026-08-25
+
+**The confinement path did not confine, and one of the four ways it failed was
+fatal.** Suite 567 → 608 assertions, 0 failures. Harness 42 → 44 properties.
+Binary 1,482,272 → 1,483,024 B (+752). No dep change.
+
+Everything here came out of a deliberate sweep of the tree after 1.5.9, looking
+for work that had been deferred without being tracked. What it found instead
+was mostly shipped, documented, README-advertised behaviour that did not work.
+
+### Fixed — `"seccomp": "basic"` killed every service it was applied to
+
+`seccomp_basic_service()` allowlisted 37 syscalls. **`execve` was not one of
+them** — `BS_EXECVE` existed in neither `#ifdef` arm — and the default action
+was `SECCOMP_RET_KILL_PROCESS`. A seccomp filter takes effect the instant it is
+installed, so the very next syscall after `seccomp_apply` in `kyb_pre_exec` is
+argonaut's `execve` of the service binary. Verified by execution, through
+kybernet's own code in `kyb_pre_exec`'s order:
+
+```
+set_no_new_privs() -> seccomp_apply(seccomp_basic_service()) -> execve("/bin/true")
+  => killed by SIGSYS (31)
+```
+
+From 1.4.3 to 1.6.0, the documented config key guaranteed the service died
+before running one instruction, on both architectures. Nothing caught it
+because `grep -rn seccomp qemu/` returned **nothing** — no fixture had ever set
+the key, so `seccomp_apply` had never executed in a release gate.
+
+Two changes, both measured rather than reasoned:
+
+**The exec + dynamic-loader set.** `execve`, `access`/`faccessat`,
+`newfstatat`, `pread64`, `prlimit64`, `rt_sigaction`, `rt_sigprocmask`, and the
+identity reads — found by escalating an allowlist against a real dynamically
+linked binary until it ran, not by reading glibc. Per-arch: aarch64 has no
+`access` at all, so that one is `#ifdef`-guarded.
+
+**The default action is now `ERRNO(EPERM)`, not `KILL_PROCESS`.** The argument
+is empirical: this module's own list ran a glibc `/bin/true` after four
+additions and still could not run a busybox applet after **ninety-seven**. A
+hand-maintained allowlist is never complete, so an omission must degrade the
+service rather than execute it — in a supervisor that would otherwise restart
+it into the same wall, with SIGSYS and no diagnostic. systemd's
+`SystemCallFilter` defaults to EPERM for the same reason. Measured after:
+
+```
+busybox true          -> exit 0
+busybox mkdir /tmp/x  -> "Operation not permitted", exit 1, no directory created
+```
+
+Still denying; now diagnosable. `seccomp_build_action` keeps the harder
+behaviour available for a future `strict` profile.
+
+The filter grew 42 → 56 BPF instructions (+33 %), which is the one honest cost.
+
+### Fixed — Landlock failed OPEN inside a hook documented as fail-closed
+
+`sandbox_apply` answers `Ok(0)` for "applied" and `Ok(1)` for "this kernel has
+no Landlock". `kyb_pre_exec` tested only `is_err_result`, so on a pre-5.13
+kernel a service carrying an explicit rule list started with **no filesystem
+confinement** while the hook reported success — the outcome
+`service_sandbox.cyr`'s own header calls "the one outcome worse than not
+running it", and what README calls failing closed.
+
+Now fails closed, exiting the child 126. `"landlock_optional": true` is the
+deliberate opt-out for a board on an old kernel. Inheriting a refusal is rule
+19's complaint; inheriting a **silent loss of policy** is worse, so the default
+goes the other way here.
+
+### Fixed — a required boot stage keyed on the wrong signal (standing rule 18)
+
+`_stage_verify_rootfs` failed on `edge_boot_dmverity_supp() == 0`. Rule 18
+forbids exactly that: the probe answers whether the kernel can instantiate a dm
+*target*, which `veritysetup verify` does not need. 1.5.7 removed that refusal
+from `edge_boot.cyr` and the boot stage kept it — so a board with no dm module
+saw phase 6c look at the facts and continue, then phase 7 fail a *required*
+step and drop to the emergency shell. Two gates, opposite verdicts, one boot.
+
+Now keyed on `edge_boot_verity_ok()` — the real `veritysetup verify` result,
+which had zero callers until now. No root device configured is a SKIP.
+
+### Fixed — an unconfigured 3-second boot budget could power the board off
+
+`edge_apply_defaults` cleared three of `EdgeBootConfig`'s **five** fields, so
+`max_boot_ms` kept argonaut's 3000 and `pcr_bindings` kept `"7+14"` on every
+path — absent block, partial block, and the malformed-block reset. An operator
+who never configured a budget inherited a 3-second one, and `veritysetup
+verify` hashes the entire rootfs image against it; with `readonly_rootfs` set,
+expiry is a poweroff. Rule 19's exact sentence, one field over from where 1.5.7
+fixed it. All five are cleared now; 0 means unbounded.
+
+The edge fixture sets `"max_boot_ms": 20000` — the one value that hid it.
+
+### Fixed — a broken config could silently replace a running one
+
+`load_config` returned `argonaut_config_default()` for both "no file" and "file
+present and unparseable", and `reload_config` installed the result. A SIGHUP
+with a truncated or mistyped `/etc/kybernet/config.json` therefore replaced a
+live board's services, boot mode, edge policy and timeouts with defaults. A
+reload that cannot fail is a reload that can destroy.
+
+`load_config` now returns **0** for present-but-unusable and callers separate
+the cases: at boot the board still comes up on defaults but says so on the
+console *and* in dmesg (on an edge deployment that is the difference between
+booting verified and booting ordinary); on reload the running config is kept.
+
+Also closed the silent **16 KiB cliff** — `file_read_all` stops at `maxlen` and
+returns `maxlen` with no error, so a config that outgrew the buffer came back
+as invalid JSON. One byte of headroom now distinguishes a full read from a
+truncated one, with a readable refusal.
+
+### Fixed — `"enabled": false` was counted as a boot failure
+
+argonaut's `init_start_service` returns `-1` for a disabled service — the same
+value it returns for a real failure — so a deliberately disabled service was
+logged `FAILED to start`. A config that disables every service therefore hit
+`failed > 0 && started == 0` and **dropped the board to the emergency shell**,
+which is a remarkable answer to "I turned my services off". Skipped now, before
+the cgroup is even created.
+
+### Fixed — unsafe service names reached the teardown paths
+
+1.4.2's MEDIUM-3 added `cgroup_name_is_safe` at `create_service_cgroup` and
+`move_to_cgroup` and left the rest open, so a name refused at `mkdir` was
+accepted at `rmdir` and at `cgroup.kill` — the latter SIGKILLs every pid it
+reads out of whatever cgroup it lands on. The predicate now guards
+`remove_service_cgroup`, `kill_cgroup` and `cgroup_apply_limits`, and — the
+primary fix — a service whose name is not a safe cgroup component is **refused
+at config load**, whole.
+
+### Added — the fixture whose absence let this ship for three releases
+
+`kyb-seccomp` reports its own `/proc/self/status` from under
+`"seccomp": "basic"`, so the gate asserts both halves from inside the confined
+child: that the filter was really loaded (`Seccomp: 2`, `Seccomp_filters: 1`)
+and that it no longer kills what it confines. It needs no fork because
+`sh -c '<simple command>'` execs directly — process creation is deliberately
+**not** on the basic allowlist.
+
+Harness 42 → 44 properties.
+
+### Notes
+
+- Tests 567 → 608. The seccomp additions are asserted individually so a future
+  trim has to argue with a test, and the `execve` assertion names what its
+  absence did.
+- **The benchmark gate could not be evaluated for this release.** The machine
+  carried a load average above 24 from unrelated work; runs flagged 52, then
+  21, then 51 regressions on primitives this release does not touch
+  (`strlen(52 chars)` +144 %, `getpid` +70 %). `benches/history.csv` was left
+  at its 1.5.9 state rather than recording a measurement that means nothing.
+  **Re-run `scripts/bench-history.sh` on a quiet machine before tagging.** The
+  one regression that would be real and attributable is
+  `seccomp_basic_service+build`, and its expected size is the +33 % filter
+  growth above.
+
+---
+
 ## [1.5.9] — 2026-08-25
 
 **The emergency credential is salted and memory-hard.** Suite 491 → 567

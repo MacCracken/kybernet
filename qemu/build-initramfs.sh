@@ -113,6 +113,27 @@ fi
 # so capset(2) really executes instead of short-circuiting on the euid
 # check.
 #
+# kyb-seccomp is the 1.6.0 proof, and it is the fixture whose absence let a
+# fatal defect ship for three releases. `"seccomp": "basic"` did not merely
+# fail to confine — it KILLED every service it was applied to, because the
+# 37-syscall allowlist had no `execve` and the filter's default action was
+# SECCOMP_RET_KILL_PROCESS. seccomp_apply's only production call site is
+# kyb_pre_exec, and argonaut execs on the very next line, so the service died
+# with SIGSYS before running one instruction. No harness service had ever set
+# the key, so `seccomp_apply` had never executed in a release gate on either
+# arch.
+#
+# This service reports its OWN /proc/self/status Seccomp fields to the
+# console, so the gate asserts the filter was really loaded IN THE CHILD
+# (Seccomp: 2 = filter mode, Seccomp_filters: 1) rather than trusting that
+# kyb_pre_exec was reached — the same shape as kyb-confined above. That it
+# produces output at all is the other half: it proves the profile no longer
+# kills what it confines.
+#
+# It works without any fork because `sh -c '<simple command>'` execs the
+# command directly. Process creation is deliberately NOT on the basic
+# allowlist, so a fixture with two commands or a pipeline would be denied.
+#
 # kyb-crash is the 1.5.4 proof. /bin/false exits 1 immediately, so argonaut
 # raises a CRASH_RESTART with an exponential backoff and kybernet ENQUEUES it
 # rather than relaunching inline; the reactor's 1 s restart tick performs the
@@ -225,6 +246,18 @@ if [ -n "$BUSYBOX" ]; then
       "security": {
         "no_new_privs": true,
         "capabilities": []
+      }
+    },
+    {
+      "name": "kyb-seccomp",
+      "description": "reports its own seccomp state from under the basic profile",
+      "binary": "/bin/sh",
+      "args": ["-c", "grep -E '^(Seccomp|Seccomp_filters)' /proc/self/status > /dev/console 2>&1"],
+      "type": "oneshot",
+      "restart": "never",
+      "security": {
+        "seccomp": "basic",
+        "no_new_privs": true
       }
     }
   ]

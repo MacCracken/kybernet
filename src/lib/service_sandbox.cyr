@@ -114,8 +114,27 @@ fn kyb_pre_exec(svc_def) {
     }
 
     # 3. Landlock
+    #
+    # ⚠ Ok(1) IS NOT SUCCESS. `sandbox_apply` answers Ok(0) for "applied" and
+    # Ok(1) for "this kernel has no Landlock" (ENOSYS/EOPNOTSUPP). Testing
+    # only `is_err_result` — which is what this did from 1.4.3 to 1.6.0 — let
+    # a service that configured an explicit rule list start with NO filesystem
+    # confinement while this hook reported success. That is exactly the
+    # outcome the header above calls the one worse than not running at all,
+    # and it is what README means by "fails closed".
+    #
+    # Failing closed here exits the child 126 (argonaut's pre-exec-hook
+    # contract), so the operator sees a service that refuses to start rather
+    # than one that quietly lost its policy. `"landlock_optional": true` is
+    # the deliberate opt-out for a board on a pre-5.13 kernel.
     if (ll != 0) {
-        if (is_err_result(sandbox_from_config(ll)) == 1) { return 1; }
+        var lr = sandbox_from_config(ll);
+        if (is_err_result(lr) == 1) { return 1; }
+        if (result_unwrap(lr) == 1) {
+            var ll_opt = 0;
+            if (sc != 0) { ll_opt = kyb_policy_landlock_optional(sc); }
+            if (ll_opt == 0) { return 1; }
+        }
     }
 
     # 4. seccomp — last. `sc` is kybernet's KybSeccompPolicy (argonaut

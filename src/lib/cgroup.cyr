@@ -373,6 +373,10 @@ fn move_to_cgroup(service, pid) {
 # Strategy: try cgroup.kill (kernel 5.14+), fallback to individual SIGKILL
 # Returns: Result (Ok(killed_count) or Err(errno))
 fn kill_cgroup(service) {
+    # Same predicate as create/remove — this writes cgroup.kill and then
+    # SIGKILLs every pid it reads out of cgroup.procs, so an unvalidated name
+    # is a traversal that kills whatever lives in the cgroup it lands on.
+    if (cgroup_name_is_safe(service) == 0) { return Err(EINVAL); }
     # Try cgroup.kill first (fast path, kernel 5.14+)
     var killpath = cgroup_file(service, "cgroup.kill");
     var fd = sys_open(str_data(killpath), O_WRONLY | O_CLOEXEC, 0);
@@ -453,6 +457,7 @@ fn _cgroup_write_u64(service, filename, value) {
 # Every configured limit is now attempted, and the LAST failure is returned
 # so the caller still learns that something did not apply.
 fn cgroup_apply_limits(service, limits) {
+    if (cgroup_name_is_safe(service) == 0) { return Err(EINVAL); }
     # A null limits pointer would make cglim_memory_max() a load64(0) — a
     # SIGSEGV in PID 1. The live call site guards, but an unguarded deref
     # reachable from init is not something to leave lying around.
@@ -543,6 +548,10 @@ fn cgroup_setup_agent(service, config, pid) {
 
 # Remove a service cgroup directory (must be empty)
 fn remove_service_cgroup(service) {
+    # Same predicate as create. The asymmetry was the defect: a name refused
+    # at mkdir was accepted at rmdir, so a traversal that could never be
+    # created could still be removed.
+    if (cgroup_name_is_safe(service) == 0) { return Err(EINVAL); }
     var path = cgroup_path(service);
     var r = sys_rmdir(str_data(path));
     if (is_err(r) == 1) { return Err(err_code(r)); }

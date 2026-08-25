@@ -69,9 +69,24 @@ fn _stage_verify_rootfs(config) {
     if (config == 0) { return STAGE_SKIP; }
     if (config_boot_mode(config) != BOOT_EDGE) { return STAGE_SKIP; }
     if (config_verify_boot(config) == 0) { return STAGE_SKIP; }
-    # edge_boot_run recorded what it found. dm-verity support is the
-    # property this stage is named for.
-    if (edge_boot_dmverity_supp() == 0) { return STAGE_FAIL; }
+
+    # ⚠ KEYED ON THE VERIFICATION RESULT, NOT ON THE dm-verity PROBE.
+    #
+    # This used to be `if (edge_boot_dmverity_supp() == 0) { return
+    # STAGE_FAIL; }`, which standing rule 18 forbids in as many words:
+    # `_eb_dmverity_supported` answers whether the kernel can instantiate a
+    # dm TARGET, and `veritysetup verify` — the thing that actually checks
+    # the image against the pinned root hash — needs no such thing. 1.5.7
+    # removed that refusal from edge_boot.cyr and this stage kept it, so a
+    # board with no dm module failed a REQUIRED boot step and dropped to the
+    # emergency shell after phase 6c had already looked at the same facts and
+    # decided to continue. Two gates, opposite verdicts, on one boot.
+    #
+    # `edge_boot_verity_ok()` is the honest signal and had zero callers until
+    # now. A deployment that configured no root device asked for no
+    # verification, so that is a SKIP, not a pass and not a failure.
+    if (edge_root_device() == 0) { return STAGE_SKIP; }
+    if (edge_boot_verity_ok() == 0) { return STAGE_FAIL; }
     return STAGE_OK;
 }
 

@@ -579,6 +579,33 @@ fn test_security_profile_parse() {
     assert(pol != 0, "sec: policy built");
     assert_eq(kyb_policy_kind(pol), SECCOMP_BASIC, "sec: seccomp basic");
     assert_eq(kyb_policy_no_new_privs(pol), 1, "sec: no_new_privs on");
+
+    # 1.6.0 — Landlock is REQUIRED unless the operator says otherwise.
+    # kyb_pre_exec used to treat sandbox_apply's Ok(1) ("this kernel has no
+    # Landlock") as success, so a service with an explicit rule list started
+    # completely unconfined while the hook reported it applied. The default
+    # here is what makes the fix fail closed.
+    assert_eq(kyb_policy_landlock_optional(pol), 0,
+      "sec: landlock is REQUIRED by default (fail closed)");
+    return 0;
+}
+
+# The explicit opt-out for a board on a pre-5.13 kernel. Without it, a
+# service carrying landlock rules refuses to start there — which is correct,
+# and which an operator must be able to override deliberately.
+fn test_landlock_optional_optin() {
+    println("--- landlock_optional opt-in (1.6.0) ---");
+    var j = "{\"services\":[{\"name\":\"lax\",\"binary\":\"/bin/true\",\"security\":{\"landlock_optional\":true,\"landlock\":[{\"path\":\"/usr\",\"access\":\"read\"}]}}]}";
+    var root = json_v_parse_buf(j, strlen(j));
+    assert(root != 0, "ll-opt: config parses");
+    var defs = svc_defs_from_json(root);
+    assert_eq(vec_len(defs), 1, "ll-opt: one service");
+    var pol = svc_def_seccomp(vec_get(defs, 0));
+    assert(pol != 0, "ll-opt: policy built");
+    assert_eq(kyb_policy_landlock_optional(pol), 1,
+      "ll-opt: landlock_optional true is honoured");
+    assert_eq(kyb_policy_kind(pol), SECCOMP_NONE,
+      "ll-opt: no seccomp key means SECCOMP_NONE, not basic");
     return 0;
 }
 
@@ -1342,6 +1369,73 @@ fn test_knotify_classify() {
     return 0;
 }
 
+# The 1.6.0 regression: `"seccomp": "basic"` was fatal to every service it
+# was applied to, and its default action made the failure undiagnosable.
+fn test_seccomp_basic_profile() {
+    println("--- seccomp basic profile (1.6.0) ---");
+
+    # ⚠ THE ASSERTION THAT MATTERS. A seccomp filter takes effect the instant
+    # it is installed and is inherited across exec, so kyb_pre_exec's
+    # seccomp_apply is immediately followed by argonaut's execve of the
+    # service binary. From 1.4.3 to 1.6.0 execve was not on the list, so the
+    # documented `"seccomp": "basic"` key guaranteed SIGSYS before the service
+    # ran one instruction. Verified by execution at the time: signal 31.
+    var b = seccomp_basic_service();
+    var v = load64(b);
+    var n = seccomp_count(b);
+    var has_execve = 0;
+    for (var i = 0; i < n; i = i + 1) {
+        if (vec_get(v, i) == BS_EXECVE) { has_execve = 1; }
+    }
+    assert_eq(has_execve, 1, "seccomp: basic profile allows execve (or every service dies)");
+
+    # The rest of what glibc's loader needs before main — measured by
+    # escalating an allowlist against a real dynamically linked binary, not
+    # guessed. Each is asserted individually so a future trim has to argue.
+    var want = vec_new();
+    vec_push(want, BS_NEWFSTATAT);
+    vec_push(want, BS_PREAD64);
+    vec_push(want, BS_PRLIMIT64);
+    vec_push(want, BS_FACCESSAT);
+    vec_push(want, BS_RT_SIGACTION);
+    vec_push(want, BS_RT_SIGPROCMASK);
+    for (var w = 0; w < vec_len(want); w = w + 1) {
+        var need = vec_get(want, w);
+        var found = 0;
+        for (var j = 0; j < n; j = j + 1) {
+            if (vec_get(v, j) == need) { found = 1; }
+        }
+        assert_eq(found, 1, "seccomp: loader syscall present in basic profile");
+    }
+
+    # --- the default action ------------------------------------------------
+    # `seccomp_apply` denies with EPERM, not KILL_PROCESS. A hand-maintained
+    # allowlist is never complete — this module's own list ran a glibc
+    # /bin/true after four additions and still could not run a busybox applet
+    # after ninety-seven — so an omission must degrade the service, not
+    # execute it. Measured after the change: `busybox true` exits 0 under the
+    # filter, and `busybox mkdir` is denied with a readable
+    # "Operation not permitted" and exit 1, with no directory created.
+    var small = seccomp_builder_new();
+    seccomp_allow(small, BS_READ);
+    var er = seccomp_build_action(small, SECCOMP_RET_ERRNO_EPERM);
+    assert(is_ok(er) == 1, "seccomp: build with an ERRNO default succeeds");
+    var einfo = result_unwrap(er);
+    var ep = seccomp_filter_ptr(einfo);
+    # 1 allowed + 5 fixed = 6 insns; the deny return is insn 4 (offset 32).
+    assert_eq(load32(ep + 32 + 4), SECCOMP_RET_ERRNO_EPERM,
+      "seccomp: deny action is ERRNO(EPERM) when asked");
+
+    var kr = seccomp_build_action(small, SECCOMP_RET_KILL_PROCESS);
+    assert(is_ok(kr) == 1, "seccomp: build with a KILL default still succeeds");
+    assert_eq(load32(seccomp_filter_ptr(result_unwrap(kr)) + 32 + 4), SECCOMP_RET_KILL_PROCESS,
+      "seccomp: deny action is KILL_PROCESS when asked");
+
+    # The ALLOW return is unchanged in both.
+    assert_eq(load32(ep + 40 + 4), SECCOMP_RET_ALLOW, "seccomp: allow return intact");
+    return 0;
+}
+
 fn test_seccomp_builder() {
     println("--- seccomp ---");
     var b = seccomp_builder_new();
@@ -1699,6 +1793,78 @@ fn test_edge_boot_pcr_parser() {
 }
 
 # Edge policy config (1.5.7).
+# 1.6.0 — the two fields edge_apply_defaults forgot.
+#
+# `EdgeBootConfig` has five slots and the reset cleared three, so
+# `max_boot_ms` kept argonaut's 3000 and `pcr_bindings` kept "7+14" on every
+# path. An operator who never configured a budget inherited a 3-second one,
+# and `veritysetup verify` hashes the whole rootfs image against it — so a
+# poweroff was reachable purely by omission. Rule 19's exact complaint.
+fn test_edge_defaults_clear_all_five() {
+    println("--- edge defaults clear all five fields (1.6.0) ---");
+    var ec = alloc(48);
+    # Poison every slot with argonaut's defaults, then reset.
+    store64(ec, 1); store64(ec + 8, 1); store64(ec + 16, 1);
+    store64(ec + 24, 3000); store64(ec + 32, str_from("7+14"));
+    edge_apply_defaults(ec);
+    assert_eq(load64(ec), 0, "edge-def: readonly_rootfs cleared");
+    assert_eq(load64(ec + 8), 0, "edge-def: luks_enabled cleared");
+    assert_eq(load64(ec + 16), 0, "edge-def: tpm_attestation cleared");
+    assert_eq(load64(ec + 24), 0, "edge-def: max_boot_ms cleared (was inheriting 3000)");
+    assert_eq(load64(ec + 32), 0, "edge-def: pcr_bindings cleared (was inheriting 7+14)");
+
+    # And through the real parser: an `edge` block that omits max_boot_ms
+    # must leave it unbounded, not at argonaut's 3000.
+    store64(ec + 24, 3000);
+    var r = json_v_parse(_doc3("{\"boot_mode\":\"edge\",\"edge\":{\"readonly_rootfs\":false}}", "", ""));
+    assert(r != 0, "edge-def: doc parses");
+    assert_eq(edge_config_from_json(r, ec), 1, "edge-def: block accepted");
+    assert_eq(load64(ec + 24), 0,
+      "edge-def: an omitted max_boot_ms stays unbounded, not 3000");
+
+    # An explicit budget still lands.
+    var r2 = json_v_parse(_doc3("{\"boot_mode\":\"edge\",\"edge\":{\"max_boot_ms\":20000}}", "", ""));
+    assert_eq(edge_config_from_json(r2, ec), 1, "edge-def: explicit budget accepted");
+    assert_eq(load64(ec + 24), 20000, "edge-def: explicit max_boot_ms honoured");
+    return 0;
+}
+
+# 1.6.0 — a service name that cannot be safely used as a cgroup component
+# is a CONFIG error, refused with the whole service.
+fn test_unsafe_service_name_refused() {
+    println("--- unsafe service names refused at load (1.6.0) ---");
+    var bad = vec_new();
+    vec_push(bad, "../../evil");
+    vec_push(bad, "a/b");
+    vec_push(bad, "..");
+    vec_push(bad, ".");
+    vec_push(bad, "has space");
+    for (var i = 0; i < vec_len(bad); i = i + 1) {
+        var nm = vec_get(bad, i);
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "{\"services\":[{\"name\":\"");
+        str_builder_add_cstr(sb, nm);
+        str_builder_add_cstr(sb, "\",\"binary\":\"/bin/true\"}]}");
+        var doc = str_data(str_builder_build(sb));
+        var root = json_v_parse_buf(doc, strlen(doc));
+        assert(root != 0, "svcname: doc parses");
+        assert_eq(vec_len(svc_defs_from_json(root)), 0,
+          "svcname: an unsafe service name is refused");
+    }
+    # The control: a normal name still parses.
+    var okdoc = "{\"services\":[{\"name\":\"kyb-ok\",\"binary\":\"/bin/true\"}]}";
+    var okroot = json_v_parse_buf(okdoc, strlen(okdoc));
+    assert_eq(vec_len(svc_defs_from_json(okroot)), 1, "svcname: a safe name is accepted");
+
+    # Defence in depth: the teardown paths refuse it too. A name refused at
+    # mkdir used to be accepted at rmdir and at cgroup.kill.
+    assert(is_err_result(remove_service_cgroup("../../evil")) == 1,
+      "svcname: remove_service_cgroup refuses a traversal");
+    assert(is_err_result(kill_cgroup("../../evil")) == 1,
+      "svcname: kill_cgroup refuses a traversal");
+    return 0;
+}
+
 fn test_edge_config_parse() {
     println("--- edge config parse (1.5.7) ---");
     # EdgeBootConfig is 5 i64 fields; allocate it directly rather than
@@ -2100,6 +2266,7 @@ fn main() {
     test_knotify_classify();
     test_notify_constants();
     test_seccomp_builder();
+    test_seccomp_basic_profile();
     test_sandbox_builder();
     test_caps();
     test_agnostik_security();
@@ -2123,6 +2290,7 @@ fn main() {
     test_required_stage_failure_propagates();
     test_security_profile_parse();
     test_security_profile_defaults_and_rejection();
+    test_landlock_optional_optin();
     test_capability_numbers_are_kernel();
     test_cgroup_controller_probe();
     test_cgroup_apply_null_guard();
@@ -2144,6 +2312,8 @@ fn main() {
     test_cgroup_path_cache();
     test_edge_boot_pcr_parser();
     test_edge_config_parse();
+    test_edge_defaults_clear_all_five();
+    test_unsafe_service_name_refused();
     test_edge_config_rejects();
     test_edge_validators();
     test_edge_boot_gating();

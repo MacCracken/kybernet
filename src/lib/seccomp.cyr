@@ -12,6 +12,9 @@ enum BpfConst {
     BPF_RET_K = 0x06;
     SECCOMP_RET_ALLOW = 0x7FFF0000;
     SECCOMP_RET_KILL_PROCESS = 0x80000000;
+    # SECCOMP_RET_ERRNO | EPERM. The low 16 bits carry the errno the denied
+    # syscall returns; 0x00050000 is the action, 1 is EPERM.
+    SECCOMP_RET_ERRNO_EPERM = 0x00050001;
     SECCOMP_RET_LOG = 0x7FFC0000;
     BPF_MAXINSNS = 4096;
     SECCOMP_MODE_FILTER = 2;
@@ -88,7 +91,16 @@ enum SeccompLimits { SECCOMP_MAX_ALLOW = 254; }
 
 # Build the BPF filter bytecode from the builder.
 # Returns: Result(info_ptr) where info = { filter_ptr, filter_len }
-fn seccomp_build(builder) {
+# Build a filter whose default action is `deny_action` — SECCOMP_RET_* .
+#
+# ⚠ THE DEFAULT ACTION IS A REAL DESIGN CHOICE, not a detail. KILL_PROCESS
+# turns any syscall the allowlist forgot into a service that vanishes with
+# SIGSYS and no diagnostic; ERRNO(EPERM) turns it into a normal failed call
+# the program can report. For a supervised daemon under PID 1 the second is
+# almost always what an operator wants, and it is what systemd's
+# SystemCallFilter does by default too. Kept selectable so a future `strict`
+# profile can ask for the harder behaviour deliberately.
+fn seccomp_build_action(builder, deny_action) {
     var v = load64(builder);
     var num = load64(builder + 8);
     if (num == 0) { return Err(EINVAL); }
@@ -123,8 +135,8 @@ fn seccomp_build(builder) {
         off = off + 8;
     }
 
-    # Default: KILL_PROCESS
-    _bpf_insn(filter, off, BPF_RET_K, 0, 0, SECCOMP_RET_KILL_PROCESS);
+    # Default action for anything not on the allowlist.
+    _bpf_insn(filter, off, BPF_RET_K, 0, 0, deny_action);
     off = off + 8;
 
     # ALLOW return
@@ -163,8 +175,18 @@ fn seccomp_load(filter_ptr, filter_len) {
 # Convenience: build and load a seccomp filter.
 # Must be called after set_no_new_privs().
 # Returns: Result
+# Apply `builder` with the DENYING-BUT-SURVIVABLE default (EPERM).
+#
+# ⚠ This is the entry point kyb_pre_exec uses, and the action matters. A
+# hand-maintained allowlist is never complete: this module's own list ran a
+# glibc `/bin/true` after four additions and still could not run a busybox
+# applet after ninety-seven — which is the honest argument for not making an
+# omission fatal. Under EPERM a forgotten syscall is a failed call the service
+# reports; under KILL_PROCESS it is a service that vanishes with SIGSYS and no
+# diagnostic, in a supervisor that will then restart it into the same wall.
+# systemd's SystemCallFilter defaults to EPERM for the same reason.
 fn seccomp_apply(builder) {
-    var info_r = seccomp_build(builder);
+    var info_r = seccomp_build_action(builder, SECCOMP_RET_ERRNO_EPERM);
     if (is_err_result(info_r) == 1) { return info_r; }
     var info = result_unwrap(info_r);
     return seccomp_load(seccomp_filter_ptr(info), seccomp_filter_len(info));
@@ -251,6 +273,13 @@ enum BasicSyscalls {
     BS_CLOCK_GETTIME = 228; BS_EXIT_GROUP = 231; BS_OPENAT = 257;
     BS_SET_ROBUST_LIST = 273; BS_EPOLL_CREATE1 = 291; BS_PIPE2 = 293;
     BS_GETRANDOM = 318; BS_RSEQ = 334;
+    # exec + dynamic-loader set (1.6.0). Without BS_EXECVE the filter kills
+    # the service on the very exec that starts it — see seccomp_basic_service.
+    BS_EXECVE = 59;   BS_ACCESS = 21;   BS_FACCESSAT = 269; BS_FACCESSAT2 = 439;
+    BS_NEWFSTATAT = 262; BS_PREAD64 = 17; BS_PRLIMIT64 = 302;
+    BS_RT_SIGACTION = 13; BS_RT_SIGPROCMASK = 14;
+    BS_GETPID = 39;   BS_GETUID = 102;  BS_GETEUID = 107;
+    BS_GETGID = 104;  BS_GETEGID = 108;
 }
 #endif
 #ifdef CYRIUS_ARCH_AARCH64
@@ -266,8 +295,21 @@ enum BasicSyscalls {
     BS_CLOCK_GETTIME = 113; BS_EXIT_GROUP = 94; BS_OPENAT = 56;
     BS_SET_ROBUST_LIST = 99; BS_EPOLL_CREATE1 = 20; BS_PIPE2 = 59;
     BS_GETRANDOM = 278; BS_RSEQ = 293;
+    # exec + dynamic-loader set (1.6.0). asm-generic numbering. ⚠ aarch64 has
+    # NO `access` — glibc uses faccessat there — so BS_ACCESS is x86-only and
+    # the builder below guards it with the same #ifdef.
+    BS_EXECVE = 221;  BS_FACCESSAT = 48; BS_FACCESSAT2 = 439;
+    BS_NEWFSTATAT = 79; BS_PREAD64 = 67; BS_PRLIMIT64 = 261;
+    BS_RT_SIGACTION = 134; BS_RT_SIGPROCMASK = 135;
+    BS_GETPID = 172;  BS_GETUID = 174;  BS_GETEUID = 175;
+    BS_GETGID = 176;  BS_GETEGID = 177;
 }
 #endif
+
+# Back-compat wrapper: the original hard KILL_PROCESS behaviour.
+fn seccomp_build(builder) {
+    return seccomp_build_action(builder, SECCOMP_RET_KILL_PROCESS);
+}
 
 fn seccomp_basic_service() {
     var b = seccomp_builder_new();
@@ -310,5 +352,42 @@ fn seccomp_basic_service() {
     seccomp_allow(b, BS_PIPE2);
     seccomp_allow(b, BS_GETRANDOM);
     seccomp_allow(b, BS_RSEQ);
+
+    # ---- exec + dynamic-loader set (1.6.0) ----
+    #
+    # ⚠ BS_EXECVE IS NOT OPTIONAL AND ITS ABSENCE WAS FATAL. A seccomp filter
+    # takes effect the instant it is installed and is inherited across exec,
+    # so the very next syscall after `seccomp_apply` in kyb_pre_exec is
+    # argonaut's `execve` of the service binary. Without execve on the list,
+    # `"seccomp": "basic"` guaranteed the service was killed by SIGSYS before
+    # it ran a single instruction — measured, on both a KILL and an ERRNO
+    # default, from 1.4.3 until 1.6.0. Nothing caught it because no harness
+    # fixture set the key.
+    #
+    # ⚠ Allowing execve does mean a confined service can exec other programs.
+    # That is unavoidable for the exec that STARTS it, and the filter is
+    # inherited, so whatever it execs is confined by the same rules.
+    #
+    # The rest is what glibc's loader needs before `main` — measured, not
+    # guessed, by escalating an allowlist against a real dynamically linked
+    # binary until it ran: access, newfstatat, pread64, prlimit64.
+    seccomp_allow(b, BS_EXECVE);
+    #ifdef CYRIUS_ARCH_X86
+    seccomp_allow(b, BS_ACCESS);          # aarch64 has no `access`
+    #endif
+    seccomp_allow(b, BS_FACCESSAT);
+    seccomp_allow(b, BS_FACCESSAT2);
+    seccomp_allow(b, BS_NEWFSTATAT);
+    seccomp_allow(b, BS_PREAD64);
+    seccomp_allow(b, BS_PRLIMIT64);
+    seccomp_allow(b, BS_RT_SIGACTION);
+    seccomp_allow(b, BS_RT_SIGPROCMASK);
+    # Identity reads. No security consequence — a process can already read
+    # its own ids from /proc — and daemons check them at startup constantly.
+    seccomp_allow(b, BS_GETPID);
+    seccomp_allow(b, BS_GETUID);
+    seccomp_allow(b, BS_GETEUID);
+    seccomp_allow(b, BS_GETGID);
+    seccomp_allow(b, BS_GETEGID);
     return b;
 }

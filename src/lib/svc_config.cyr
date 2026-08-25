@@ -111,6 +111,14 @@ fn svc_def_from_json(obj) {
     var name = _cfg_str(obj, "name", 0);
     if (name == 0) { return 0; }
     if (str_len(name) == 0) { return 0; }
+    # ⚠ REJECTED HERE, not just at the cgroup call. The service name is
+    # interpolated into /sys/fs/cgroup/kybernet.slice/{name}, so a `/` or
+    # `..` walks out of the slice. 1.4.2's MEDIUM-3 added the predicate at
+    # create_service_cgroup and move_to_cgroup and left the teardown paths
+    # and the registry open, which meant an unsafe name still parsed, still
+    # registered, and still reached kill/rmdir. A name kybernet cannot
+    # safely operate on is a config error, and the whole service is refused.
+    if (cgroup_name_is_safe(str_data(name)) == 0) { return 0; }
     var binary = _cfg_str(obj, "binary", 0);
     if (binary == 0) { return 0; }
     if (str_len(binary) == 0) { return 0; }
@@ -251,10 +259,27 @@ fn svc_apply_resources_json(sd, obj) {
 # detection-only. An operator who wants a hard prerequisite must say so.
 # Refusing to boot is a policy an operator opts into, never one they
 # inherit from a struct default they never saw.
+# ⚠ ALL FIVE FIELDS, not three. `EdgeBootConfig` is
+# {readonly_rootfs, luks_enabled, tpm_attestation, max_boot_ms, pcr_bindings}
+# and this used to clear only the booleans — so `max_boot_ms` silently kept
+# argonaut's `edge_config_default()` value of **3000** on every path: absent
+# block, partial block, and the malformed-block reset in load_config.
+#
+# That is the same defect this function was written to fix, one field over.
+# An operator who never configured a budget inherited a 3-SECOND one, and
+# `veritysetup verify` hashes the entire rootfs image against it — so the
+# refusal path (poweroff, when readonly_rootfs is set) was reachable by
+# omission. 1.5.7 flipped the three booleans and stopped.
+#
+# 0 means "no budget configured": `_eb_over_budget` treats `max_ms <= 0` as
+# unbounded, which is the only honest reading of a key the operator never
+# wrote. A board that wants a boot deadline asks for one.
 fn edge_apply_defaults(ec) {
     store64(ec, 0);        # readonly_rootfs
     store64(ec + 8, 0);    # luks_enabled
     store64(ec + 16, 0);   # tpm_attestation
+    store64(ec + 24, 0);   # max_boot_ms — 0 = unbounded, NOT argonaut's 3000
+    store64(ec + 32, 0);   # pcr_bindings — 0 = none, NOT argonaut's "7+14"
     return 0;
 }
 
@@ -385,6 +410,7 @@ fn svc_defs_from_json(root) {
 #     "capabilities": ["cap_net_bind_service"],
 #     "landlock":     [ {"path": "/usr", "access": "read-exec"},
 #                       {"path": "/var/lib/daimon", "access": "read-write"} ],
+#     "landlock_optional": false,
 #     "seccomp":      "basic"
 #   }
 #
@@ -402,17 +428,23 @@ enum SeccompKind {
 }
 
 # kybernet's own policy object; argonaut treats svc_def_seccomp as opaque.
-struct KybSeccompPolicy { kind; no_new_privs; }
+#
+# `landlock_optional` rides here rather than on the landlock block because
+# that block is a JSON ARRAY of rules with nowhere to hang a scalar, and this
+# object is already the per-service policy kyb_pre_exec reads.
+struct KybSeccompPolicy { kind; no_new_privs; landlock_optional; }
 
-fn kyb_seccomp_policy_new(kind, nnp) {
-    var p = alloc(16);
+fn kyb_seccomp_policy_new(kind, nnp, ll_opt) {
+    var p = alloc(24);
     store64(p, kind);
     store64(p + 8, nnp);
+    store64(p + 16, ll_opt);
     return p;
 }
 
-fn kyb_policy_kind(p)          { return load64(p); }
-fn kyb_policy_no_new_privs(p)  { return load64(p + 8); }
+fn kyb_policy_kind(p)              { return load64(p); }
+fn kyb_policy_no_new_privs(p)      { return load64(p + 8); }
+fn kyb_policy_landlock_optional(p) { return load64(p + 16); }
 
 fn _access_from_name(s) {
     if (str_eq_cstr(s, "none") == 1)       { return 0; }
@@ -488,6 +520,19 @@ fn svc_apply_security_json(sd, obj) {
     # Defaults to on: a service that asked to be confined at all wants the
     # setuid-escalation door shut, and both Landlock and seccomp require it.
     var nnp = _cfg_bool(sec, "no_new_privs", 1);
-    svc_def_set_seccomp(sd, kyb_seccomp_policy_new(kind, nnp));
+
+    # ⚠ DEFAULTS TO REQUIRED. A service that configured Landlock rules and
+    # then ran on a kernel without Landlock used to start with NO filesystem
+    # confinement while kyb_pre_exec reported success — `sandbox_apply`
+    # answers Ok(1) for "kernel lacks Landlock" and the hook only tested for
+    # Err. That is the outcome service_sandbox.cyr's own header calls "worse
+    # than not running it", and what README calls failing closed.
+    #
+    # An operator who genuinely wants best-effort confinement on an old
+    # kernel says so with `"landlock_optional": true`. Inheriting a refusal
+    # is rule 19's complaint; inheriting a SILENT LOSS OF POLICY is worse,
+    # so the default goes the other way here and says so in the log.
+    var ll_opt = _cfg_bool(sec, "landlock_optional", 0);
+    svc_def_set_seccomp(sd, kyb_seccomp_policy_new(kind, nnp, ll_opt));
     return 1;
 }

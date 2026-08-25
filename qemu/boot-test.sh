@@ -24,15 +24,17 @@
 #   "started: kyb-live"              — a LIVE service, so a cgroup is really
 #                                      created and the pid moved into it
 #                                      (a completed oneshot correctly gets none)
-#   "removed service cgroups: 6"     — the shutdown sweep killed and rmdir'd them
+#   "removed service cgroups: 7"     — the shutdown sweep killed and rmdir'd them
 # Before 1.5.3 create_service_cgroup and move_to_cgroup were the only cgroup
 # calls with production call sites, so directories accumulated for the life of
 # the system and CRASH_GIVE_UP left a populated one behind.
 #
 # 1.5.0 service markers — these are the gate for "services actually come
-# from config". build-initramfs.sh stages /etc/kybernet/config.json with
-# two oneshots where kyb-svc depends_on kyb-dep:
-#   "config: services parsed: 2"          — the JSON services array is read
+# from config". build-initramfs.sh stages /etc/kybernet/config.json with a
+# set of oneshots in which kyb-svc depends_on kyb-dep. The count has grown
+# with each fixture (2 at 1.5.0, 7 at 1.6.0 with kyb-seccomp); the assertion
+# below carries the live number, so adding a fixture means updating it:
+#   "config: services parsed: N"          — the JSON services array is read
 #   "completed (oneshot): kyb-dep"        — a config service really forked+exec'd
 #   "completed (oneshot): kyb-svc"        — and its DEPENDENT ran after it,
 #                                           proving wave ordering + that a
@@ -153,12 +155,12 @@ for marker in \
     "kybernet: services started" \
     "kybernet: harness done" \
     "kybernet: shutdown" \
-    "kybernet: config: services parsed: 6" \
+    "kybernet: config: services parsed: 7" \
     "kybernet:   completed (oneshot): kyb-dep" \
     "kybernet:   completed (oneshot): kyb-svc" \
     "kybernet: boot: skipped (not applicable): Start udev device manager" \
     "kybernet:   started: kyb-live" \
-    "kybernet: removed service cgroups: 6"; do
+    "kybernet: removed service cgroups: 7"; do
     if echo "$RUNTIME_OUT" | grep -aqF "$marker"; then
         echo "  OK: $marker"
     else
@@ -198,6 +200,32 @@ if echo "$RUNTIME_OUT" | grep -qE '^NoNewPrivs:[[:space:]]*1'; then
     echo "  OK: kyb-confined has no_new_privs set"
 else
     echo "  FAIL: kyb-confined missing no_new_privs"
+    fail=1
+fi
+
+# 1.6.0: `"seccomp": "basic"` is applied AND is survivable.
+#
+# This is a regression test for a fatal defect, not a feature test. From 1.4.3
+# to 1.6.0 the basic profile had no `execve` on its 37-syscall allowlist and
+# denied with SECCOMP_RET_KILL_PROCESS, so the documented config key killed
+# every service it was applied to — with SIGSYS, before the binary ran an
+# instruction. Nothing caught it because no fixture had ever set the key, so
+# `seccomp_apply` had never run in a gate on either arch.
+#
+# kyb-seccomp reports its own /proc/self/status, so both halves are asserted
+# from inside the confined child: that it LIVED (there is output at all), and
+# that the filter was really loaded (Seccomp: 2 = SECCOMP_MODE_FILTER).
+if echo "$RUNTIME_OUT" | grep -qE '^Seccomp:[[:space:]]*2'; then
+    echo "  OK: kyb-seccomp runs under a loaded filter (Seccomp=2, mode filter)"
+else
+    echo "  FAIL: kyb-seccomp produced no Seccomp line — the profile killed it, or was never applied"
+    echo "$RUNTIME_OUT" | grep -aiE 'seccomp' | head -3
+    fail=1
+fi
+if echo "$RUNTIME_OUT" | grep -qE '^Seccomp_filters:[[:space:]]*[1-9]'; then
+    echo "  OK: kyb-seccomp has at least one filter installed"
+else
+    echo "  FAIL: kyb-seccomp reports no installed seccomp filter"
     fail=1
 fi
 

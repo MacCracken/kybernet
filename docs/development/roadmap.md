@@ -1,10 +1,11 @@
 # Kybernet Roadmap
 
-**Current: v1.5.9** — [CHANGELOG.md](../../CHANGELOG.md) is the record of what each
+**Current: v1.6.0** — [CHANGELOG.md](../../CHANGELOG.md) is the record of what each
 release actually did. This file carries only what is **not** done.
 
-Everything below came out of a deliberate sweep of the tree after 1.5.9 shipped, and
-every item names the file that proves it. Where a claim was verified by running
+Everything below came out of a deliberate sweep of the tree after 1.5.9 shipped;
+v1.6.0 closed the eight items in the first section. Every item names the file that
+proves it. Where a claim was verified by running
 something rather than by reading, it says so.
 
 **Pins:** `v1.6.x` is scoped work with a clear finish line. `v1.x.x` is real but needs
@@ -15,80 +16,6 @@ something outside this repo.
 revision — every deferral comment in the tree now cross-references this file or a
 CHANGELOG entry. Keeping that at zero is a v1.6.1 item, because the linter is advisory
 in CI today.
-
----
-
-## v1.6.0 — the confinement path does not confine
-
-Four defects in the security path 1.4.3–1.5.2 built. Each is reachable from a
-documented config key, none is covered by a gate, and the first is not a degradation —
-it is a guarantee of failure.
-
-- [ ] **`"seccomp": "basic"` kills every service it is applied to.**
-      `seccomp_basic_service()` (`src/lib/seccomp.cyr:264`) allowlists 37 syscalls.
-      **`execve` is not one of them** — `BS_EXECVE` exists in neither `#ifdef` arm —
-      and the default action is `SECCOMP_RET_KILL_PROCESS` (`seccomp.cyr:127`).
-      `kyb_pre_exec` loads the filter as step 4 and argonaut execs on the very next
-      line (`lib/argonaut_process_mgmt.cyr:443-449`).
-
-      **Verified by execution**, through kybernet's own code in `kyb_pre_exec`'s order
-      (`set_no_new_privs()` → `seccomp_apply(seccomp_basic_service())` →
-      `execve("/bin/true")`): *killed by SIGSYS (31)*. A dynamically linked binary
-      needs at least `execve`, `access`, `newfstatat`, `pread64`, `prlimit64` before it
-      reaches `main`.
-
-      README advertises the key (`README.md:89-95`). Nothing catches it because
-      `grep -rn seccomp qemu/` returns nothing — no fixture sets it, so
-      `kyb_policy_kind` is `SECCOMP_NONE` on every gated boot and `seccomp_apply` has
-      never executed in a release gate on either arch. **The deliverable is the
-      fixture, not the syscall list** — the preset's real footprint is only
-      discoverable empirically.
-
-- [ ] **Landlock fails OPEN inside a hook documented as fail-closed.**
-      `sandbox.cyr:151-163`/`:237-248` return `Ok(1)` for "kernel has no Landlock";
-      `service_sandbox.cyr:117-119` tests only `is_err_result`. On a pre-5.13 kernel a
-      service carrying an explicit rule list starts with **no filesystem confinement**
-      and the hook reports success — the outcome that file's own header calls "worse
-      than not running it", and README says "fails closed".
-
-- [ ] **`_stage_verify_rootfs` re-keys a boot refusal to `_eb_dmverity_supported`,
-      which standing rule 18 forbids in as many words.** `boot_stages.cyr:68-76` fails
-      a *required* boot step when the kernel cannot instantiate a dm target — exactly
-      the refusal 1.5.7 removed from `edge_boot.cyr:437-445` because it failed boards
-      that verify perfectly well. Concrete case: edge board, no dm module, no
-      `veritysetup`. Phase 6c logs "not verified" and continues; phase 7 then drops to
-      the emergency shell. The honest signal exists and is ignored —
-      `edge_boot_verity_ok()` (`edge_boot.cyr:566`) returns the real
-      `veritysetup verify` result and has **zero callers**.
-
-- [ ] **`edge_apply_defaults` clears 3 of `EdgeBootConfig`'s 5 fields**
-      (`svc_config.cyr:254-259`), so `max_boot_ms` keeps argonaut's **3000** and
-      `pcr_bindings` keeps `"7+14"` on every path — absent block, partial block, and
-      the malformed-block reset. An operator who never set a budget can be refused and
-      **powered off** by one: `veritysetup verify` hashes the whole rootfs against an
-      inherited 3 s deadline. This is rule 19's exact sentence — "never one they
-      inherit from a struct default they never saw" — and 1.5.7 fixed it for the three
-      booleans and stopped. The edge fixture sets `"max_boot_ms": 20000`, the one value
-      that hides it.
-
-- [ ] **A malformed config on SIGHUP silently swaps in defaults and drops the emergency
-      credential.** `reload_config` cannot fail: `load_config()` falls back to
-      `argonaut_config_default()` on a parse error and returns it, so a truncated or
-      mistyped `/etc/kybernet/config.json` replaces the live config wholesale — and
-      because `g_emerg_hash` is a side effect of the same function, the recovery
-      credential goes with it. 1.5.9 made that change *visible* in the log; it did not
-      make the reload refuse. A reload that cannot fail should at least keep the old
-      config when the new one does not parse.
-- [ ] **The config read is a silent 16 KiB cliff.** `load_config` reads into
-      `alloc(16384)` and `file_read_all` truncates without saying so, so a config that
-      grows past the buffer becomes a JSON parse error and takes the defaults path
-      above. Needs a size check and a readable error.
-- [ ] **`"enabled": false` is counted as a boot failure.** A service explicitly
-      disabled by the operator is reported as a failed start, and enough of them can
-      route the board to the emergency shell. Disabled is not failed.
-- [ ] **Service names are not sanitized on the teardown paths.** The 2026-08-24 audit's
-      MEDIUM-3 added validation on the create path; the teardown sweep and the registry
-      still accept a name with `/` or `..` in it. Same traversal, different door.
 
 ---
 
@@ -140,6 +67,12 @@ The gates are the reason to trust any of the above. Several cannot currently go 
       main.cyr's 25 functions is under unit test.** The pure helpers (`_read_line_fd`'s
       new `-2` overflow path, `_emerg_envp`'s 7-slot bound) are trivially extractable.
 
+- [ ] **Bring the TPM, dm-verity-open and aarch64 passes into the harness.** None of
+      these needs hardware (see the silicon section below for the evidence): `swtpm` +
+      `tpm2-tools` give a real TPM 2.0 against QEMU's `tpm-tis`; staging a module loader
+      or the `dm-*` modules lets `veritysetup open` run; `qemu-system-aarch64` is
+      already installed and would execute the aarch64 seccomp table and the whole ARM
+      code path for the first time.
 - [ ] **The edge gate skips on exactly the regression class it exists to catch.** If
       `veritysetup` is missing on the build host the fixtures are dropped and the pass
       reports SKIP — which is correct locally and useless as a gate, because a change
@@ -277,31 +210,39 @@ The gates are the reason to trust any of the above. Several cannot currently go 
 
 ---
 
-## Blocked on hardware (was v1.5.10 / v1.2.2)
+## Needs real silicon — and it is only two things
 
-Not a version pin — these need a real device-mapper stack or a real TPM, and the QEMU
-gate provably cannot cover them: the harness kernel has `CONFIG_BLK_DEV_DM=m`, no
-`CONFIG_DM_INIT`, and the initramfs busybox has no `insmod`. Putting a module loader
-inside PID 1 to make a test pass is scaffolding in the one process that must never
-crash.
+⚠ **This section used to hold six items and claim all six were hardware-blocked. Four of
+them were not** — they were harness investment mislabelled as a hardware wall, which is
+the same shape as the "blocked upstream" framing the 2026-08-24 audit retracted for
+argonaut. Checked, not assumed:
 
-- [ ] `veritysetup open` + read-only mount of the verified target — catches corruption
-      at READ time, not just once at boot
-- [ ] LUKS unlock against a TPM-sealed LUKS2 token
-- [ ] PCR baseline **enforcement**, rooted in TPM sealing rather than in a userspace tool
-      that lives on the filesystem being verified. (Comparison is implemented and called;
-      only enforcement is deferred — `edge_boot.cyr:28-40` is stale on this.)
-- [ ] RPi4 / NUC boot validation
-- [ ] **Argon2 has never been measured on ARM.** Every timing behind 1.5.9's work cap is
-      x86_64; the RPi4 figures are extrapolated and `benches/history.csv` has no aarch64
-      row. The cross-build is release-gated but never *executed*.
-- [ ] **The aarch64 seccomp table has never been executed anywhere.** Eight numbers
-      (`mprotect`, `rt_sigreturn`, `accept`, `sendto`, `sigaltstack`, `clock_gettime`,
-      `set_robust_list`, `rseq`) were taken from `asm-generic/unistd.h` rather than the
-      stdlib. They check out on inspection; no gate has run them. Folds into v1.6.0's
-      fixture work if an aarch64 QEMU pass ever exists.
+- [ ] **RPi4 / NUC boot validation.** Genuinely needs the board.
+- [ ] **Argon2 cost measured on real ARM.** Genuinely needs ARM silicon or an ARM CI
+      runner — `qemu-system-aarch64` under TCG will run the code but its *timings* mean
+      nothing, and timing is the whole point of the 1.5.9 work cap. Correctness on
+      aarch64 is a different question and is **not** blocked (see v1.6.1).
 
----
+### Reclassified — harness work, not hardware
+
+Moved into the v1.6.1 gate line. Recording why here so the claim is not re-made:
+
+- **TPM attestation, PCR read, and LUKS2 token unlock.** This QEMU already exposes
+  `tpm-tis` and `tpm-crb` (`qemu-system-x86_64 -device help`), and `swtpm` (0.10.1) and
+  `tpm2-tools` (5.8) are both in Arch `extra`. `swtpm` is a real TPM 2.0 with real PCRs
+  and real sealing — enough to exercise `tpm_detect`, `tpm_read_pcr`, PCR comparison,
+  and a sealed LUKS2 token end to end. What a board would add beyond that is a *trusted*
+  root, not a *testable* one.
+- **`veritysetup open` + read-only mount of the verified target.** `dm-verity.ko.zst`
+  and `dm-mod` are present on this host under `/usr/lib/modules/$(uname -r)/`. The
+  actual blocker is narrower than "no device-mapper": Arch's `/usr/lib/initcpio/busybox`
+  ships **no `insmod`/`modprobe`** (`busybox --list` confirms), so the initramfs has no
+  way to load them. Stage a static loader or the modules, or boot a kernel with DM
+  built in. Note this does **not** mean putting a module loader inside PID 1 — that
+  remains scaffolding in the one process that must never crash, and stays rejected.
+- **Executing the aarch64 seccomp table.** `qemu-system-aarch64` is installed. Whether
+  the eight hand-copied syscall numbers are right is a correctness question TCG answers
+  perfectly well.
 
 ## Blocked upstream / on an external consumer
 
@@ -334,6 +275,20 @@ crash.
 
 One line per release. Detail lives in [CHANGELOG.md](../../CHANGELOG.md).
 
+- **v1.6.0** — The confinement path did not confine, and one of the four ways was
+  fatal: `"seccomp": "basic"` had no `execve` on its 37-syscall allowlist and denied
+  with `KILL_PROCESS`, so it killed every service it was applied to from 1.4.3 onward
+  (verified: SIGSYS). The allowlist gained the measured exec+loader set and the default
+  action became `ERRNO(EPERM)` — a hand list is never complete, so an omission must
+  degrade rather than execute. Landlock now fails closed instead of reporting success on
+  a kernel without it; `_stage_verify_rootfs` is keyed on the verification RESULT (rule
+  18) instead of the dm probe; `edge_apply_defaults` clears all five fields so nobody
+  inherits a 3-second poweroff budget; a malformed config no longer replaces a running
+  one on SIGHUP, and the silent 16 KiB read cliff is a readable error; `enabled: false`
+  is skipped rather than counted as a failure that drops the board to an emergency
+  shell; unsafe service names are refused at load and on kill/rmdir. New `kyb-seccomp`
+  harness fixture — its absence is why this shipped for three releases. 608 tests, 44
+  harness properties.
 - **v1.5.9** — Salted, memory-hard emergency credential. Argon2id in a self-describing
   `v1$t$m$p$salt$tag` record (agnostic's format, adopted rather than invented);
   `scripts/mkcred.sh` over `openssl kdf`, byte-identical to sigil; parameter bounds are

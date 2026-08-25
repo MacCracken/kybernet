@@ -111,12 +111,32 @@ var g_emerg_hash = 0;          # Str ptr, 0 = none configured
 # Config loading from JSON
 # ================================================================
 
+# Read and parse /etc/kybernet/config.json.
+#
+# Returns an ArgonautConfig, or **0 when the file exists but cannot be used**.
+# That distinction is the whole point of the signature: "there is no config"
+# is a legitimate deployment that should boot on defaults, while "there is a
+# config and it is broken" must never be silently downgraded to defaults —
+# on a reload that would replace a running board's services, boot mode and
+# edge policy wholesale, and at boot it would quietly turn an edge board into
+# a normal one. Callers decide; neither may confuse the two.
 fn load_config() {
-    var buf = alloc(16384);
-    var n = file_read_all("/etc/kybernet/config.json", buf, 16384);
+    # One byte of headroom so a full read is distinguishable from a truncated
+    # one. `file_read_all` stops at maxlen and returns maxlen with no error
+    # (io.cyr:471-476), so without this a config that outgrew the buffer came
+    # back as invalid JSON and took the defaults path — a silent 16 KiB
+    # cliff with no diagnostic.
+    var cap = 16384;
+    var buf = alloc(cap + 1);
+    var n = file_read_all("/etc/kybernet/config.json", buf, cap + 1);
     if (n <= 0) {
         klog("no config found, using defaults");
         return argonaut_config_default();
+    }
+    if (n > cap) {
+        klog("config: /etc/kybernet/config.json exceeds 16384 bytes — REFUSING to parse a truncated config");
+        kmsg("kybernet: config exceeds 16384 bytes, refusing to parse a truncated config");
+        return 0;
     }
 
     klog("loaded config: /etc/kybernet/config.json");
@@ -127,12 +147,14 @@ fn load_config() {
     # has had `json_v_parse` + arr/obj accessors the whole time.
     var root = json_v_parse_buf(buf, n);
     if (root == 0) {
-        klog("config parse failed, using defaults");
-        return argonaut_config_default();
+        klog("config: parse FAILED — the file is present and not valid JSON");
+        kmsg("kybernet: config parse failed");
+        return 0;
     }
     if (json_v_is_obj(root) == 0) {
-        klog("config root is not an object, using defaults");
-        return argonaut_config_default();
+        klog("config: root is not a JSON object");
+        kmsg("kybernet: config root is not an object");
+        return 0;
     }
 
     var cfg = argonaut_config_default();
@@ -264,7 +286,17 @@ fn reload_config() {
     var prev_req = g_emerg_require_auth;
 
     var new_cfg = load_config();
-    if (new_cfg == 0) { return 0; }
+    if (new_cfg == 0) {
+        # ⚠ KEEP THE RUNNING CONFIG. load_config used to answer
+        # `argonaut_config_default()` here, so a SIGHUP with a truncated or
+        # mistyped file silently replaced a live board's services, boot mode,
+        # edge policy and timeouts with defaults — a reload that cannot fail
+        # is a reload that can destroy. The old config stays installed and
+        # the operator is told, on the console and in dmesg.
+        klog("config reload REFUSED: the file is unusable — keeping the running config");
+        kmsg("kybernet: config reload refused, keeping the running config");
+        return 0;
+    }
 
     var old_cfg = g_config;
     g_config = new_cfg;
@@ -912,6 +944,27 @@ fn start_services() {
             # cstr ptr — cgroup_path's cache also keys on it so we get
             # stable cache hits within the burst.
             var name_cs = str_data(name);
+
+            # ⚠ DISABLED IS NOT FAILED. argonaut's init_start_service returns
+            # -1 for a service with `"enabled": false`
+            # (argonaut_init.cyr:410) — the same value it returns for a real
+            # failure — so a deliberately disabled service was logged "FAILED
+            # to start" and counted toward `failed`. A config that disables
+            # every service therefore hit `failed > 0 && started == 0` below
+            # and dropped the board to the EMERGENCY SHELL, which is a
+            # remarkable answer to "I turned my services off".
+            #
+            # Skipped before the cgroup is created too: a service that will
+            # not run has no business owning one, and the shutdown sweep
+            # would then have to account for it.
+            var msd = init_get_service(g_init, name_cs);
+            if (msd != 0) {
+                if (svc_def_enabled(managed_svc_def(msd)) == 0) {
+                    klog2("  skipped (disabled in config): ", name_cs);
+                    continue;
+                }
+            }
+
             klog2("  starting: ", name_cs);
 
             # name_cs, NOT name. resolve_service_waves returns waves of
@@ -1222,6 +1275,16 @@ fn kybernet_run() {
 
     # Phase 6: Load config + initialize argonaut
     g_config = load_config();
+    # A broken config at boot is not the same as an absent one, and it must
+    # not look like one. There is nothing to fall back to this early, so the
+    # board still boots on defaults — but it says so on the console AND in
+    # dmesg, because on an edge deployment this is the difference between
+    # booting verified and booting ordinary.
+    if (g_config == 0) {
+        klog("FATAL CONFIG: unusable /etc/kybernet/config.json — booting on DEFAULTS");
+        kmsg("kybernet: unusable config, booting on defaults (services, boot_mode and edge policy are NOT what the file says)");
+        g_config = argonaut_config_default();
+    }
     g_init = argonaut_init_new(g_config);
     g_health_tracker = health_tracker_new();
 

@@ -6,7 +6,7 @@
 
 - **Type**: Cyrius binary (PID 1 init)
 - **License**: GPL-3.0-only
-- **Version**: 1.5.9
+- **Version**: 1.6.0
 - **Language**: Cyrius 6.5.35 (the whole AGNOS pack front — kybernet/argonaut/libro/agnostik/**sigil**/agnostic — pins 6.5.35; via `~/.cyrius/bin/cyrius`, `cyriusly use 6.5.35`. sigil was the last holdout at 6.5.21 and was brought up at its 3.12.10 tag — a dep that tests on a different compiler from the consumer linking it is a gate that proves nothing)
 - **Tools**: `owl` to read .cyr files. (`cyim` is referenced in sibling repos but is **not installed here** — use ordinary file edits.)
 
@@ -21,7 +21,7 @@ The helmsman that steers the Argo. Manages system boot, essential mounts, signal
 ```sh
 cyrius deps                                  # Resolve deps from cyrius.cyml into lib/
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet   # Build (DCE recommended)
-cyrius test src/test.cyr                     # Run 567 tests
+cyrius test src/test.cyr                     # Run 608 tests
 cyrius bench src/bench.cyr                   # Run benchmarks
 bash scripts/bench-history.sh                # Record bench history + ≥15% regression gate (MANDATORY on every release)
 cyrius build --aarch64 src/main.cyr build/kybernet-aarch64   # Cross-build aarch64
@@ -37,7 +37,7 @@ kybernet/
 ├── VERSION, CLAUDE.md, README.md, CHANGELOG.md, LICENSE
 ├── src/
 │   ├── main.cyr           # Globals + boot sequence + event loop + harness gate
-│   ├── test.cyr           # Integration tests (567 assertions)
+│   ├── test.cyr           # Integration tests (608 assertions)
 │   ├── bench.cyr          # Microbenchmarks
 │   └── lib/
 │       ├── log.cyr        # klog / klog2 / kmsg / slog (factored out at 1.2.0)
@@ -112,9 +112,9 @@ Do **not** add a `path = "../<dep>"` alongside `git`/`tag`. When `path` resolves
 
 1. Make changes to `src/main.cyr` or `src/lib/*.cyr`
 2. Build: `CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet`
-3. Test: `cyrius test src/test.cyr` (567 tests must pass)
+3. Test: `cyrius test src/test.cyr` (608 tests must pass)
 4. Cross-build: `cyrius build --aarch64 src/main.cyr build/kybernet-aarch64` (verify both arches)
-5. Harness (needs KVM): `bash qemu/boot-test.sh` — 42 properties across four passes: boot markers + budget, the reactor gate, dm-verity verification, the emergency-auth prompt against BOTH credential formats
+5. Harness (needs KVM): `bash qemu/boot-test.sh` — 44 properties across four passes: boot markers + budget, the reactor gate, dm-verity verification, the emergency-auth prompt against BOTH credential formats
 5b. **On a version bump: `bash scripts/bench-history.sh`** — records per-benchmark ns/op to `benches/history.csv` and exits non-zero on a ≥15% regression vs the previous run. Review and explain (or fix) any flagged delta before cutting.
 6. All functions return `Result` or `Option` where failure is possible
 7. Use `str_builder` for path construction
@@ -165,6 +165,16 @@ Apply on every change touching src/:
 
 26. **The emergency credential has two formats and they must stay provably DISJOINT.** Legacy is exactly 64 characters all from `[0-9a-fA-F]`; the Argon2id record begins `v1$` — `v` is not a hex digit and `$` is not either, so no string satisfies both predicates and a `v1` record can never be coerced onto the unsalted path. A malformed `v1` record classifies `INVALID`, **never** falling back to `LEGACY`. The legacy arm **delegates to argonaut's `verify_emergency_auth` verbatim** rather than reimplementing SHA-256 — the deprecated path is not "compatible with" the old code, it *is* the old code. Both formats are gated in `qemu/boot-test.sh` pass 4; dropping either fixture makes the migration promise untested. 1.5.9.
 
+27. **⚠ A SECURITY FEATURE WITH NO HARNESS FIXTURE IS UNTESTED, AND WILL BE WRONG.** `"seccomp": "basic"` shipped from 1.4.3 to 1.6.0 **killing every service it was applied to** — the 37-syscall allowlist had no `execve` and the default action was `SECCOMP_RET_KILL_PROCESS`, and `kyb_pre_exec` loads the filter one line before argonaut's `execve`. Unit tests only ever *built* filters; nothing loaded one and exec'd. `grep -rn seccomp qemu/` returned nothing, so `seccomp_apply` had never run in a release gate on either arch. **If a config key reaches a syscall, a `qemu/build-initramfs.sh` fixture must set that key and the gate must assert the effect from INSIDE the child** — `/proc/self/status` exposes `Seccomp`, `Seccomp_filters`, `CapEff` and `NoNewPrivs`, which is why `kyb-confined` and `kyb-seccomp` both read it. Adding a fixture means updating the `services parsed: N` and `removed service cgroups: N` markers in `qemu/boot-test.sh`. 1.6.0.
+
+28. **A denied syscall should degrade a service, not execute it — `seccomp_apply` denies with `ERRNO(EPERM)`.** A hand-maintained allowlist is never complete: this module's own list ran a glibc `/bin/true` after four additions and still could not run a busybox applet after ninety-seven. Under `KILL_PROCESS` an omission is a service that vanishes with SIGSYS and no diagnostic, in a supervisor that restarts it into the same wall; under EPERM it is a normal failed call the program reports (`mkdir: Operation not permitted`, exit 1) while still being denied. systemd's `SystemCallFilter` defaults the same way. `seccomp_build_action` keeps `KILL_PROCESS` available for a future `strict` profile — do not make it the default again without a fixture proving the list is complete for the binaries in question. And **`execve` is not optional**: the filter is installed before the exec that starts the service and is inherited across it. 1.6.0.
+
+29. **⚠ Ok(1) IS NOT SUCCESS.** `sandbox_apply`/`sandbox_from_config` return `Ok(0)` applied / `Ok(1)` kernel-has-no-Landlock / `Err`. `kyb_pre_exec` tested only `is_err_result` from 1.4.3 to 1.6.0, so a service with an explicit rule list started **completely unconfined** on a pre-5.13 kernel while the hook reported success. Any tri-state Result in the security path must have all three arms handled; the middle one is the one that looks like success and is not. Landlock now fails closed with `"landlock_optional": true` as the deliberate opt-out. 1.6.0.
+
+30. **`load_config` returns 0 for "present but unusable", and that is different from "absent".** Both used to answer `argonaut_config_default()`, so a SIGHUP with a malformed file replaced a running board's services, boot mode, edge policy and timeouts with defaults — a reload that cannot fail is a reload that can destroy. Boot takes defaults *loudly* (console + dmesg); reload keeps the running config. Also: `file_read_all` stops at `maxlen` and returns `maxlen` with **no error**, so any fixed-size config read needs one byte of headroom to tell a full read from a truncated one. 1.6.0.
+
+31. **Disabled is not failed, and a name you cannot safely use is a config error.** argonaut's `init_start_service` returns `-1` for `"enabled": false` — the same value as a real failure — so a config that disabled every service tripped `failed > 0 && started == 0` and dropped the board to the emergency shell. Check `svc_def_enabled` before starting. Separately, `cgroup_name_is_safe` guards `create`/`move`/`kill`/`remove`/`apply_limits`, but the real fix is refusing an unsafe service name at **config load**: a name that cannot be a cgroup component is a service kybernet cannot operate, so the whole service is refused rather than half-registered. 1.6.0.
+
 
 ## Release gates
 
@@ -174,7 +184,7 @@ Every version bump runs all of these, in this order, and they must all be green 
 rm -rf lib && cyrius deps && cyrius deps --verify   # expect: N verified, 0 failed
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet
 cyrius build --aarch64 src/main.cyr build/kybernet-aarch64
-cyrius test src/test.cyr                            # 567 tests, 0 failed
+cyrius test src/test.cyr                            # 608 tests, 0 failed
 bash scripts/bench-history.sh                       # ≥15% regression gate
 bash qemu/boot-test.sh                              # needs KVM
 ```
@@ -190,4 +200,4 @@ Plus a **sibling-free reproduction** — the only gate that catches a tag which 
 - Do not add C, Rust, or assembly files — everything is Cyrius
 - Do not reference `../cyrius/` repo — use installed toolchain at `~/.cyrius/`
 - Do not bump a dep tag to a value > the highest existing git tag (CI clones from `git + tag`; an unreleased VERSION-file value fails resolution — see 1.1.0 CHANGELOG note)
-- Test after every change (567 tests + harness when KVM available)
+- Test after every change (608 tests + harness when KVM available)
