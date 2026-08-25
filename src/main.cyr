@@ -24,6 +24,7 @@ include "lib/thread_local.cyr"
 include "src/lib/cmdline.cyr"
 include "src/lib/log.cyr"
 include "src/lib/console.cyr"
+include "src/lib/termios.cyr"
 include "src/lib/signals.cyr"
 include "src/lib/reaper.cyr"
 include "src/lib/privdrop.cyr"
@@ -313,25 +314,104 @@ fn execute_tmpfiles() {
 # Emergency shell
 # ================================================================
 
-# Read one line from the console into `buf`, stripping the trailing newline.
-# Returns the length, or -1 on read error.
+# Read one line from `fd` into `buf`, stripping the trailing newline.
 #
-# Unbuffered and un-echoed-suppressed: PID 1 has no termios layer here, so
-# the password IS echoed to the console. That is a real weakness and it is
-# stated in the roadmap rather than hidden — an operator at a physical
-# console is the threat this gate addresses, and a shoulder-surfer at that
-# same console already has the machine.
-fn _read_console_line(buf, cap) {
-    var n = sys_read(STDIN_FD, buf, cap - 1);
-    if (is_err(n) == 1) { return 0 - 1; }
-    if (n <= 0) { return 0 - 1; }
-    while (n > 0) {
-        var c = load8(buf + n - 1);
-        if (c != 10 && c != 13) { break; }
-        n = n - 1;
+# Bounded by `deadline_ms` of wall clock. A blocking read here would be an
+# unbounded hang in PID 1: this runs at phase 6c, before the event loop, so
+# nothing else is reaping, nothing is servicing the watchdog, and a board with
+# no operator in front of it would sit at the prompt forever. Bounding it is
+# not a nicety — the alternative failure mode is a machine that looks dead.
+#
+# O_NONBLOCK plus a poll loop rather than a blocking read, because the cyrius
+# stdlib has no poll/select wrapper either (same gap as ioctl). 50 ms between
+# attempts is far below human typing latency and costs nothing.
+#
+# Returns the length, or -1 on error/timeout/EOF.
+fn _read_line_fd(fd, buf, cap, deadline_ms) {
+    var deadline = monotonic_ms() + deadline_ms;
+    var used = 0;
+    while (monotonic_ms() < deadline) {
+        var n = sys_read(fd, buf + used, cap - 1 - used);
+        if (is_err(n) == 0 && n > 0) {
+            used = used + n;
+            # Stop at the first newline — a terminal in canonical mode hands
+            # over a whole line at once, but a pasted string may carry more
+            # than one, and the rest must not be swallowed into the password.
+            var saw_nl = 0;
+            for (var i = 0; i < used; i = i + 1) {
+                var c = load8(buf + i);
+                if (c == 10 || c == 13) { used = i; saw_nl = 1; break; }
+            }
+            if (saw_nl == 1) { break; }
+            if (used >= cap - 1) { break; }
+        }
+        sleep_ms(50);
     }
-    store8(buf + n, 0);
-    return n;
+    if (used <= 0) { return 0 - 1; }
+    store8(buf + used, 0);
+    return used;
+}
+
+# Prompt for the emergency password on a REAL console and return its length,
+# or -1. `fd` must be an interactive descriptor from console_open_rw().
+#
+# Echo suppression is best-effort and deliberately non-fatal: refusing to
+# accept a password because the terminal could not be reconfigured would be a
+# self-inflicted lockout on the one path an operator reaches when the machine
+# is already broken. It is logged instead, so an operator knows their password
+# was visible.
+fn _prompt_password(fd, buf, cap) {
+    sys_write(fd, "Password: ", 10);
+
+    var saved = alloc(TERMIOS_SIZE);
+    var quiet = termios_echo_off(fd, saved);
+    if (quiet == 0) {
+        klog("emergency shell: could not disable echo — password will be VISIBLE");
+    }
+
+    var plen = _read_line_fd(fd, buf, cap, 120000);
+
+    # Restore on EVERY path — success, wrong password, empty, timeout. Echo
+    # left off would hand the operator a shell that shows nothing they type.
+    if (quiet == 1) { termios_restore(fd, saved); }
+    sys_write(fd, "\n", 1);
+    return plen;
+}
+
+# Flatten argonaut's EmergencyShellConfig environment map into an execve
+# envp array. Returns a NULL-terminated array of "KEY=value" cstrs.
+#
+# Built here rather than reusing build_default_envp because the recovery
+# shell wants argonaut's curated set (HOME, TERM, PATH, SHELL) — TERM in
+# particular, without which the shell has no line editing. 1.5.8.
+fn _emerg_envp(esc) {
+    var envp = alloc(64);          # 7 slots + NULL, generous
+    var n = 0;
+    var m = load64(esc + 8);       # environment map
+    if (m != 0) {
+        var keys = map_keys(m);
+        var kn = vec_len(keys);
+        for (var i = 0; i < kn; i = i + 1) {
+            if (n >= 7) { break; }
+            var k = vec_get(keys, i);
+            var v = map_get(m, k);
+            if (v == 0) { continue; }
+            var sb = str_builder_new();
+            str_builder_add_cstr(sb, k);
+            str_builder_add_cstr(sb, "=");
+            str_builder_add_str(sb, v);
+            store64(envp + n * 8, str_data(str_builder_build(sb)));
+            n = n + 1;
+        }
+    }
+    # PS1 marks the shell as the emergency one, matching what the Rust
+    # implementation set.
+    if (n < 7) {
+        store64(envp + n * 8, "PS1=kybernet-emergency# ");
+        n = n + 1;
+    }
+    store64(envp + n * 8, 0);
+    return envp;
 }
 
 fn drop_to_emergency() {
@@ -347,11 +427,26 @@ fn drop_to_emergency() {
     store64(esc + 24, g_emerg_require_auth);
     store64(esc + 32, g_emerg_hash);
 
+    # A REAL console, not fd 0. fd 0 is /dev/null by design (see
+    # console_open_rw's header) — reading it returns EOF immediately, which
+    # is why no password could ever be entered between 1.5.4 and 1.5.8, and
+    # why an edge board with a hash configured reboot-looped. 1.5.8.
+    var con = console_open_rw();
+
     if (g_emerg_require_auth == 1) {
         klog("emergency shell: authentication required");
-        sys_write(STDERR_FD, "Password: ", 10);
+        if (con < 0) {
+            # No console to prompt on. Denying is the only honest answer —
+            # but do NOT reboot into the same condition, which is the loop
+            # this release exists to end. Hang instead: a machine stopped
+            # with a diagnostic on kmsg can be recovered from the
+            # bootloader; one power-cycling every few seconds cannot.
+            klog("FATAL: authentication required but /dev/console cannot be opened");
+            kmsg("kybernet: emergency auth impossible — no console; halting rather than reboot-looping");
+            while (1 == 1) { sys_pause(); }
+        }
         var pbuf = alloc(256);
-        var plen = _read_console_line(pbuf, 256);
+        var plen = _prompt_password(con, pbuf, 256);
         var granted = 0;
         if (plen >= 0) {
             granted = verify_emergency_auth(esc, str_new(pbuf, plen));
@@ -361,12 +456,14 @@ fn drop_to_emergency() {
         # the system in a process that can be core-dumped.
         for (var z = 0; z < 256; z = z + 1) { store8(pbuf + z, 0); }
         if (granted == 0) {
-            klog("emergency shell: AUTHENTICATION FAILED — rebooting");
-            sys_write(STDERR_FD, "Authentication failed. Rebooting.\n", 34);
-            sys_reboot(RB_AUTOBOOT);
-            # sys_reboot does not return on success. If it did (CAP_SYS_BOOT
-            # dropped, say), fall through to a hang rather than to the
-            # shell — never open an unauthenticated root shell here.
+            klog("emergency shell: AUTHENTICATION FAILED");
+            sys_write(con, "Authentication failed.\n", 23);
+            sys_close(con);
+            # Halt, do NOT reboot. Rebooting re-enters whatever refused the
+            # boot, which re-enters this prompt — the loop 1.5.8 fixes. A
+            # wrong password is also the one case where an attacker could
+            # otherwise force an endless reboot cycle on demand.
+            kmsg("kybernet: emergency authentication failed — halting");
             while (1 == 1) { sys_pause(); }
         }
         klog("emergency shell: authenticated");
@@ -380,6 +477,12 @@ fn drop_to_emergency() {
         sys_write(STDERR_FD, str_data(banner), str_len(banner));
     }
 
+    # The shell needs a real stdin too. Without this it inherits fd 0 =
+    # /dev/null, reads EOF on its first prompt and exits immediately — so
+    # even an operator who authenticated got no usable shell. Same root
+    # cause as the password read. 1.5.8.
+    if (con < 0) { con = console_open_rw(); }
+
     # Fork and exec the shell
     var pid = sys_fork();
     if (pid == 0) {
@@ -390,16 +493,33 @@ fn drop_to_emergency() {
         # everything launched from it — the one shell where an operator
         # most needs job control. 1.4.2 audit MEDIUM-4.
         reset_child_signal_mask();
+
+        # Give the shell the console as its stdin/stdout/stderr. It is a
+        # session leader's child on a fresh descriptor, so it gets a real
+        # terminal rather than /dev/null.
+        if (con >= 0) {
+            sys_dup2(con, 0);
+            sys_dup2(con, 1);
+            sys_dup2(con, 2);
+            if (con > 2) { sys_close(con); }
+        }
+
         # Child — exec the emergency shell. The raw syscall(59/60,...)
         # this replaces was x86_64-only; sys_execve / sys_exit dispatch
         # per-arch (SYS_EXECVE 59→221, SYS_EXIT 60→93 on aarch64).
+        #
+        # envp was 0 — a completely empty environment. argonaut's
+        # emergency_shell_default() builds HOME/TERM/PATH/SHELL and every
+        # one of them was discarded, so the recovery shell had no PATH (no
+        # command resolves by name) and no TERM (no line editing). 1.5.8.
         var argv = alloc(16);
         store64(argv, str_data(shell_path));
         store64(argv + 8, 0);
-        sys_execve(str_data(shell_path), argv, 0);
+        var envp = _emerg_envp(esc);
+        sys_execve(str_data(shell_path), argv, envp);
         # If exec fails, try /bin/sh
         store64(argv, "/bin/sh");
-        sys_execve("/bin/sh", argv, 0);
+        sys_execve("/bin/sh", argv, envp);
         sys_exit(1);
     } elif (pid > 0) {
         # Parent — wait for shell to exit
@@ -410,6 +530,12 @@ fn drop_to_emergency() {
     } else {
         klog("FATAL: fork failed for emergency shell");
     }
+
+    # Close the parent's console descriptor. drop_to_emergency can be entered
+    # more than once (phase 6c, then again from the service-wave path), and
+    # PID 1 never exits — an fd leaked per entry is leaked for the life of
+    # the system.
+    if (con >= 0) { sys_close(con); }
 
     return 0;
 }

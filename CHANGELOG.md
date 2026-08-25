@@ -7,6 +7,153 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.5.8] — 2026-08-24
+
+**The emergency-auth gate did not work at all, and on an edge board it was a
+reboot loop.** Suite 477 → 491 assertions, 0 failures. No dep change.
+
+Both v1.5.8 roadmap items — a salted KDF, and suppressing console echo —
+were aimed past a defect that made the entire gate non-functional. Finding
+it changed what this release is.
+
+### Fixed — no password could ever be entered
+
+`setup_console` closes fds 0/1/2 and opens `/dev/null` O_RDWR first, so it
+lands on **fd 0**. That is deliberate and correct: a supervised service must
+never block reading a console, and its own header says "stdin → /dev/null".
+
+The password prompt added at 1.5.4 read fd 0. It got EOF on the first call,
+every time, and `_read_console_line` reported that as a read failure — which
+`drop_to_emergency` treated as a failed authentication and rebooted on. **No
+password could ever be entered, correct or not.**
+
+Reproduced in a real PID-1 QEMU boot before anything was changed. The serial
+log shows the prompt and the rejection on one line, with nothing typed:
+
+```
+Password: kybernet: emergency shell: AUTHENTICATION FAILED — rebooting
+```
+
+1.5.7 made it destructive rather than merely broken. Forcing
+`require_auth = 1` on an edge refusal meant a board with a hash configured
+would refuse the boot, reboot, refuse, reboot — indefinitely, recoverable
+only from the bootloader. Configuring a password made an edge board *less*
+recoverable, which is the opposite of the intent.
+
+Interactive reads now open their own descriptor, `console_open_rw()` →
+`/dev/console` with `O_RDWR | O_NOCTTY`, and close it again. fd 0 keeps
+pointing at `/dev/null` for everything services inherit.
+
+`O_NOCTTY` is not defined by the cyrius stdlib. Its value is `1 << 8` = 256
+from `asm-generic/fcntl.h`, and x86's `asm/fcntl.h` just includes
+asm-generic, so it is arch-uniform — consistent with the `O_CREAT=64` /
+`O_EXCL=128` / `O_TRUNC=512` values this toolchain already carries. Without
+it, an `O_RDWR` open of a tty by a **session leader** — which PID 1 is —
+silently acquires `/dev/console` as its controlling terminal.
+
+### Added — console echo suppression (the roadmap item, now meaningful)
+
+`src/lib/termios.cyr`, written from scratch: the cyrius stdlib has **no
+ioctl, no termios and no poll**. Filed upstream as cyrius issue
+`2026-08-24-sys-ioctl-wrapper-missing.md`.
+
+The arch news is good, and verified against the installed kernel headers
+rather than recalled: `/usr/include/asm/ioctls.h` and `asm/termbits.h` on
+x86 both simply `#include <asm-generic/...>`, so x86_64 and aarch64 share
+identical ioctl values *and* an identical struct layout. Only the syscall
+number differs, and `SYS_IOCTL` is already in both tables (16 / 29) — so the
+enum dispatches, standing rule 1 is satisfied without an `#ifdef`, and
+unlike `struct epoll_event` (1.4.2 CRITICAL-2) this needs no per-arch
+treatment at all.
+
+`TCSETSF` rather than `TCSETS`, so anything typed between the prompt
+appearing and echo going off is flushed rather than prefixed onto the
+password. `ECHONL` is cleared alongside `ECHO`. Attributes are restored on
+**every** exit — success, wrong password, empty input, timeout — because
+echo left off hands the operator a shell that shows nothing they type.
+
+Failure to suppress echo is logged and **does not block authentication**.
+Refusing a password because the terminal could not be reconfigured would be
+a self-inflicted lockout on the one path an operator reaches when the
+machine is already broken.
+
+### Fixed — the read is bounded, and a rejection halts
+
+The old read was a single `sys_read`. Once the fd is a real terminal in
+canonical mode that blocks until Enter, **indefinitely** — at phase 6c,
+before the event loop, where nothing is reaping and nothing services a
+watchdog. A board with no operator in front of it would look dead. The read
+now has a 120 s deadline, polled with `sleep_ms` because there is no
+`poll`/`select` wrapper either.
+
+A failed authentication now **halts instead of rebooting**. Rebooting
+re-enters whatever refused the boot, which re-enters this prompt — that is
+the loop. A stopped machine with a diagnostic on kmsg can be recovered from
+the bootloader; one power-cycling every few seconds cannot. It also removes
+an attacker's ability to force an endless reboot cycle by typing anything.
+
+### Fixed — the emergency shell was unusable even after a successful login
+
+Two independent defects, both on the far side of the auth gate, so neither
+had ever been reachable to observe:
+
+- The forked shell inherited `stdin` = `/dev/null`, read EOF at its first
+  prompt and exited immediately. It now gets the console on 0/1/2.
+- It was exec'd with **`envp = 0`** — a completely empty environment.
+  argonaut's `emergency_shell_default()` builds HOME, TERM, PATH and SHELL,
+  and every one was discarded, so the recovery shell had no PATH (no command
+  resolves by name) and no TERM (no line editing). `_emerg_envp` now
+  flattens that map, plus `PS1=kybernet-emergency# `.
+
+### Harness — a regression test for a brick
+
+A third fixture (`initramfs-auth.cpio.gz`) with a password configured, and a
+gate that **feeds the password over the serial line**: `-serial stdio` (not
+`mon:stdio`, which multiplexes the monitor onto the same stream) takes it
+from a pipe after the prompt appears. Four assertions:
+
+- the correct password authenticates — this alone fails on every tree from
+  1.5.4 to 1.5.7
+- the password does **not** appear in the serial log (echo suppression)
+- a wrong password is rejected
+- a rejection does **not** reboot
+
+Skips cleanly when the edge fixture is absent, since it is built from it.
+
+### Deferred — the salted KDF, with reasons
+
+Moved to v1.5.9 rather than dropped. The investigation turned up three
+things that must be resolved first, one of them a fault:
+
+- **`argon2id()` cannot be called from PID 1 as sigil ships it.** It
+  allocates through `fl_alloc`, whose large path stores to the raw `mmap`
+  return without checking it — so on exhaustion it faults instead of
+  returning the error its own `if (mem == 0)` guard is written to expect.
+  Reproduced: exit 139. `argon2id_into(mem, ...)` over an `alloc()` arena
+  avoids it, since `alloc()` returns 0 cleanly.
+- **sigil's argon2 profile costs +377 KB, 352 KB of it `.bss`** that DCE
+  cannot strip — one `var SCR[352256]`. Fixable in sigil by taking the
+  scratch lane off the tail of the caller-supplied arena; **not** by caching
+  it in a global, which is audit rule 8 (a bump-arena pointer in a static)
+  and was tried and rejected during this work.
+- **There is no provisioning story.** Nothing in either repo tells an
+  operator how to produce `emergency_password_hash`. Today it happens to be
+  `printf 'pw' | sha256sum`; a salted KDF ends that, so a generator has to
+  ship alongside the format.
+
+PBKDF2 was evaluated and rejected: sigil's SHA-256 acceleration is
+`#ifdef CYRIUS_ARCH_X86` only, so every ARM edge board runs the software
+path — around 164x slower than OpenSSL, which buys roughly 6-9k iterations
+in a one-second budget against an attacker doing millions. Argon2's BLAKE2b
+has no comparable gap.
+
+### Benchmarks
+
+54 benchmarks, no regressions. Nothing added is on a hot path — the
+emergency gate runs at most once, and only on a boot that already failed.
+
+---
+
 ## [1.5.7] — 2026-08-24
 
 **Edge boot actually verifies, and stops being a poweroff trap.** Suite
@@ -54,7 +201,7 @@ This is the honest half of the 1.2.0 deferral — "the rootfs image matches
 the root hash the operator pinned". Mounting it *through* dm-verity so that
 later corruption is caught at read time is the other half, and needs a
 device-mapper stack this init cannot assume. That is now filed against
-hardware (roadmap v1.5.9), not against a version number.
+hardware (roadmap v1.5.10), not against a version number.
 
 The dm-verity capability probe no longer causes a refusal. It answers "can
 the kernel instantiate a dm target", which `verify` does not need — keying

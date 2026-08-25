@@ -328,6 +328,43 @@ if command -v veritysetup >/dev/null 2>&1; then
 EDGECFG
         echo "$EDGE_ROOT_HASH" > "${EDGE_DIR}/root_hash.txt"
 
+        # Emergency-auth fixture (1.5.8) — the same tree with a password
+        # configured. Built as its own cpio so the edge gate above keeps
+        # asserting the NO-password refusal path unchanged.
+        #
+        # Reuses the edge tree because an edge refusal is the cheapest way to
+        # reach drop_to_emergency, and 1.5.7 forces require_auth there when a
+        # hash is present. The password is sha256("hunter2") — the legacy
+        # unsalted digest format the gate accepts today.
+        AUTH_STAGE="${SCRIPT_DIR}/initramfs-auth"
+        rm -rf "$AUTH_STAGE"
+        mkdir -p "$AUTH_STAGE"
+        tar -cf - -C "$EDGE_STAGE" --exclude=./dev . | tar -xf - -C "$AUTH_STAGE"
+        mkdir -p "${AUTH_STAGE}/dev"
+        sudo mknod "${AUTH_STAGE}/dev/console" c 5 1 2>/dev/null || true
+        sudo mknod "${AUTH_STAGE}/dev/null"    c 1 3 2>/dev/null || true
+        sudo mknod "${AUTH_STAGE}/dev/ttyS0"   c 4 64 2>/dev/null || true
+        sudo mknod "${AUTH_STAGE}/dev/kmsg"    c 1 11 2>/dev/null || true
+        sudo chmod 666 "${AUTH_STAGE}/dev/console" "${AUTH_STAGE}/dev/null" \
+            "${AUTH_STAGE}/dev/ttyS0" "${AUTH_STAGE}/dev/kmsg" 2>/dev/null || true
+
+        AUTH_HASH=$(printf 'hunter2' | sha256sum | awk '{print $1}')
+        python3 - "$AUTH_STAGE" "$AUTH_HASH" << 'AUTHPY'
+import sys, json, pathlib
+p = pathlib.Path(sys.argv[1]) / 'etc/kybernet/config.json'
+c = json.loads(p.read_text())
+c['emergency_require_auth'] = True
+c['emergency_password_hash'] = sys.argv[2]
+p.write_text(json.dumps(c, indent=2))
+AUTHPY
+        ( cd "$AUTH_STAGE"
+          if command -v bsdcpio >/dev/null 2>&1; then
+              find . | bsdcpio -o -H newc 2>/dev/null | gzip > "${SCRIPT_DIR}/initramfs-auth.cpio.gz"
+          else
+              find . | cpio -o -H newc 2>/dev/null | gzip > "${SCRIPT_DIR}/initramfs-auth.cpio.gz"
+          fi )
+        echo "  staged emergency-auth fixture"
+
         ( cd "$EDGE_STAGE"
           if command -v bsdcpio >/dev/null 2>&1; then
               find . | bsdcpio -o -H newc 2>/dev/null | gzip > "${SCRIPT_DIR}/initramfs-edge.cpio.gz"

@@ -512,6 +512,96 @@ else
     fi
 fi
 
+# ============================================================
+# Emergency-auth gate (1.5.8)
+#
+# This is a REGRESSION TEST FOR A BRICK, not a feature test.
+#
+# From 1.5.4 until 1.5.8 the password prompt read fd 0 — which setup_console
+# deliberately points at /dev/null, so services never block on a console. The
+# read returned EOF instantly, authentication always failed, and the failure
+# path rebooted. Once 1.5.7 began forcing require_auth on an edge refusal, a
+# board with a hash configured refused, rebooted, refused, rebooted, forever.
+# The pre-fix serial log shows the whole story on one line:
+#
+#     Password: kybernet: emergency shell: AUTHENTICATION FAILED — rebooting
+#
+# Feeding stdin is what makes this assertable: `-serial stdio` (not
+# `mon:stdio`, which multiplexes the monitor onto the same stream) takes the
+# password from a pipe after a delay long enough for the prompt to appear.
+AUTH_INITRD="${SCRIPT_DIR}/initramfs-auth.cpio.gz"
+if [ ! -f "$AUTH_INITRD" ] || [ "${SKIP_EDGE:-0}" = "1" ]; then
+    echo ""
+    echo "=== emergency-auth gate: SKIPPED (no fixture) ==="
+else
+    echo ""
+    echo "=== emergency-auth gate (console prompt + echo suppression) ==="
+
+    AUTH_BAD="${EDGE_DIR}/auth-corrupt.img"
+    cp "${EDGE_DIR}/data.img" "$AUTH_BAD"
+    printf 'CORRUPTED' | dd of="$AUTH_BAD" bs=1 seek=2000 conv=notrunc status=none
+
+    # These boots must outlive the feeder's own sleeps, so they get their own
+    # floor rather than the caller's default (15 s, which cuts the run off
+    # mid-password and silently skips the later assertions).
+    AUTH_TIMEOUT="$TIMEOUT"
+    [ "$AUTH_TIMEOUT" -lt 45 ] && AUTH_TIMEOUT=45
+
+    _auth_boot() {
+        # $1 = password to type. The sleep is a fixed wait for the prompt;
+        # under KVM it appears in ~1 s, under TCG a few seconds, so 8 s is
+        # generous on both.
+        ( sleep 8; printf '%s\n' "$1"; sleep 5 ) | timeout "$AUTH_TIMEOUT" qemu-system-x86_64 \
+            -kernel "$KERNEL" -initrd "$AUTH_INITRD" \
+            -append "console=ttyS0 panic=5 rdinit=/sbin/init kybernet.harness=1 loglevel=3" \
+            -drive "file=${AUTH_BAD},if=virtio,format=raw" \
+            -drive "file=${EDGE_DIR}/hash.img,if=virtio,format=raw" \
+            $ACCEL_FLAGS -m 512M -nographic -no-reboot -monitor none \
+            -serial stdio 2>&1 | cat -v | tr '\r' '\n'
+        # `timeout` kills qemu with 124 on the reject path, because a
+        # rejection now HALTS (sys_pause) instead of rebooting — so the guest
+        # never exits on its own. That is the correct behaviour under test,
+        # not a failure, and `set -e` must not abort on it.
+        return 0
+    }
+
+    OK_OUT=$(_auth_boot "hunter2" || true)
+    if echo "$OK_OUT" | grep -aqF "emergency shell: authenticated"; then
+        echo "  OK: correct password authenticates"
+    else
+        echo "  FAIL: correct password did not authenticate (the 1.5.4-1.5.7 brick)"
+        echo "$OK_OUT" | grep -aiE 'password|authent' | head -3
+        fail=1
+    fi
+
+    # Roadmap item 2. The password must not appear anywhere in the serial log.
+    if echo "$OK_OUT" | grep -aqF "hunter2"; then
+        echo "  FAIL: password echoed to the console"
+        fail=1
+    else
+        echo "  OK: password did not echo (termios ECHO suppressed)"
+    fi
+
+    BAD_OUT=$(_auth_boot "wrongpass" || true)
+    if echo "$BAD_OUT" | grep -aqF "AUTHENTICATION FAILED"; then
+        echo "  OK: wrong password is rejected"
+    else
+        echo "  FAIL: wrong password was not rejected"
+        fail=1
+    fi
+
+    # The brick itself: a rejection must HALT, never reboot into the same
+    # refusal. "rebooting" in the log is the loop coming back.
+    if echo "$BAD_OUT" | grep -aqiF "rebooting"; then
+        echo "  FAIL: rejection reboots — this is the reboot loop 1.5.8 fixed"
+        fail=1
+    else
+        echo "  OK: rejection halts instead of reboot-looping"
+    fi
+
+    rm -f "$AUTH_BAD"
+fi
+
 if [ $fail -eq 0 ]; then
     echo ""
     echo "=== HARNESS TEST: OK (markers, budget, reactor, edge verification) ==="

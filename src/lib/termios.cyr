@@ -1,0 +1,120 @@
+# kybernet/termios.cyr — terminal attribute control for the console
+# Requires: syscalls.cyr, alloc.cyr
+#
+# Written from scratch because the cyrius stdlib has NO ioctl and NO termios
+# support at all — grep ~/.cyrius/lib for sys_ioctl / TCGETS / termios finds
+# nothing. Filed upstream as cyrius issue
+# docs/development/issues/2026-08-24-sys-ioctl-wrapper-missing.md; this stays
+# until a stdlib wrapper lands.
+#
+# ARCH NOTE, and it is the good kind. Everything here is arch-UNIFORM on the
+# two targets cyrius supports, verified against the installed kernel headers
+# rather than from memory: /usr/include/asm/ioctls.h and asm/termbits.h on x86
+# both simply `#include <asm-generic/...>`, so x86_64 and aarch64 share
+# identical ioctl request values AND an identical struct layout. Only the
+# ioctl SYSCALL NUMBER differs, and SYS_IOCTL is already defined in both arch
+# tables (x86_64 16 / aarch64 29) — so the enum does the dispatch and no
+# #ifdef is needed. Same shape as argonaut's ag_sys_fcntl.
+#
+# This is NOT the `struct epoll_event` situation (packed on x86_64, natural
+# elsewhere — 1.4.2 CRITICAL-2). Standing rule 12 still applies to any future
+# kernel struct; it simply happens to be satisfied trivially here.
+#
+#   struct termios {          offset  size
+#       tcflag_t c_iflag;        0      4
+#       tcflag_t c_oflag;        4      4
+#       tcflag_t c_cflag;        8      4
+#       tcflag_t c_lflag;       12      4     <- ECHO lives here
+#       cc_t     c_line;        16      1
+#       cc_t     c_cc[NCCS];    17     19     (NCCS = 19)
+#   };                         total   36 bytes
+
+enum TermiosAbi {
+    TCGETS = 0x5401;
+    TCSETS = 0x5402;
+    TCSETSF = 0x5404;        # set + flush pending input
+    TERMIOS_SIZE = 36;       # BYTES — rule 2. 4*4 + 1 + 19.
+    TERMIOS_LFLAG_OFF = 12;
+    TERMIOS_ECHO = 0x8;
+    TERMIOS_ECHONL = 0x40;
+}
+
+# ioctl(2). No stdlib wrapper exists; SYS_IOCTL is a named enum member, so
+# this satisfies standing rule 1 (no integer syscall literals) and dispatches
+# correctly on both arches.
+fn kyb_ioctl(fd, request, arg) {
+    return syscall(SYS_IOCTL, fd, request, arg);
+}
+
+# Read the terminal attributes of `fd` into a caller-supplied 36-byte buffer.
+# Returns 1 on success, 0 otherwise (notably ENOTTY when fd is not a terminal —
+# which is the normal case for a redirected or piped stdin, and must not be
+# treated as an error by callers).
+fn termios_get(fd, buf) {
+    if (buf == 0) { return 0; }
+    var r = kyb_ioctl(fd, TCGETS, buf);
+    if (is_err(r) == 1) { return 0; }
+    if (r < 0) { return 0; }
+    return 1;
+}
+
+# Write attributes back. `flush` non-zero uses TCSETSF, which discards input
+# received but not yet read — see termios_echo_off for why that matters.
+fn termios_set(fd, buf, flush) {
+    if (buf == 0) { return 0; }
+    var req = TCSETS;
+    if (flush != 0) { req = TCSETSF; }
+    var r = kyb_ioctl(fd, req, buf);
+    if (is_err(r) == 1) { return 0; }
+    if (r < 0) { return 0; }
+    return 1;
+}
+
+# Turn echo off on `fd`, saving the previous attributes into `saved` (a
+# 36-byte caller buffer) so termios_restore can put them back.
+#
+# Returns 1 if echo was suppressed, 0 if it could not be (not a terminal, or
+# the ioctl failed). **A 0 return must NOT block authentication.** Refusing to
+# accept a password because the terminal could not be reconfigured would be a
+# self-inflicted lockout on exactly the path an operator reaches when the
+# machine is already broken. Callers log it and carry on with echo ON.
+#
+# TCSETSF, not TCSETS: anything typed between the prompt appearing and echo
+# being disabled is still sitting in the tty input queue, already echoed. The
+# flush discards it, so a stray keystroke cannot end up prefixed onto the
+# password — and, more usefully, cannot leave a fragment of the password
+# visible if the operator started typing early.
+#
+# ECHONL is cleared alongside ECHO: with ECHO off but ECHONL on, the terminal
+# still echoes the newline, which is harmless but makes the prompt behave
+# differently from every other password prompt an operator has used.
+fn termios_echo_off(fd, saved) {
+    if (termios_get(fd, saved) == 0) { return 0; }
+
+    var work = alloc(TERMIOS_SIZE);
+    for (var i = 0; i < TERMIOS_SIZE; i = i + 1) {
+        store8(work + i, load8(saved + i));
+    }
+
+    # c_lflag is a 4-byte field at +12. load32/store32 — a load64 here would
+    # read 4 bytes of c_line/c_cc along with it and write them back mangled.
+    var lflag = load32(work + TERMIOS_LFLAG_OFF);
+    lflag = lflag & (~TERMIOS_ECHO);
+    lflag = lflag & (~TERMIOS_ECHONL);
+    store32(work + TERMIOS_LFLAG_OFF, lflag);
+
+    return termios_set(fd, work, 1);
+}
+
+# Put back the attributes termios_echo_off saved. Must run on EVERY exit from
+# the password read — success, failure, empty input, timeout — or the operator
+# is handed a shell that does not echo what they type.
+fn termios_restore(fd, saved) {
+    return termios_set(fd, saved, 0);
+}
+
+# 1 if `fd` is a terminal. TCGETS succeeding is the same test isatty(3) uses.
+fn termios_is_tty(fd) {
+    var probe = alloc(TERMIOS_SIZE);
+    return termios_get(fd, probe);
+}

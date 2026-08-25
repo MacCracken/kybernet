@@ -368,15 +368,81 @@ that discards the child's wait status and zero-fills what it cannot parse.
 A control defeated by replacing a file must not be able to brick a board.
 The hardware-rooted version is TPM *sealing*, which fails soft.
 
-### v1.5.8 — harden the emergency-auth gate
+### v1.5.8 — the emergency-auth gate actually works  ✅ SHIPPED
 
-- [ ] Replace `password_hash`'s unsalted SHA-256 with a salted, iterated KDF
-      (argonaut-side; sigil already ships the primitives). Keep the current
-      digest readable for one release so existing configs are not bricked
-- [ ] Suppress console echo while reading the password (`ECHO` off via
-      `TCSETS`), and restore it afterwards including on the failure path
+**Both roadmap items were aimed past a defect that made the whole gate
+non-functional, and on an edge board destructive.**
 
-### v1.5.9 — edge boot on real hardware (was v1.2.2)
+`setup_console` closes fds 0/1/2 and opens `/dev/null` O_RDWR first, so it
+lands on fd 0 — deliberate, because services must never block on a console.
+But the password prompt added at 1.5.4 read fd 0. It got EOF on the first
+call, every time, and treated it as a failed authentication. **No password
+could ever be entered, correct or not.** Once 1.5.7 began forcing
+`require_auth` on an edge refusal, a board with a hash configured refused,
+rebooted, refused, rebooted — forever, recoverable only from the bootloader.
+
+Reproduced in a real PID-1 QEMU boot before anything was changed; the serial
+log tells the whole story on one line:
+
+```
+Password: kybernet: emergency shell: AUTHENTICATION FAILED — rebooting
+```
+
+That also makes roadmap item 2 a **misdiagnosis**: nothing was typed, so
+nothing echoed.
+
+- [x] Interactive reads open their own `/dev/console` (`console_open_rw`,
+      `O_RDWR | O_NOCTTY`) instead of reading fd 0
+- [x] **Console echo suppression** — `src/lib/termios.cyr`, written from
+      scratch because the cyrius stdlib has no ioctl or termios at all.
+      Restored on every exit path. Non-fatal if it fails: refusing a
+      password because the terminal could not be reconfigured would be a
+      self-inflicted lockout
+- [x] The read is **bounded** (120 s). Unbounded would be a new hang in PID
+      1 at phase 6c, before the event loop
+- [x] A failed authentication **halts** instead of rebooting — rebooting
+      re-enters the refusal that led here, which is the loop itself
+- [x] The emergency shell gets a real stdin, and a real `envp`. It was
+      exec'd with `envp = 0`, discarding the HOME/TERM/PATH/SHELL map
+      argonaut builds — so even a successful login got a shell with no PATH
+- [x] Harness gate feeding a password over the serial line: correct
+      password authenticates, the password does **not** appear in the log,
+      wrong password is rejected, and rejection does not reboot
+
+### v1.5.9 — salted KDF for the emergency password
+
+Deferred from 1.5.8 deliberately, not skipped. The gate had to work at all
+before the credential format was worth hardening, and the investigation
+turned up three things that need resolving first:
+
+- [ ] **`argon2id()` cannot be called from PID 1 as sigil ships it.** It
+      allocates through `fl_alloc`, whose large path stores to the raw
+      `mmap` return without checking it — so on memory exhaustion it faults
+      instead of returning the error its own `if (mem == 0)` guard expects.
+      Reproduced: exit 139. kybernet must use `argon2id_into(mem, ...)` with
+      an `alloc()` arena, which fails cleanly
+- [ ] **sigil's argon2 profile costs +377 KB, and 352 KB of it is `.bss`** —
+      a single `var SCR[352256]` that DCE cannot strip. Fixable in sigil by
+      taking the scratch lane off the tail of the caller-supplied arena
+      (**not** by caching it in a global — that is audit rule 8, a bump-arena
+      pointer in a static, and it was tried and rejected during this work)
+- [ ] **There is no provisioning story at all.** Nothing in either repo tells
+      an operator how to produce `emergency_password_hash`. Today it happens
+      to be `printf 'pw' | sha256sum`; with a salted KDF that stops being
+      possible with coreutils, so a generator has to ship with the format
+- [ ] Migration: a stored 64-hex SHA-256 must keep working for one release,
+      and the new format must be unambiguous enough that it cannot be
+      downgraded to the legacy path
+- [ ] Parameter CEILING as well as floor — `fl_alloc` has no upper bound, so
+      an `m_cost` parsed from config could OOM or hang PID 1
+
+PBKDF2 was evaluated and rejected: sigil's SHA-256 acceleration is
+`#ifdef CYRIUS_ARCH_X86` only, so every ARM edge board runs the software
+path — measured at ~164x slower than OpenSSL, which buys roughly 6-9k
+iterations in a 1 s budget against an attacker doing millions. Argon2's
+BLAKE2b has no such gap.
+
+### v1.5.10 — edge boot on real hardware (was v1.2.2)
 
 Everything below needs a real device-mapper stack or a real TPM, and is
 **not** covered by the QEMU gate — measured, not assumed: the harness

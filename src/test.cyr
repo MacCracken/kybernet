@@ -8,6 +8,7 @@ include "lib/thread_local.cyr"
 include "src/lib/cmdline.cyr"
 include "src/lib/log.cyr"
 include "src/lib/console.cyr"
+include "src/lib/termios.cyr"
 include "src/lib/signals.cyr"
 include "src/lib/reaper.cyr"
 include "src/lib/privdrop.cyr"
@@ -845,6 +846,51 @@ fn test_restart_queue_scans_whole_queue() {
 # overlays require_auth / auth_password_hash from config.json. The default
 # hard-codes both to 0, so without the overlay the gate could never engage
 # regardless of what an operator configured. These pin the three verdicts.
+# Terminal attribute control (1.5.8). The unit suite has no tty, so what is
+# assertable here is the ABI and the not-a-terminal path — the one that must
+# never be treated as an error, because a redirected stdin is normal.
+fn test_termios() {
+    println("--- termios (1.5.8) ---");
+
+    # Values verified against the installed kernel headers, and arch-uniform:
+    # x86's asm/ioctls.h and asm/termbits.h both #include <asm-generic/...>,
+    # so these hold on aarch64 too. Pinned here so a future edit that
+    # "tidies" them has to argue with a test.
+    assert_eq(TCGETS, 0x5401, "termios: TCGETS");
+    assert_eq(TCSETS, 0x5402, "termios: TCSETS");
+    assert_eq(TCSETSF, 0x5404, "termios: TCSETSF");
+    assert_eq(TERMIOS_ECHO, 0x8, "termios: ECHO bit");
+    assert_eq(TERMIOS_ECHONL, 0x40, "termios: ECHONL bit");
+    # 4*4 + 1 + 19 = 36 BYTES (rule 2), c_lflag the 4th 4-byte field.
+    assert_eq(TERMIOS_SIZE, 36, "termios: struct is 36 bytes");
+    assert_eq(TERMIOS_LFLAG_OFF, 12, "termios: c_lflag at +12");
+
+    # A non-terminal must report cleanly, not error. /dev/null is exactly the
+    # case kybernet hits on fd 0, and mis-handling it is what made the
+    # emergency prompt unusable for four releases.
+    var nullfd = sys_open("/dev/null", O_RDONLY, 0);
+    if (nullfd >= 0) {
+        assert_eq(termios_is_tty(nullfd), 0, "termios: /dev/null is not a tty");
+        var sbuf = alloc(TERMIOS_SIZE);
+        assert_eq(termios_get(nullfd, sbuf), 0, "termios: get on non-tty returns 0");
+        # Must return 0, and must NOT fault — callers treat 0 as
+        # "carry on with echo on", never as a reason to deny auth.
+        assert_eq(termios_echo_off(nullfd, sbuf), 0, "termios: echo_off on non-tty returns 0");
+        sys_close(nullfd);
+    }
+
+    # A closed/invalid fd is EBADF, same contract.
+    var sbuf2 = alloc(TERMIOS_SIZE);
+    assert_eq(termios_get(0 - 1, sbuf2), 0, "termios: get on bad fd returns 0");
+    assert_eq(termios_is_tty(0 - 1), 0, "termios: bad fd is not a tty");
+
+    # Null buffer must be rejected rather than dereferenced — this runs in
+    # PID 1, where a fault is a kernel panic.
+    assert_eq(termios_get(0, 0), 0, "termios: null buffer rejected");
+    assert_eq(termios_set(0, 0, 0), 0, "termios: null buffer rejected on set");
+    return 0;
+}
+
 fn test_emergency_auth() {
     println("--- emergency shell auth (1.5.4) ---");
     var esc = emergency_shell_default();
@@ -1794,6 +1840,7 @@ fn main() {
     test_restart_queue();
     test_restart_queue_scans_whole_queue();
     test_restart_queue_bounds();
+    test_termios();
     test_emergency_auth();
     test_notify_env_entry();
     test_eventloop_setup_full();

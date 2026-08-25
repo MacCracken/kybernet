@@ -6,7 +6,7 @@
 
 - **Type**: Cyrius binary (PID 1 init)
 - **License**: GPL-3.0-only
-- **Version**: 1.5.7
+- **Version**: 1.5.8
 - **Language**: Cyrius 6.5.35 (the whole AGNOS pack front — kybernet/argonaut/libro/agnostik — pins 6.5.35; via `~/.cyrius/bin/cyrius`, `cyriusly use 6.5.35`)
 - **Tools**: `owl` to read .cyr files, `cyim` to write/edit .cyr files
 
@@ -21,7 +21,7 @@ The helmsman that steers the Argo. Manages system boot, essential mounts, signal
 ```sh
 cyrius deps                                  # Resolve deps from cyrius.cyml into lib/
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet   # Build (DCE recommended)
-cyrius test src/test.cyr                     # Run 477 tests
+cyrius test src/test.cyr                     # Run 491 tests
 cyrius bench src/bench.cyr                   # Run benchmarks
 bash scripts/bench-history.sh                # Record bench history + ≥15% regression gate (MANDATORY on every release)
 cyrius build --aarch64 src/main.cyr build/kybernet-aarch64   # Cross-build aarch64
@@ -37,11 +37,12 @@ kybernet/
 ├── VERSION, CLAUDE.md, README.md, CHANGELOG.md, LICENSE
 ├── src/
 │   ├── main.cyr           # Globals + boot sequence + event loop + harness gate
-│   ├── test.cyr           # Integration tests (477 assertions)
+│   ├── test.cyr           # Integration tests (491 assertions)
 │   ├── bench.cyr          # Microbenchmarks
 │   └── lib/
 │       ├── log.cyr        # klog / klog2 / kmsg / slog (factored out at 1.2.0)
 │       ├── cmdline.cyr    # /proc/cmdline token scan (factored out at 1.5.7)
+│       ├── termios.cyr    # console echo suppression (1.5.8; no stdlib ioctl)
 │       ├── console.cyr    # Stdio redirect (fds 0/1/2)
 │       ├── signals.cyr    # Signal blocking + signalfd
 │       ├── reaper.cyr     # Zombie reaping
@@ -104,7 +105,7 @@ Do **not** add a `path = "../<dep>"` alongside `git`/`tag`. When `path` resolves
 
 1. Make changes to `src/main.cyr` or `src/lib/*.cyr`
 2. Build: `CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet`
-3. Test: `cyrius test src/test.cyr` (477 tests must pass)
+3. Test: `cyrius test src/test.cyr` (491 tests must pass)
 4. Cross-build: `cyrius build --aarch64 src/main.cyr build/kybernet-aarch64` (verify both arches)
 5. Harness (when KVM available): `bash qemu/boot-test.sh` (asserts marker set + budget)
 5b. **On a version bump: `bash scripts/bench-history.sh`** — records per-benchmark ns/op to `benches/history.csv` and exits non-zero on a ≥15% regression vs the previous run. Review and explain (or fix) any flagged delta before cutting.
@@ -143,7 +144,13 @@ Apply on every change touching src/:
 
 19. **An absent `edge` config block means DETECTION-ONLY.** Before 1.5.7 kybernet parsed no edge config at all, so `config_edge()` always returned argonaut's `edge_config_default()` — `readonly_rootfs`/`luks_enabled`/`tpm_attestation` all 1 — making `"boot_mode": "edge"` an un-overridable demand whose refusal path powers the board off. Refusing to boot is a policy an operator opts into, never one they inherit from a struct default they never saw. Validate every edge field at LOAD time (device paths, 64-hex hashes, PCR indices 0-23, all-zero baselines) so a typo is a readable config error rather than a phase-6c poweroff.
 
-20. **A release gate that stops before the event loop does not test the event loop.** `kybernet.harness=1` shuts down at phase 9; `kybernet.harness=loop` runs the real reactor for 5 s and asserts a bounded wakeup count (ceiling 500, observed 21). Keep it green and keep it in CI — it is the only gate that executes a reactor iteration, and it is verified to FAIL on the unfixed 1.4.1 shape.
+20. **⚠ fd 0 IS `/dev/null`, DELIBERATELY — never read it expecting input.** `setup_console` closes 0/1/2 and opens `/dev/null` O_RDWR first, so it lands on fd 0; services inherit that, which is correct (a supervised daemon must never block on a console). Anything INTERACTIVE must open its own descriptor via `console_open_rw()` (`/dev/console`, `O_RDWR | O_NOCTTY`) and close it again. From 1.5.4 to 1.5.8 the emergency password prompt read fd 0, got EOF instantly, and treated it as a failed authentication — and once 1.5.7 forced `require_auth` on an edge refusal, a board with a hash configured **reboot-looped forever**. `O_NOCTTY` is not in the cyrius stdlib; it is `1 << 8` = 256 from asm-generic/fcntl.h and arch-uniform. Without it a session leader — PID 1 is one — acquires the console as its controlling terminal. 1.5.8.
+
+21. **No ioctl, no termios, no poll in the cyrius stdlib.** `src/lib/termios.cyr` hand-rolls what echo suppression needs; `_read_line_fd` polls with `sleep_ms` because there is no `poll`/`select` wrapper either. Filed as cyrius issue `2026-08-24-sys-ioctl-wrapper-missing.md`. `SYS_IOCTL` **is** in both arch tables (16/29), so `syscall(SYS_IOCTL, ...)` satisfies rule 1 and needs no `#ifdef` — and TCGETS/TCSETS/`struct termios` are arch-uniform (x86 `asm/ioctls.h` just includes asm-generic), so unlike `struct epoll_event` this needs no per-arch treatment.
+
+22. **An interactive read in PID 1 must be BOUNDED.** `_read_line_fd` takes a deadline. This runs at phase 6c, before the event loop — nothing is reaping, nothing services a watchdog — so a blocking read on a board with no operator is a machine that looks dead. And a failed emergency authentication **halts**, it does not reboot: rebooting re-enters whatever refused the boot, which re-enters the prompt.
+
+23. **A release gate that stops before the event loop does not test the event loop.** `kybernet.harness=1` shuts down at phase 9; `kybernet.harness=loop` runs the real reactor for 5 s and asserts a bounded wakeup count (ceiling 500, observed 21). Keep it green and keep it in CI — it is the only gate that executes a reactor iteration, and it is verified to FAIL on the unfixed 1.4.1 shape.
 
 
 ## Release gates
@@ -154,7 +161,7 @@ Every version bump runs all of these, in this order, and they must all be green 
 rm -rf lib && cyrius deps && cyrius deps --verify   # expect: N verified, 0 failed
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet
 cyrius build --aarch64 src/main.cyr build/kybernet-aarch64
-cyrius test src/test.cyr                            # 477 tests, 0 failed
+cyrius test src/test.cyr                            # 491 tests, 0 failed
 bash scripts/bench-history.sh                       # ≥15% regression gate
 bash qemu/boot-test.sh                              # needs KVM
 ```
@@ -170,4 +177,4 @@ Plus a **sibling-free reproduction** — the only gate that catches a tag which 
 - Do not add C, Rust, or assembly files — everything is Cyrius
 - Do not reference `../cyrius/` repo — use installed toolchain at `~/.cyrius/`
 - Do not bump a dep tag to a value > the highest existing git tag (CI clones from `git + tag`; an unreleased VERSION-file value fails resolution — see 1.1.0 CHANGELOG note)
-- Test after every change (477 tests + harness when KVM available)
+- Test after every change (491 tests + harness when KVM available)

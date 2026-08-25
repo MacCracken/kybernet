@@ -40,3 +40,42 @@ fn setup_console() {
 
     return Ok(0);
 }
+
+# ================================================================
+# Interactive console access (1.5.8)
+#
+# ⚠ fd 0 IS /dev/null, DELIBERATELY, AND THAT IS WHY THIS EXISTS.
+# setup_console above closes 0/1/2 and opens /dev/null O_RDWR first, so it
+# lands on the lowest free descriptor — 0. Services inherit that, which is
+# correct: a supervised daemon must never block reading a console.
+#
+# But the emergency-shell password prompt inherited it too. From 1.5.4 until
+# 1.5.8 `_read_console_line` read fd 0, got EOF from /dev/null on the first
+# call, and treated it as a failed authentication. Nobody could ever type a
+# password — correct or not — and the failure path reboots. Once 1.5.7 began
+# forcing require_auth on an edge refusal, a board with a password configured
+# would refuse, reboot, refuse, reboot, forever, recoverable only from the
+# bootloader. Reproduced in a real PID-1 QEMU boot, where the serial log shows
+# the prompt and the rejection on ONE line:
+#
+#     Password: kybernet: emergency shell: AUTHENTICATION FAILED — rebooting
+#
+# So an interactive reader opens its OWN descriptor and closes it again,
+# rather than repointing fd 0 and changing what every service inherits.
+#
+# O_NOCTTY is NOT defined by the cyrius stdlib (see the same gap that forced
+# src/lib/termios.cyr). Its value is `1 << 8` from asm-generic/fcntl.h, and
+# x86's asm/fcntl.h just includes asm-generic — so it is arch-uniform, like
+# the O_CREAT=64 / O_EXCL=128 / O_TRUNC=512 values this toolchain already
+# carries. Without it, an O_RDWR open of a tty by a session leader — which
+# PID 1 is — acquires /dev/console as its CONTROLLING TERMINAL, a persistent
+# process-wide side effect picked up at the worst possible moment.
+enum ConsoleOpenFlags { O_NOCTTY = 256; }
+
+# Open /dev/console for interactive use. Returns the fd, or -1.
+# Caller MUST close it.
+fn console_open_rw() {
+    var fd = sys_open("/dev/console", O_RDWR | O_NOCTTY, 0);
+    if (fd < 0) { return 0 - 1; }
+    return fd;
+}

@@ -19,6 +19,8 @@
 # veritysetup is available on the build host. Regenerates from the script;
 # the images are random bytes and the root hash changes every build.
 /qemu/initramfs-edge/
+/qemu/initramfs-auth/
+/qemu/initramfs-auth.cpio.gz
 /qemu/initramfs-edge.cpio.gz
 /qemu/edge/
 
