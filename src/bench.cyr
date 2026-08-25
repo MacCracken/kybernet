@@ -6,6 +6,7 @@
 # Kybernet modules (stdlib + deps auto-included via cyrius.cyml)
 # thread_local explicit include — see src/main.cyr for rationale (6.2.x).
 include "lib/thread_local.cyr"
+include "src/lib/cmdline.cyr"
 include "src/lib/log.cyr"
 include "src/lib/console.cyr"
 include "src/lib/signals.cyr"

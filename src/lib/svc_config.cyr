@@ -233,6 +233,112 @@ fn svc_apply_resources_json(sd, obj) {
     return 1;
 }
 
+# ================================================================
+# Edge-boot policy from config.json (1.5.7)
+#
+# ⚠ THIS EXISTS TO FIX A LIVE FOOT-GUN, not just to add a knob.
+#
+# Before 1.5.7 kybernet parsed NO edge config at all, so config_edge()
+# always returned argonaut's edge_config_default() — readonly_rootfs = 1,
+# luks_enabled = 1, tpm_attestation = 1 — with verify_boot defaulting to 1
+# as well. Writing `"boot_mode": "edge"` in config.json was therefore an
+# unconditional, un-overridable demand for a TPM *and* dm-verity, and the
+# refusal path in main.cyr phase 6c drops to the emergency shell and then
+# POWERS THE MACHINE OFF. On a headless board without a TPM that is a
+# poweroff loop with no way out.
+#
+# So the default is FLIPPED here: an absent `edge` block now means
+# detection-only. An operator who wants a hard prerequisite must say so.
+# Refusing to boot is a policy an operator opts into, never one they
+# inherit from a struct default they never saw.
+fn edge_apply_defaults(ec) {
+    store64(ec, 0);        # readonly_rootfs
+    store64(ec + 8, 0);    # luks_enabled
+    store64(ec + 16, 0);   # tpm_attestation
+    return 0;
+}
+
+# Parse the "edge" block into argonaut's EdgeBootConfig plus kybernet's
+# device/baseline globals. Returns 1 on success (including "no block"),
+# 0 if the block is malformed.
+#
+# Everything is validated HERE, at load time, with a loud reason — never
+# mid-boot. A typo in a device path or a truncated root hash must be a
+# config error the operator can read, not a phase-6c poweroff.
+fn edge_config_from_json(root, ec) {
+    if (ec == 0) { return 1; }
+    edge_apply_defaults(ec);
+
+    var eb = json_v_obj_get(root, "edge");
+    if (eb == 0) { return 1; }
+    if (json_v_is_obj(eb) == 0) { return 0; }
+
+    store64(ec, _cfg_bool(eb, "readonly_rootfs", 0));
+    store64(ec + 8, _cfg_bool(eb, "luks_enabled", 0));
+    store64(ec + 16, _cfg_bool(eb, "tpm_attestation", 0));
+
+    var mb = _cfg_int(eb, "max_boot_ms", 0);
+    if (mb < 0) { return 0; }
+    if (mb > 0) { store64(ec + 24, mb); }
+
+    var spec = _cfg_str(eb, "pcr_bindings", 0);
+    if (spec != 0) {
+        # Validate the indices now. TPM 2.0 has PCRs 0-23; an out-of-range
+        # index handed to tpm_read_pcr yields nothing for that bank, and on
+        # an attestation path "read nothing, found nothing wrong" is the
+        # same failure shape as 1.4.2's MEDIUM-2 (a tool that never ran
+        # counting as a pass).
+        var idx = _eb_parse_pcr_indices(spec);
+        for (var i = 0; i < vec_len(idx); i = i + 1) {
+            var v = vec_get(idx, i);
+            if (v < 0 || v > 23) { return 0; }
+        }
+        store64(ec + 32, spec);
+    }
+
+    # --- device paths ---
+    var rd = _cfg_str(eb, "root_device", 0);
+    var hd = _cfg_str(eb, "hash_device", 0);
+    var rh = _cfg_str(eb, "root_hash", 0);
+    var ld = _cfg_str(eb, "luks_device", 0);
+
+    if (rd != 0 && edge_device_path_ok(rd) == 0) { return 0; }
+    if (hd != 0 && edge_device_path_ok(hd) == 0) { return 0; }
+    if (ld != 0 && edge_device_path_ok(ld) == 0) { return 0; }
+    if (rh != 0 && edge_is_hex64_str(rh) == 0) { return 0; }
+
+    # dm-verity needs all three or none — a half-specified triple would
+    # silently degrade to "no verification" on a box that asked for it.
+    var have = 0;
+    if (rd != 0) { have = have + 1; }
+    if (hd != 0) { have = have + 1; }
+    if (rh != 0) { have = have + 1; }
+    if (have != 0 && have != 3) { return 0; }
+
+    edge_set_devices(rd, hd, rh, ld);
+
+    # --- expected PCR baselines ---
+    var ex = json_v_obj_get(eb, "expected_pcrs");
+    if (ex != 0) {
+        if (json_v_is_arr(ex) == 0) { return 0; }
+        var pv = vec_new();
+        var n = json_v_arr_len(ex);
+        for (var k = 0; k < n; k = k + 1) {
+            var e = json_v_arr_get(ex, k);
+            if (e == 0 || json_v_is_str(e) == 0) { return 0; }
+            var d = json_v_str(e);
+            if (edge_is_hex64_str(d) == 0) { return 0; }
+            # An all-zero baseline would match sigil's zero-fill for a PCR
+            # it could not read — attestation that can never fail.
+            if (edge_is_all_zero_hex(d) == 1) { return 0; }
+            vec_push(pv, d);
+        }
+        edge_set_expected_pcrs(pv);
+    }
+
+    return 1;
+}
+
 # Parse the "services" array of an already-parsed config document into a
 # vec of ServiceDefinition. Always returns a vec (possibly empty) so the
 # caller never has to null-check.

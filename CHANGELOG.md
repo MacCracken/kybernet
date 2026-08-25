@@ -7,6 +7,170 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.5.7] — 2026-08-24
+
+**Edge boot actually verifies, and stops being a poweroff trap.** Suite
+440 → 477 assertions, 0 failures. Requires **argonaut 1.13.2**.
+
+The roadmap said this was blocked on argonaut extending `EdgeBootConfig`
+with device paths. It never was — `execute_edge_boot(config, root_device,
+hash_device, root_hash, luks_device)` has always taken them as
+**parameters**. Meanwhile the gap the roadmap did *not* name was a live
+foot-gun, and it is the most important thing in this release.
+
+### Fixed — `"boot_mode": "edge"` was an un-overridable poweroff trap
+
+kybernet parsed **no edge config at all**. `config_edge()` therefore always
+returned argonaut's `edge_config_default()`:
+
+```
+readonly_rootfs = 1   luks_enabled = 1   tpm_attestation = 1
+```
+
+with `verify_boot` defaulting to 1 as well. So writing `"boot_mode":
+"edge"` was an unconditional demand for a TPM *and* dm-verity that no
+config file could soften — and the refusal path at phase 6c drops to the
+emergency shell and then **powers the machine off**. On a headless
+TPM-less board that is a poweroff loop.
+
+An `edge` block is now parsed, and **an absent block means detection-only.**
+Refusing to boot is a policy an operator opts into, never one they inherit
+from a struct default they never saw.
+
+Everything is validated at **load** time — device paths (`/dev/` prefix,
+traversal-free, conservative charset), 64-hex root hashes, PCR indices
+0-23 — with a loud `klog` + `kmsg` and a fallback to detection-only. A typo
+is a config error the operator can read, never a mid-boot poweroff.
+
+### Added — dm-verity integrity verification that actually runs
+
+`veritysetup verify <data> <hash> <root_hash>` walks the hash tree in
+**pure userspace**: no device-mapper, no kernel module, no `/dev/mapper`
+node. That is why kybernet verifies with `verify` rather than `open`, and
+it is what makes this testable in an initramfs where dm is a module nothing
+can load.
+
+This is the honest half of the 1.2.0 deferral — "the rootfs image matches
+the root hash the operator pinned". Mounting it *through* dm-verity so that
+later corruption is caught at read time is the other half, and needs a
+device-mapper stack this init cannot assume. That is now filed against
+hardware (roadmap v1.5.9), not against a version number.
+
+The dm-verity capability probe no longer causes a refusal. It answers "can
+the kernel instantiate a dm target", which `verify` does not need — keying
+`readonly_rootfs` to it failed boards that verify perfectly well. The
+refusal now keys on the verification **result**.
+
+### Added — PCR baseline comparison, deliberately REPORT-ONLY
+
+`expected_pcrs` is compared against the live reading and reported. It does
+**not** refuse, and that is a decision rather than an unfinished edge:
+
+- PCR 7/14 legitimately change on any firmware or kernel update, so
+  enforcement turns a routine signed upgrade into a fleet-wide refusal.
+- The oracle is `/usr/bin/tpm2_pcrread` — a file living on the very rootfs
+  under verification, read through sigil's `exec_capture`, which discards
+  the child's wait status and **zero-fills** anything it cannot parse. A
+  control that is defeated by replacing a file must not be able to
+  permanently brick a board.
+
+That zero-fill is also why an all-zero digest is rejected as a configured
+baseline and treated as **UNREADABLE, never MATCH** when read back — an
+all-zero baseline would otherwise match a PCR that was never read, i.e.
+attestation that can never fail.
+
+### Fixed — an edge refusal opened an unauthenticated root shell
+
+`g_emerg_require_auth` defaults to 0, so a pulled TPM, a missing
+`veritysetup` or a corrupted rootfs handed a **console root shell** to
+whoever caused it — on a device whose entire purpose is verified boot.
+An edge refusal now requires authentication when a password hash is
+configured, and when none is configured it does not open a shell at all
+(`verify_emergency_auth` fails closed, so offering one would loop the
+operator through a password nobody has).
+
+### Added — escape hatches, and the reason `off` is narrow
+
+`kybernet.edge=permissive` runs every check and refuses for none.
+`kybernet.edge=off` skips the layer — but **only on a board with no
+`root_hash` pinned**; where one is configured it downgrades to permissive.
+`/proc/cmdline` is exactly as trustworthy as the bootloader, which is the
+surface verified boot exists to protect, so a silent total bypass is the
+wrong thing to ship. The board still boots; the verification still runs and
+still reaches dmesg.
+
+An operator locked out by a hardware change cannot edit a config file on a
+rootfs that is itself what failed to verify, which is why the hatch is on
+the cmdline at all — and why the harness exercises both. An escape hatch
+that has never been executed is not an escape hatch.
+
+### Fixed — two upstream defects found on the way (argonaut 1.13.2)
+
+- argonaut built every SafeCommand with a **bare binary name**, and
+  `execve(2)` does not search `$PATH`. Every `mount` / `veritysetup` /
+  `cryptsetup` exec died 127; its whole edge-boot execution path could
+  never have succeeded. Unnoticed because no consumer imported the module —
+  and found *before* kybernet wired it up, which would have refused boot on
+  every edge device.
+- `exec_vec_str` waits **unbounded** (uninterruptible under PID 1's blocked
+  mask) and **fails OPEN**: it discards `waitpid`'s return and reads a
+  `var stbuf[4]` that is **static storage in cyrius, not stack** (verified
+  on 6.5.35). A wait that does not land decodes status 0 as exit 0 —
+  success. On `veritysetup verify` that is a verification which never ran,
+  reported as verified.
+
+kybernet's own `_eb_dmverity_supported` had both problems plus a hardcoded
+`/usr/sbin/veritysetup` (wrong on split-usr systems); it now goes through
+`run_safe_cmd_timeout` too.
+
+### Changed
+
+`_cmdline_has` moved from `main.cyr` to a new `src/lib/cmdline.cyr`.
+`edge_boot.cyr` needs it for the escape hatches, and a `src/lib` module
+reaching into `main.cyr` links in the real binary while breaking
+`cyrius test src/test.cyr`, which includes only `src/lib`.
+
+### Harness — a real cryptographic round trip
+
+A second initramfs (`initramfs-edge.cpio.gz`) with a real 4 MiB
+`veritysetup format` image pair attached as virtio disks — `CONFIG_VIRTIO_BLK`
+is builtin, so `/dev/vda` and `/dev/vdb` appear with no modules, no udev
+and no losetup. Six assertions: an intact image verifies, a corrupted image
+fails and **refuses the boot**, and both escape hatches behave. It SKIPS
+cleanly when `veritysetup` is absent on the build host — a missing tool must
+never read as a pass. Every gate from 1.5.0-1.5.6 is byte-for-byte
+unchanged.
+
+**What it does not cover, stated so the green is not misread:**
+`veritysetup open`, the read-only mount, LUKS unlock, and PCR enforcement.
+Measured, not assumed — the harness kernel has `CONFIG_BLK_DEV_DM=m`, no
+`CONFIG_DM_INIT`, and the initramfs busybox has no `insmod`; in-VM
+`veritysetup open` returns "Cannot initialize device-mapper". Putting a
+module loader inside PID 1 to make a test pass is scaffolding in the one
+process that must never crash.
+
+### Benchmarks
+
+54 benchmarks. Nothing added is on a hot path — the edge layer runs once,
+at phase 6c.
+
+The gate flagged `strlen(52 chars)` 27 → 40 ns/op (+48%) on the first run
+and passed on the second (40 → 39). This is the **same binary-layout
+oscillation diagnosed and bisected at 1.5.5**, not new work: nothing here
+touches `strlen` or anything it calls, and the series across releases reads
+
+```
+26, 27, 38, 38, 27, 27, 40, 39
+```
+
+— two stable attractors ~27 ns and ~39 ns that the tree lands on depending
+on where the linker puts the loop. At 1.5.5 this was bisected to a code-SIZE
+threshold rather than any single change: reverting either of two unrelated
+files moved it back. Absolute cost is 13 ns on a function PID 1 calls a few
+hundred times per boot, from logging.
+
+---
+
 ## [1.5.6] — 2026-08-24
 
 **aarch64 service spawning was broken in a dependency, and the lock was

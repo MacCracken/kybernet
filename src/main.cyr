@@ -21,6 +21,7 @@
 # module chain that pulls sigil. Without this the binary links but SIGILLs at
 # runtime on an uninitialised thread pointer (see CLAUDE.md / libro 2.7.x).
 include "lib/thread_local.cyr"
+include "src/lib/cmdline.cyr"
 include "src/lib/log.cyr"
 include "src/lib/console.cyr"
 include "src/lib/signals.cyr"
@@ -165,6 +166,21 @@ fn load_config() {
     g_emerg_hash = _cfg_str(root, "emergency_password_hash", 0);
     if (g_emerg_require_auth == 1) {
         klog("config: emergency shell requires authentication");
+    }
+
+    # verify_boot gates the whole edge layer. argonaut defaults it to 1;
+    # kybernet now lets an operator say otherwise. 1.5.7.
+    store64(cfg + 40, _cfg_bool(root, "verify_boot", 1));
+
+    # Edge policy. edge_config_from_json FLIPS argonaut's defaults: an
+    # absent `edge` block means detection-only, not the strictest possible
+    # profile. See its header — the old behaviour turned `"boot_mode":
+    # "edge"` into an un-overridable TPM + dm-verity demand whose refusal
+    # path powers the machine off. 1.5.7.
+    if (edge_config_from_json(root, config_edge(cfg)) == 0) {
+        klog("config: malformed edge block — edge verification DISABLED");
+        kmsg("kybernet: config: malformed edge block, edge verification disabled");
+        edge_apply_defaults(config_edge(cfg));
     }
 
     # Services (the v1.5.0 headline). See src/lib/svc_config.cyr.
@@ -412,54 +428,6 @@ fn drop_to_emergency() {
 # Substring match with start-/end-boundary checks so
 # `kybernet.harness=11` or `nokybernet.harness=1` don't accidentally
 # trigger harness mode.
-
-# Scan /proc/cmdline for `needle` as a whitespace-delimited token.
-# Boundary-checked so `kybernet.harness=11` or `nokybernet.harness=1`
-# do not match `kybernet.harness=1`.
-fn _cmdline_has(needle, nlen) {
-    var fd = sys_open("/proc/cmdline", O_RDONLY | O_CLOEXEC, 0);
-    if (fd < 0) { return 0; }
-    var buf = alloc(1024);
-    var n = sys_read(fd, buf, 1024);
-    sys_close(fd);
-    if (n <= 0) { return 0; }
-    var i = 0;
-    while (i <= n - nlen) {
-        var matched = 1;
-        var j = 0;
-        while (j < nlen) {
-            if (load8(buf + i + j) != load8(needle + j)) {
-                matched = 0;
-                j = nlen;
-            } else {
-                j = j + 1;
-            }
-        }
-        if (matched == 1) {
-            # Left boundary: start-of-buffer, space, or tab.
-            var left_ok = 0;
-            if (i == 0) { left_ok = 1; }
-            else {
-                var lb = load8(buf + i - 1);
-                if (lb == 32) { left_ok = 1; }
-                if (lb == 9)  { left_ok = 1; }
-            }
-            # Right boundary: end-of-buffer, space, tab, or newline.
-            var right_ok = 0;
-            var ri = i + nlen;
-            if (ri >= n) { right_ok = 1; }
-            else {
-                var rb = load8(buf + ri);
-                if (rb == 32) { right_ok = 1; }
-                if (rb == 9)  { right_ok = 1; }
-                if (rb == 10) { right_ok = 1; }
-            }
-            if (left_ok == 1 && right_ok == 1) { return 1; }
-        }
-        i = i + 1;
-    }
-    return 0;
-}
 
 fn kybernet_harness_requested() {
     return _cmdline_has("kybernet.harness=1", 18);
@@ -1088,11 +1056,32 @@ fn kybernet_run() {
     # after a failed *boot stage* is deliberate — that is a availability
     # decision about ordinary services, not a trust decision about the
     # rootfs.
+    # On an EDGE board, require authentication for the recovery shell.
+    #
+    # Every edge refusal below funnels into drop_to_emergency(), and
+    # g_emerg_require_auth defaults to 0 — so before 1.5.7 a pulled TPM, a
+    # missing veritysetup, or a corrupted rootfs handed an UNAUTHENTICATED
+    # ROOT SHELL on the console to whoever caused it. On a device whose
+    # whole point is verified boot, that inverts the trust model completely.
+    #
+    # With no password hash configured there is nothing to authenticate
+    # against, and verify_emergency_auth fails closed — which would loop an
+    # operator through a shell they can never enter. So in that case skip
+    # the shell entirely and go straight to poweroff: refusing to boot is
+    # the honest outcome, and it is what the operator asked for by setting
+    # a hard prerequisite. 1.5.7.
     var edge_ok = edge_boot_run(g_config);
     if (edge_ok == 0) {
         kmsg("phase 6c: FATAL edge-boot prerequisite missing");
         klog("FATAL: edge-boot prerequisite missing — emergency shell");
-        drop_to_emergency();
+        if (g_emerg_hash != 0) {
+            g_emerg_require_auth = 1;
+            klog("edge refusal: emergency shell requires authentication");
+            drop_to_emergency();
+        } else {
+            klog("edge refusal: no emergency_password_hash configured — NOT opening a root shell");
+            kmsg("kybernet: edge refusal, no emergency auth configured — shell suppressed");
+        }
         klog("FATAL: refusing to continue boot without edge prerequisites");
         kmsg("phase 6c: powering off — edge prerequisites unmet");
         do_shutdown(SHUTDOWN_POWEROFF);

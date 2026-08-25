@@ -6,7 +6,7 @@
 
 - **Type**: Cyrius binary (PID 1 init)
 - **License**: GPL-3.0-only
-- **Version**: 1.5.6
+- **Version**: 1.5.7
 - **Language**: Cyrius 6.5.35 (the whole AGNOS pack front — kybernet/argonaut/libro/agnostik — pins 6.5.35; via `~/.cyrius/bin/cyrius`, `cyriusly use 6.5.35`)
 - **Tools**: `owl` to read .cyr files, `cyim` to write/edit .cyr files
 
@@ -21,7 +21,7 @@ The helmsman that steers the Argo. Manages system boot, essential mounts, signal
 ```sh
 cyrius deps                                  # Resolve deps from cyrius.cyml into lib/
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet   # Build (DCE recommended)
-cyrius test src/test.cyr                     # Run 440 tests
+cyrius test src/test.cyr                     # Run 477 tests
 cyrius bench src/bench.cyr                   # Run benchmarks
 bash scripts/bench-history.sh                # Record bench history + ≥15% regression gate (MANDATORY on every release)
 cyrius build --aarch64 src/main.cyr build/kybernet-aarch64   # Cross-build aarch64
@@ -37,10 +37,11 @@ kybernet/
 ├── VERSION, CLAUDE.md, README.md, CHANGELOG.md, LICENSE
 ├── src/
 │   ├── main.cyr           # Globals + boot sequence + event loop + harness gate
-│   ├── test.cyr           # Integration tests (440 assertions)
+│   ├── test.cyr           # Integration tests (477 assertions)
 │   ├── bench.cyr          # Microbenchmarks
 │   └── lib/
 │       ├── log.cyr        # klog / klog2 / kmsg / slog (factored out at 1.2.0)
+│       ├── cmdline.cyr    # /proc/cmdline token scan (factored out at 1.5.7)
 │       ├── console.cyr    # Stdio redirect (fds 0/1/2)
 │       ├── signals.cyr    # Signal blocking + signalfd
 │       ├── reaper.cyr     # Zombie reaping
@@ -92,7 +93,7 @@ Do **not** add a `path = "../<dep>"` alongside `git`/`tag`. When `path` resolves
 - **agnostik 1.5.1** — `dist/agnostik.cyr` (full bundle). NOTE its error kinds are namespaced `STIK_ERR_*` — do **not** use bare `ERR_*` names (they collide with sigil's/sakshi's enums). 1.4.0 added a `*_parse()` inverse for all 31 enums that had `*_name()`; they return `Err(STIK_ERR_INVALID_ARGUMENT)` on an unrecognised string rather than defaulting to a sentinel. ⚠ **1.5.0 corrected `enum LinuxCapability`** — it omitted `CAP_MAC_OVERRIDE`/`CAP_MAC_ADMIN`, shifting everything above 31 by two — and added `capability_name`/`capability_parse`. 1.5.1 added `cglim_set_memory_high`/`cglim_set_cpu_max`/`cglim_set_cpu_weight`, the three `cgroup_limits` fields that had accessors but no setter.
 - **libro 2.8.12** — `dist/libro.cyr` (full bundle). Pulls a thin sigil surface itself. ⚠ 2.8.11/2.8.12 changed the audit-chain **on-disk preimage**: chains written by libro ≤ 2.8.10 will not verify. Only affects `config.audit_persist` deployments (default off) — kybernet makes zero direct `audit_*` calls and imports argonaut's audit modules only to close the compile-time symbol graph.
 - **patra** — no longer an explicit dep. Comes from the stdlib fold (1.13.10) via `[deps].stdlib`; libro pulls it transitively too. kybernet calls no `patra_*` symbol directly.
-- **argonaut 1.13.1** — selective imports (no dist bundle shipped); **13-module** import list. ⚠ **`src/syscall_compat.cyr` must be FIRST and is not optional** — 1.13.1 replaced argonaut's hardcoded x86_64 `syscall(N)` literals with `#ifdef`-gated `ag_sys_*` wrappers living there, and `types.cyr` / `health.cyr` / `notify.cyr` (all imported here) call them. Omit it and the build warns `undefined function 'ag_sys_clock_gettime'` — a runtime SIGILL by standing rule 7, not noise. (`src/security.cyr` was added at kybernet 1.5.4 for `verify_emergency_auth`/`password_hash`.) 1.13.1 fixed the aarch64 syscall numbers (`syscall(112)` for setsid is 157 on aarch64, so no forked service got its own session; `syscall(35)` for nanosleep is `unlinkat`). 1.13.0 added the `cgroup_limits` field on `ServiceDefinition` (+168) with `svc_def_cgroup_limits`/`svc_def_set_cgroup_limits`. 1.12.0 added `argonaut_set_extra_env()` — argonaut builds the child envp inside `fork_exec_service`, so without that seam kybernet could not publish `$NOTIFY_SOCKET` and no service could discover the notify socket at all. 1.9.0 added `argonaut_set_pre_exec_hook()` (the seam kybernet's `kyb_pre_exec` uses) plus `svc_def_seccomp`/`svc_def_landlock`/`svc_def_capabilities` accessors. 1.10.0 added the enum `*_parse` inverses kybernet's config parser uses, `init_service_defs`/`init_service_names`, the `svc_def_set_*` field setters, and `svc_hc_*` HealthCheck accessors — note the `svc_hc_` prefix: bare `hc_retries`/`hc_timeout`/`hc_interval` are agnostik's, for a DIFFERENT struct layout, and kybernet links both. 1.10.1 added `init_mark_step_skipped` (the third boot-step state), `init_service_ready`, `init_boot_sequence` and `config_set_boot_mode`. ⚠ **1.11.0 corrected `enum LinuxCapability` to kernel numbers** (it was a 13-entry arbitrary order where `CAP_SYS_ADMIN` was 1) and added `capability_parse`. All additive and layout-neutral. ⚠ 1.8.6 changed `audit_log_verify_inclusion`/`audit_log_verify_consistency` to take the trusted root explicitly — kybernet calls neither, and cyrius 6.5.1 makes a wrong-arity call a hard compile error, so a stale call site cannot survive the build. kybernet imports argonaut source modules (not its vendored `lib/`):
+- **argonaut 1.13.2** — selective imports (no dist bundle shipped); **13-module** import list. ⚠ **`src/syscall_compat.cyr` must be FIRST and is not optional** — 1.13.1 replaced argonaut's hardcoded x86_64 `syscall(N)` literals with `#ifdef`-gated `ag_sys_*` wrappers living there, and `types.cyr` / `health.cyr` / `notify.cyr` (all imported here) call them. Omit it and the build warns `undefined function 'ag_sys_clock_gettime'` — a runtime SIGILL by standing rule 7, not noise. (`src/security.cyr` was added at kybernet 1.5.4 for `verify_emergency_auth`/`password_hash`.) 1.13.2 fixed `run_safe_cmd`: it passed `SafeCommand`'s BARE binary name to the stdlib's `exec_vec_str`, and **`execve(2)` does not search `$PATH`** — so every `mount`/`veritysetup`/`cryptsetup` exec died 127 and argonaut's whole edge-boot path was inert. It also stopped delegating to `exec_vec_str` entirely: that function waits UNBOUNDED and **fails OPEN** (discards `waitpid`'s return, reads a STATIC `var stbuf[4]`), so a wait that does not land reports the previous command's exit code — or 0, i.e. success. `run_safe_cmd_timeout` is the bounded, status-checked replacement kybernet's edge verify uses. 1.13.1 fixed the aarch64 syscall numbers (`syscall(112)` for setsid is 157 on aarch64, so no forked service got its own session; `syscall(35)` for nanosleep is `unlinkat`). 1.13.0 added the `cgroup_limits` field on `ServiceDefinition` (+168) with `svc_def_cgroup_limits`/`svc_def_set_cgroup_limits`. 1.12.0 added `argonaut_set_extra_env()` — argonaut builds the child envp inside `fork_exec_service`, so without that seam kybernet could not publish `$NOTIFY_SOCKET` and no service could discover the notify socket at all. 1.9.0 added `argonaut_set_pre_exec_hook()` (the seam kybernet's `kyb_pre_exec` uses) plus `svc_def_seccomp`/`svc_def_landlock`/`svc_def_capabilities` accessors. 1.10.0 added the enum `*_parse` inverses kybernet's config parser uses, `init_service_defs`/`init_service_names`, the `svc_def_set_*` field setters, and `svc_hc_*` HealthCheck accessors — note the `svc_hc_` prefix: bare `hc_retries`/`hc_timeout`/`hc_interval` are agnostik's, for a DIFFERENT struct layout, and kybernet links both. 1.10.1 added `init_mark_step_skipped` (the third boot-step state), `init_service_ready`, `init_boot_sequence` and `config_set_boot_mode`. ⚠ **1.11.0 corrected `enum LinuxCapability` to kernel numbers** (it was a 13-entry arbitrary order where `CAP_SYS_ADMIN` was 1) and added `capability_parse`. All additive and layout-neutral. ⚠ 1.8.6 changed `audit_log_verify_inclusion`/`audit_log_verify_consistency` to take the trusted root explicitly — kybernet calls neither, and cyrius 6.5.1 makes a wrong-arity call a hard compile error, so a stale call site cannot survive the build. kybernet imports argonaut source modules (not its vendored `lib/`):
   - `src/syscall_compat.cyr` (FIRST) + `src/types.cyr` + `src/boot.cyr` + `src/services.cyr`
   - `src/process_mgmt.cyr` + `src/resolver.cyr` + `src/health.cyr` + `src/notify.cyr`
   - `src/tmpfiles.cyr`
@@ -103,7 +104,7 @@ Do **not** add a `path = "../<dep>"` alongside `git`/`tag`. When `path` resolves
 
 1. Make changes to `src/main.cyr` or `src/lib/*.cyr`
 2. Build: `CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet`
-3. Test: `cyrius test src/test.cyr` (440 tests must pass)
+3. Test: `cyrius test src/test.cyr` (477 tests must pass)
 4. Cross-build: `cyrius build --aarch64 src/main.cyr build/kybernet-aarch64` (verify both arches)
 5. Harness (when KVM available): `bash qemu/boot-test.sh` (asserts marker set + budget)
 5b. **On a version bump: `bash scripts/bench-history.sh`** — records per-benchmark ns/op to `benches/history.csv` and exits non-zero on a ≥15% regression vs the previous run. Review and explain (or fix) any flagged delta before cutting.
@@ -136,7 +137,13 @@ Apply on every change touching src/:
 
 16. **The service is placed in its cgroup by the CHILD, in `kyb_pre_exec`, and placement is step 0.** argonaut owns fork+exec, so a parent-side move is unavoidably late: for a `simple` service with a ready_check it lands after the whole readiness poll, and for a `oneshot` it never lands at all (argonaut waits and returns 0, so there is no surviving pid). Worse than late — cgroup v2 charges memory on **first touch and does not migrate charges on move**, so pages faulted in before the move stay charged to the root cgroup. The child writes the literal `"0"` to `cgroup.procs` (the kernel's "move the writer" form; no getpid, no formatting). It must run **before** no_new_privs/capabilities/Landlock/seccomp — each of those can remove the ability to write cgroupfs. The parent creates the cgroup and writes its limits *before* `init_start_service`.
 
-17. **A release gate that stops before the event loop does not test the event loop.** `kybernet.harness=1` shuts down at phase 9; `kybernet.harness=loop` runs the real reactor for 5 s and asserts a bounded wakeup count (ceiling 500, observed 21). Keep it green and keep it in CI — it is the only gate that executes a reactor iteration, and it is verified to FAIL on the unfixed 1.4.1 shape.
+17. **⚠ NEVER exec anything security-relevant through the stdlib's `exec_vec` / `exec_vec_str`.** Both do an unbounded `sys_waitpid(pid, &stbuf, 0)` — uninterruptible under PID 1's blocked mask, so a stalled child is a dead board — and both **discard waitpid's return value** before reading a `var stbuf[4]` that is **STATIC storage in cyrius, not stack** (verified on 6.5.35: same address across calls, contents persist). A wait that does not land therefore decodes status 0 as `WIFEXITED` / `WEXITSTATUS` 0 = **SUCCESS**. On `veritysetup verify` that is a verification which never ran, reported as verified. Use argonaut 1.13.2's `run_safe_cmd_timeout(cmd, ms)`: WNOHANG deadline poll, `ret > 0` before any status read, `ret < 0` → failure, SIGKILL + reap on timeout, `reset_child_signal_mask()` in the child, real PATH in envp. It also resolves a bare binary name across `/usr/sbin`, `/sbin`, `/usr/bin`, `/bin` — **`execve` does not search `$PATH`**, so a bare name is ENOENT → 127. 1.5.7.
+
+18. **Edge boot verifies with `veritysetup verify`, NOT `veritysetup open`.** `verify` walks the hash tree in pure userspace — no device-mapper, no kernel module, no `/dev/mapper` node — so it answers "does this image match the pinned root hash" on any kernel, and is testable in an initramfs where dm is a module nothing can load. `open` (which argonaut's `verify_rootfs_integrity` builds) needs a real dm stack and is hardware work. Do **not** re-key a refusal to `_eb_dmverity_supported`: that probe answers whether the kernel can instantiate a dm target, which `verify` does not need, and keying on it failed boards that verify perfectly well. Refuse on the verification RESULT.
+
+19. **An absent `edge` config block means DETECTION-ONLY.** Before 1.5.7 kybernet parsed no edge config at all, so `config_edge()` always returned argonaut's `edge_config_default()` — `readonly_rootfs`/`luks_enabled`/`tpm_attestation` all 1 — making `"boot_mode": "edge"` an un-overridable demand whose refusal path powers the board off. Refusing to boot is a policy an operator opts into, never one they inherit from a struct default they never saw. Validate every edge field at LOAD time (device paths, 64-hex hashes, PCR indices 0-23, all-zero baselines) so a typo is a readable config error rather than a phase-6c poweroff.
+
+20. **A release gate that stops before the event loop does not test the event loop.** `kybernet.harness=1` shuts down at phase 9; `kybernet.harness=loop` runs the real reactor for 5 s and asserts a bounded wakeup count (ceiling 500, observed 21). Keep it green and keep it in CI — it is the only gate that executes a reactor iteration, and it is verified to FAIL on the unfixed 1.4.1 shape.
 
 
 ## Release gates
@@ -147,7 +154,7 @@ Every version bump runs all of these, in this order, and they must all be green 
 rm -rf lib && cyrius deps && cyrius deps --verify   # expect: N verified, 0 failed
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet
 cyrius build --aarch64 src/main.cyr build/kybernet-aarch64
-cyrius test src/test.cyr                            # 440 tests, 0 failed
+cyrius test src/test.cyr                            # 477 tests, 0 failed
 bash scripts/bench-history.sh                       # ≥15% regression gate
 bash qemu/boot-test.sh                              # needs KVM
 ```
@@ -163,4 +170,4 @@ Plus a **sibling-free reproduction** — the only gate that catches a tag which 
 - Do not add C, Rust, or assembly files — everything is Cyrius
 - Do not reference `../cyrius/` repo — use installed toolchain at `~/.cyrius/`
 - Do not bump a dep tag to a value > the highest existing git tag (CI clones from `git + tag`; an unreleased VERSION-file value fails resolution — see 1.1.0 CHANGELOG note)
-- Test after every change (440 tests + harness when KVM available)
+- Test after every change (477 tests + harness when KVM available)

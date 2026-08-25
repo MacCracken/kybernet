@@ -5,6 +5,7 @@
 # thread_local explicit include — see src/main.cyr for rationale (6.2.x no
 # longer auto-includes the stdlib-pinned module into sigil's dep chain).
 include "lib/thread_local.cyr"
+include "src/lib/cmdline.cyr"
 include "src/lib/log.cyr"
 include "src/lib/console.cyr"
 include "src/lib/signals.cyr"
@@ -1359,6 +1360,128 @@ fn test_edge_boot_pcr_parser() {
     return 0;
 }
 
+# Edge policy config (1.5.7).
+fn test_edge_config_parse() {
+    println("--- edge config parse (1.5.7) ---");
+    # EdgeBootConfig is 5 i64 fields; allocate it directly rather than
+    # calling argonaut's default, so the pre-flip values are explicit below.
+    var ec = alloc(48);
+
+    # No `edge` block -> DETECTION ONLY. This is the 1.5.7 default flip and
+    # the whole point of the change: before it, an absent block meant
+    # argonaut's edge_config_default(), i.e. readonly_rootfs=1,
+    # luks_enabled=1, tpm_attestation=1 — an un-overridable demand whose
+    # refusal path powers the machine off.
+    store64(ec, 1); store64(ec + 8, 1); store64(ec + 16, 1);
+    var r0 = json_v_parse(_doc3("{\"boot_mode\":\"edge\"}", "", ""));
+    assert_eq(edge_config_from_json(r0, ec), 1, "edge: no block is valid");
+    assert_eq(load64(ec), 0, "edge: absent block -> readonly_rootfs OFF");
+    assert_eq(load64(ec + 8), 0, "edge: absent block -> luks_enabled OFF");
+    assert_eq(load64(ec + 16), 0, "edge: absent block -> tpm_attestation OFF");
+
+    # A full block round-trips.
+    var hx = "aabbccddeeff00112233445566778899aabbccddeeff001122334455667788ff";
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"edge\":{\"readonly_rootfs\":true,\"tpm_attestation\":true,");
+    str_builder_add_cstr(sb, "\"max_boot_ms\":5000,\"pcr_bindings\":\"7+14\",");
+    str_builder_add_cstr(sb, "\"root_device\":\"/dev/vda\",\"hash_device\":\"/dev/vdb\",");
+    str_builder_add_cstr(sb, "\"root_hash\":\"");
+    str_builder_add_cstr(sb, hx);
+    str_builder_add_cstr(sb, "\"}}");
+    var ec2 = alloc(48);
+    assert_eq(edge_config_from_json(json_v_parse(str_builder_build(sb)), ec2), 1,
+      "edge: full block parses");
+    assert_eq(load64(ec2), 1, "edge: readonly_rootfs parsed");
+    assert_eq(load64(ec2 + 16), 1, "edge: tpm_attestation parsed");
+    assert_eq(load64(ec2 + 24), 5000, "edge: max_boot_ms parsed");
+    assert(edge_root_device() != 0, "edge: root_device stored");
+    assert(str_eq(edge_root_device(), str_from("/dev/vda")) == 1, "edge: root_device value");
+    assert(str_eq(edge_root_hash(), str_from(hx)) == 1, "edge: root_hash value");
+    return 0;
+}
+
+fn test_edge_config_rejects() {
+    println("--- edge config rejection (1.5.7) ---");
+    var ec = alloc(48);
+
+    # Every one of these must be caught at LOAD time with a readable
+    # reason, never become a phase-6c poweroff.
+    assert_eq(edge_config_from_json(json_v_parse(
+          _doc3("{\"edge\":7}", "", "")), ec), 0, "edge: non-object block rejected");
+
+    assert_eq(edge_config_from_json(json_v_parse(
+          _doc3("{\"edge\":{\"root_device\":\"/etc/passwd\"}}", "", "")), ec), 0,
+      "edge: device path outside /dev rejected");
+
+    assert_eq(edge_config_from_json(json_v_parse(
+          _doc3("{\"edge\":{\"root_device\":\"/dev/../etc/x\"}}", "", "")), ec), 0,
+      "edge: traversal in device path rejected");
+
+    # TPM 2.0 has PCRs 0-23. An out-of-range index reads nothing, and on an
+    # attestation path "found nothing wrong" must not read as a pass.
+    assert_eq(edge_config_from_json(json_v_parse(
+          _doc3("{\"edge\":{\"pcr_bindings\":\"7+99\"}}", "", "")), ec), 0,
+      "edge: PCR index above 23 rejected");
+    assert_eq(edge_config_from_json(json_v_parse(
+          _doc3("{\"edge\":{\"pcr_bindings\":\"0+23\"}}", "", "")), ec), 1,
+      "edge: PCR boundary indices 0 and 23 accepted");
+
+    # A short/!hex root hash would be handed to veritysetup verbatim.
+    assert_eq(edge_config_from_json(json_v_parse(
+          _doc3("{\"edge\":{\"root_hash\":\"abc\"}}", "", "")), ec), 0,
+      "edge: short root_hash rejected");
+    assert_eq(edge_config_from_json(json_v_parse(
+          _doc3("{\"edge\":{\"root_hash\":\"zz11223344556677889900112233445566778899001122334455667788990011\"}}", "", "")), ec), 0,
+      "edge: non-hex root_hash rejected");
+
+    # dm-verity needs all three or none — a half-specified triple would
+    # silently degrade to "no verification" on a box that asked for it.
+    assert_eq(edge_config_from_json(json_v_parse(
+          _doc3("{\"edge\":{\"root_device\":\"/dev/vda\",\"hash_device\":\"/dev/vdb\"}}", "", "")), ec), 0,
+      "edge: root_device+hash_device without root_hash rejected");
+    return 0;
+}
+
+fn test_edge_validators() {
+    println("--- edge validators (1.5.7) ---");
+    assert_eq(edge_device_path_ok(str_from("/dev/vda")), 1, "dev: plain ok");
+    assert_eq(edge_device_path_ok(str_from("/dev/mapper/root_1")), 1, "dev: nested ok");
+    assert_eq(edge_device_path_ok(str_from("/etc/passwd")), 0, "dev: outside /dev");
+    assert_eq(edge_device_path_ok(str_from("/dev/../etc")), 0, "dev: traversal");
+    assert_eq(edge_device_path_ok(str_from("/dev/a b")), 0, "dev: space");
+    assert_eq(edge_device_path_ok(str_from("/dev/x;y")), 0, "dev: semicolon");
+    assert_eq(edge_device_path_ok(str_from("")), 0, "dev: empty");
+    assert_eq(edge_device_path_ok(0), 0, "dev: null");
+
+    var good = "aabbccddeeff00112233445566778899aabbccddeeff001122334455667788ff";
+    assert_eq(edge_is_hex64_str(str_from(good)), 1, "hex64: valid");
+    assert_eq(edge_is_hex64_str(str_from("ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789")), 1,
+      "hex64: uppercase valid");
+    assert_eq(edge_is_hex64_str(str_from("abc")), 0, "hex64: too short");
+    assert_eq(edge_is_hex64_str(0), 0, "hex64: null");
+
+    # sigil's tpm_read_pcr ZERO-FILLS any PCR it could not parse out of
+    # tpm2_pcrread's output, so an all-zero digest means "unread", never
+    # "read as zero". An all-zero baseline would match it — attestation
+    # that can never fail.
+    var z = "0000000000000000000000000000000000000000000000000000000000000000";
+    assert_eq(edge_is_all_zero_hex(str_from(z)), 1, "zero: all-zero detected");
+    assert_eq(edge_is_all_zero_hex(str_from(good)), 0, "zero: real digest not all-zero");
+    assert_eq(edge_is_all_zero_hex(str_from("0000000000000000000000000000000000000000000000000000000000000001")), 0,
+      "zero: one non-zero nibble is enough");
+    assert_eq(edge_is_all_zero_hex(0), 0, "zero: null");
+    assert_eq(edge_is_all_zero_hex(str_from("")), 0, "zero: empty is not all-zero");
+
+    var ecz = alloc(48);
+    var sbz = str_builder_new();
+    str_builder_add_cstr(sbz, "{\"edge\":{\"expected_pcrs\":[\"");
+    str_builder_add_cstr(sbz, z);
+    str_builder_add_cstr(sbz, "\"]}}");
+    assert_eq(edge_config_from_json(json_v_parse(str_builder_build(sbz)), ecz), 0,
+      "zero: all-zero PCR baseline rejected at config load");
+    return 0;
+}
+
 fn test_edge_boot_gating() {
     println("--- edge boot gating ---");
     # 1.2.0 — verify the gate logic for the THREE deterministic skip
@@ -1677,6 +1800,9 @@ fn main() {
     test_cgroup_extended();
     test_cgroup_path_cache();
     test_edge_boot_pcr_parser();
+    test_edge_config_parse();
+    test_edge_config_rejects();
+    test_edge_validators();
     test_edge_boot_gating();
     test_notify_edge_cases();
     test_seccomp_agnostik_bridge();

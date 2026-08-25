@@ -384,9 +384,115 @@ if [ $fail -eq 0 ]; then
     rm -f "$LOOP_LOG"
 fi
 
+# ============================================================
+# Edge-boot gate (1.5.7)
+#
+# Runs against a SEPARATE initramfs (initramfs-edge.cpio.gz) staged by
+# build-initramfs.sh, so every gate above stays byte-for-byte unchanged.
+# SKIPS cleanly when the fixture is absent — it needs veritysetup on the
+# build host, and a missing tool must never read as a pass.
+#
+# WHAT THIS PROVES: kybernet verifies a real 4 MiB image against a real
+# dm-verity root hash, in a real PID-1 boot, and refuses when it does not
+# match. `veritysetup verify` walks the hash tree in PURE USERSPACE, which
+# is why this works in an initramfs where device-mapper is a module nothing
+# can load — and is exactly why kybernet verifies with `verify` rather than
+# `open`.
+#
+# WHAT IT DOES NOT PROVE: `veritysetup open`, the read-only mount of the
+# verified target, LUKS unlock, and PCR baseline comparison. Those need a
+# real device-mapper stack and a real TPM. They are hardware work
+# (roadmap v1.2.2) and are NOT covered here — do not let this gate's green
+# be read as covering them.
+EDGE_INITRD="${SCRIPT_DIR}/initramfs-edge.cpio.gz"
+EDGE_DIR="${SCRIPT_DIR}/edge"
+if [ ! -f "$EDGE_INITRD" ]; then
+    echo ""
+    echo "=== edge gate: SKIPPED (no fixture — veritysetup absent on build host) ==="
+else
+    echo ""
+    echo "=== edge-boot gate (dm-verity integrity verification) ==="
+
+    _edge_boot() {
+        # $1 = data image, $2 = extra cmdline
+        timeout "$TIMEOUT" qemu-system-x86_64 \
+            -kernel "$KERNEL" \
+            -initrd "$EDGE_INITRD" \
+            -append "console=ttyS0 panic=5 rdinit=/sbin/init kybernet.harness=1 loglevel=3 $2" \
+            -drive "file=$1,if=virtio,format=raw" \
+            -drive "file=${EDGE_DIR}/hash.img,if=virtio,format=raw" \
+            $ACCEL_FLAGS -m 512M -nographic -no-reboot \
+            -serial mon:stdio 2>&1 | cat -v | tr '\r' '\n'
+    }
+
+    # 1. GOOD image must verify.
+    GOOD_OUT=$(_edge_boot "${EDGE_DIR}/data.img" "")
+    if echo "$GOOD_OUT" | grep -aqF "dm-verity integrity VERIFIED"; then
+        echo "  OK: intact image verifies against its root hash"
+    else
+        echo "  FAIL: intact image did not verify"
+        echo "$GOOD_OUT" | grep -aiE 'edge boot|verit' | head -5
+        fail=1
+    fi
+
+    # 2. CORRUPTED image must be REFUSED. This is the assertion that
+    #    matters: a verified-boot path that cannot say no is decoration.
+    CORRUPT_IMG="${EDGE_DIR}/data-corrupt.img"
+    cp "${EDGE_DIR}/data.img" "$CORRUPT_IMG"
+    printf 'CORRUPTED' | dd of="$CORRUPT_IMG" bs=1 seek=2000 conv=notrunc status=none
+    BAD_OUT=$(_edge_boot "$CORRUPT_IMG" "")
+    if echo "$BAD_OUT" | grep -aqF "dm-verity verification FAILED"; then
+        echo "  OK: corrupted image fails verification"
+    else
+        echo "  FAIL: corrupted image was not detected"
+        echo "$BAD_OUT" | grep -aiE 'edge boot|verit' | head -5
+        fail=1
+    fi
+    if echo "$BAD_OUT" | grep -aqF "refusing to continue boot without edge prerequisites"; then
+        echo "  OK: failed verification refuses the boot"
+    else
+        echo "  FAIL: failed verification did not refuse the boot"
+        fail=1
+    fi
+
+    # 3. The escape hatches. An operator locked out by a hardware change
+    #    cannot edit a config file on a rootfs that is itself what failed
+    #    to verify, so these are the only way back in — and an escape hatch
+    #    that has never been executed is not an escape hatch.
+    PERM_OUT=$(_edge_boot "$CORRUPT_IMG" "kybernet.edge=permissive")
+    # ASCII-only needle: these logs are rendered through `cat -v`, which
+    # escapes the em-dash in the source string into M-BM- byte sequences.
+    if echo "$PERM_OUT" | grep -aqF "continuing despite the above"; then
+        echo "  OK: kybernet.edge=permissive continues past a failed verification"
+    else
+        echo "  FAIL: permissive mode did not suppress the refusal"
+        fail=1
+    fi
+    # `off` on a board that PINNED a root_hash must NOT silently skip the
+    # check — /proc/cmdline is only as trustworthy as the bootloader, which
+    # is the surface verified boot exists to protect. It downgrades to
+    # permissive: the board still boots, but the verification still runs and
+    # its result still reaches dmesg. The audit trail is the point.
+    OFF_OUT=$(_edge_boot "$CORRUPT_IMG" "kybernet.edge=off")
+    if echo "$OFF_OUT" | grep -aqF "DOWNGRADED to permissive"; then
+        echo "  OK: kybernet.edge=off downgrades on a root_hash-pinned board"
+    else
+        echo "  FAIL: kybernet.edge=off was honoured as a silent total bypass"
+        fail=1
+    fi
+    if echo "$OFF_OUT" | grep -aqF "dm-verity verification FAILED"; then
+        echo "  OK: downgraded off still runs and reports the verification"
+    else
+        echo "  FAIL: downgraded off skipped the verification"
+        fail=1
+    fi
+
+    rm -f "$CORRUPT_IMG"
+fi
+
 if [ $fail -eq 0 ]; then
     echo ""
-    echo "=== HARNESS TEST: OK (all markers, within budget, reactor sleeps) ==="
+    echo "=== HARNESS TEST: OK (markers, budget, reactor, edge verification) ==="
     exit 0
 else
     echo ""

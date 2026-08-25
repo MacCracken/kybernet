@@ -235,6 +235,92 @@ sudo mknod "${INITRAMFS_DIR}/dev/ttyS0"   c 4 64 2>/dev/null || true
 sudo mknod "${INITRAMFS_DIR}/dev/kmsg"    c 1 11 2>/dev/null || true
 sudo chmod 666 "${INITRAMFS_DIR}/dev/console" "${INITRAMFS_DIR}/dev/null" "${INITRAMFS_DIR}/dev/ttyS0" "${INITRAMFS_DIR}/dev/kmsg" 2>/dev/null || true
 
+# ============================================================
+# Edge-boot fixture (1.5.7) — a second initramfs for the edge pass.
+#
+# Built ONLY when veritysetup is available, and its absence is a SKIP, never
+# a pass: boot-test.sh keys the edge pass on this file existing.
+#
+# Why a second image rather than a mode flag: edge boot only runs when
+# boot_mode == BOOT_EDGE, and the main harness config is `recovery`. Baking
+# a separate config keeps the 1.5.0-1.5.6 gates byte-for-byte unchanged.
+#
+# What this can and cannot prove. `veritysetup verify` walks the hash tree
+# in PURE USERSPACE — no device-mapper, no kernel module, no /dev/mapper —
+# so it runs in an initramfs where dm is a module nothing can load. That is
+# the whole reason kybernet verifies with `verify` rather than `open`.
+# It CANNOT prove `veritysetup open` or a LUKS unlock; those need a real dm
+# stack and belong on hardware (roadmap v1.2.2).
+#
+# Verified unprivileged on the host before this was written: format emits a
+# root hash, and verify returns 0 on a good pair, 1 on a wrong root hash,
+# and 2 on corrupted data.
+EDGE_DIR="${SCRIPT_DIR}/edge"
+if command -v veritysetup >/dev/null 2>&1; then
+    rm -rf "$EDGE_DIR"; mkdir -p "$EDGE_DIR"
+    dd if=/dev/urandom of="${EDGE_DIR}/data.img" bs=1M count=4 status=none
+    truncate -s 2M "${EDGE_DIR}/hash.img"
+    EDGE_ROOT_HASH=$(veritysetup format "${EDGE_DIR}/data.img" "${EDGE_DIR}/hash.img" 2>/dev/null \
+        | awk '/Root hash/{print $3}')
+
+    if [ -n "$EDGE_ROOT_HASH" ] && [ ${#EDGE_ROOT_HASH} -eq 64 ]; then
+        # Stage veritysetup and its whole shared-library closure. Same
+        # approach the busybox block above uses for a dynamically linked
+        # binary, just with more libraries.
+        EDGE_STAGE="${SCRIPT_DIR}/initramfs-edge"
+        rm -rf "$EDGE_STAGE"
+        cp -a "${INITRAMFS_DIR}" "$EDGE_STAGE"
+        mkdir -p "${EDGE_STAGE}/usr/bin" "${EDGE_STAGE}/usr/lib" "${EDGE_STAGE}/lib64"
+        VS=$(command -v veritysetup)
+        cp "$VS" "${EDGE_STAGE}/usr/bin/veritysetup"
+        for lib in $(ldd "$VS" 2>/dev/null | awk '{print $3}' | grep '^/'); do
+            cp -L "$lib" "${EDGE_STAGE}/usr/lib/" 2>/dev/null || true
+        done
+        LOADER=$(ldd "$VS" 2>/dev/null | awk '/ld-linux/{print $1}')
+        if [ -n "$LOADER" ] && [ -f "$LOADER" ]; then
+            mkdir -p "${EDGE_STAGE}$(dirname "$LOADER")"
+            cp -L "$LOADER" "${EDGE_STAGE}${LOADER}" 2>/dev/null || true
+        fi
+
+        # boot_mode edge + a real device-backed dm-verity triple. The images
+        # are attached as virtio disks by boot-test.sh; CONFIG_VIRTIO_BLK is
+        # builtin on the harness kernel, so /dev/vda and /dev/vdb appear
+        # with no modules, no udev and no losetup.
+        cat > "${EDGE_STAGE}/etc/kybernet/config.json" << EDGECFG
+{
+  "boot_mode": "edge",
+  "verify_boot": true,
+  "shutdown_timeout_ms": 400,
+  "edge": {
+    "readonly_rootfs": true,
+    "tpm_attestation": false,
+    "luks_enabled": false,
+    "max_boot_ms": 20000,
+    "root_device": "/dev/vda",
+    "hash_device": "/dev/vdb",
+    "root_hash": "${EDGE_ROOT_HASH}"
+  },
+  "services": []
+}
+EDGECFG
+        echo "$EDGE_ROOT_HASH" > "${EDGE_DIR}/root_hash.txt"
+
+        ( cd "$EDGE_STAGE"
+          if command -v bsdcpio >/dev/null 2>&1; then
+              find . | bsdcpio -o -H newc 2>/dev/null | gzip > "${SCRIPT_DIR}/initramfs-edge.cpio.gz"
+          else
+              find . | cpio -o -H newc 2>/dev/null | gzip > "${SCRIPT_DIR}/initramfs-edge.cpio.gz"
+          fi )
+        echo "  staged edge fixture (root_hash=${EDGE_ROOT_HASH:0:16}...)"
+    else
+        echo "  WARNING: veritysetup format produced no root hash — edge pass will SKIP"
+        rm -f "${SCRIPT_DIR}/initramfs-edge.cpio.gz"
+    fi
+else
+    echo "  veritysetup not found — edge pass will SKIP (not a failure)"
+    rm -f "${SCRIPT_DIR}/initramfs-edge.cpio.gz"
+fi
+
 cd "${INITRAMFS_DIR}"
 # Prefer bsdcpio (libarchive) where present; fall back to GNU cpio so the
 # harness builds on stock CI runners that ship only `cpio`. Both emit the

@@ -7,31 +7,143 @@
 # dm-verity capability detection is a LOCAL probe (`_eb_dmverity_supported`,
 # below): sigil has no dm-verity distlib profile and pulling the full bundle
 # for one syscall would drag in 13 MB of unused crypto `.bss`. The deferred
-# dm-verity *verify* + LUKS unlock (1.2.1) will source sigil's storage surface
-# when their device-path wiring lands.
+# dm-verity *verify* is done at 1.5.7 by shelling out to `veritysetup verify`
+# rather than by pulling sigil's storage surface — see _eb_verity_verify.
 #
-# 1.2.0 SCOPE (this file):
+# WHAT THIS FILE DOES (as of 1.5.7):
 #   - Capability detection: tpm_detect (sigil), dm-verity (local probe)
-#   - PCR read per `pcr_bindings` spec ("7+14" → indices 7, 14)
-#   - Honor `tpm_attestation` / `readonly_rootfs` flags as hard
-#     prerequisites — boot aborts to emergency if required-but-missing.
-#     Every refusal reason goes to /dev/kmsg as well as klog (1.5.3): on a
-#     headless board dmesg is the only sink an operator still has.
-#   - max_boot_ms wall-budget: checked BEFORE each exec-backed step and
-#     enforced at the end when a hard prerequisite is set (1.5.3; was
-#     warn-only and measured after all the work it bounded)
-#   - LUKS unlock + dm-verity verify stubs that log "config land
-#     in 1.2.1" and skip. Real-device wiring needs argonaut to extend
-#     EdgeBootConfig with `data_device` / `hash_device` / `root_hash` /
-#     LUKS device paths — out of scope for this cut.
+#   - PCR read per `pcr_bindings` ("7+14" -> indices 7, 14), indices
+#     validated 0-23 at config load
+#   - **dm-verity INTEGRITY VERIFICATION** via `veritysetup verify`, which
+#     walks the hash tree in pure userspace — no device-mapper, no kernel
+#     module, no /dev/mapper node. Bounded through argonaut 1.13.2's
+#     run_safe_cmd_timeout (1.5.7)
+#   - Per-flag hard prerequisites (`tpm_attestation` / `readonly_rootfs`),
+#     each refusal reason to /dev/kmsg as well as klog (1.5.3): on a
+#     headless board dmesg is the only sink an operator still has
+#   - max_boot_ms wall-budget, checked BEFORE each exec-backed step and
+#     enforced at the end when a hard prerequisite is set (1.5.3)
+#   - `kybernet.edge=off` / `=permissive` cmdline escape hatches (1.5.7)
 #
-# 1.2.1 SCOPE (deferred):
-#   - argonaut EdgeBootConfig extension with device paths + expected
-#     PCR baseline vec
-#   - tpm_verify_measured_boot against the expected baseline
-#   - dmverity_verify with concrete data/hash devices
-#   - luks_open + luks_mount with TPM-unsealed or passphrase key
-#   - Real hardware boot validation (RPi4, NUC)
+# STILL DEFERRED, and deferred to REAL HARDWARE rather than to a version
+# number — the QEMU harness provably cannot cover these (dm is a module and
+# nothing in an initramfs can load one):
+#   - `veritysetup open` + read-only mount of the verified target. This is
+#     what catches corruption at READ time, as opposed to verifying the
+#     image once at boot. Needs a device-mapper stack this init cannot
+#     assume. argonaut's verify_rootfs_integrity already builds the command.
+#   - LUKS unlock. argonaut's unlock_luks builds a `--token-only` cryptsetup
+#     invocation, which needs a TPM-sealed LUKS2 token on real hardware.
+#   - PCR baseline comparison against `expected_pcrs`. The baselines are
+#     parsed and validated here, but comparing them needs a real TPM to
+#     produce a real measurement; comparing against a synthetic one proves
+#     nothing. See roadmap v1.2.2.
+#
+# ⚠ The header this replaces claimed all of the above "lands in 1.2.1" and
+# that it was blocked on argonaut extending EdgeBootConfig with device
+# paths. Both were false: 1.2.1 shipped long ago, and argonaut's
+# execute_edge_boot has always taken the device paths as PARAMETERS. The
+# real blockers were that argonaut's exec path could never succeed (bare
+# binary names against an execve that does not search PATH — fixed in
+# argonaut 1.13.2) and that a QEMU initramfs cannot load a dm module.
+
+# ================================================================
+# Edge policy source (1.5.7)
+#
+# Device paths and PCR baselines live here rather than on argonaut's
+# EdgeBootConfig. argonaut's execute_edge_boot takes them as PARAMETERS,
+# so the struct never needed extending — the roadmap's "blocked on an
+# argonaut EdgeBootConfig extension" claim, carried since 1.2.0, was simply
+# wrong. Same precedent as the emergency-shell credentials at 1.5.4.
+var _eb_root_device = 0;      # Str, 0 = unset
+var _eb_hash_device = 0;      # Str
+var _eb_root_hash = 0;        # Str, 64 hex chars
+var _eb_luks_device = 0;      # Str
+var _eb_expected_pcrs = 0;    # vec of Str (64-hex digests), 0 = none
+
+# Escape hatches, resolved once from /proc/cmdline at phase 6c.
+#   kybernet.edge=off         — skip the edge layer entirely
+#   kybernet.edge=permissive  — run every check, refuse for none of them
+# An operator locked out by a hardware change or a bad baseline has no
+# config file they can reach (the rootfs may be the thing that failed to
+# verify), so the recovery path has to be on the kernel cmdline. 1.5.7.
+var _eb_mode_off = 0;
+var _eb_mode_permissive = 0;
+
+fn edge_set_devices(root_dev, hash_dev, root_hash, luks_dev) {
+    _eb_root_device = root_dev;
+    _eb_hash_device = hash_dev;
+    _eb_root_hash = root_hash;
+    _eb_luks_device = luks_dev;
+    return 0;
+}
+
+fn edge_set_expected_pcrs(v) { _eb_expected_pcrs = v; return 0; }
+fn edge_root_device()   { return _eb_root_device; }
+fn edge_hash_device()   { return _eb_hash_device; }
+fn edge_root_hash()     { return _eb_root_hash; }
+fn edge_luks_device()   { return _eb_luks_device; }
+fn edge_expected_pcrs() { return _eb_expected_pcrs; }
+
+# A device path must be absolute, under /dev, traversal-free and drawn from
+# a conservative charset. Reimplemented locally rather than importing
+# argonaut's validate_device_path, for the same reason
+# _eb_dmverity_supported reimplements sigil's probe: it is ~20 lines against
+# a whole module whose entry point kybernet deliberately does not call.
+fn edge_device_path_ok(p) {
+    if (p == 0) { return 0; }
+    var len = str_len(p);
+    if (len < 6 || len > 128) { return 0; }
+    var d = str_data(p);
+    if (load8(d) != 47) { return 0; }
+    if (str_starts_with(p, "/dev/") == 0) { return 0; }
+    for (var i = 0; i < len; i = i + 1) {
+        var c = load8(d + i);
+        var ok = 0;
+        if (c >= 48 && c <= 57)  { ok = 1; }
+        if (c >= 65 && c <= 90)  { ok = 1; }
+        if (c >= 97 && c <= 122) { ok = 1; }
+        if (c == 47 || c == 45 || c == 95) { ok = 1; }
+        if (ok == 0) { return 0; }
+        # No "..", even though the charset above already excludes '.'.
+        # Kept explicit so relaxing the charset cannot silently reopen it.
+        if (c == 46) { return 0; }
+    }
+    return 1;
+}
+
+# 1 if every character is ASCII '0'. sigil's tpm_read_pcr ZERO-FILLS any
+# PCR it could not parse out of tpm2_pcrread's output, so an all-zero
+# expected baseline would match a PCR that was never actually read —
+# attestation that can never fail. Rejected at config load, and treated as
+# UNREADABLE rather than MATCH when it comes back from a live read.
+fn edge_is_all_zero_hex(h) {
+    if (h == 0) { return 0; }
+    var n = str_len(h);
+    if (n == 0) { return 0; }
+    var d = str_data(h);
+    for (var i = 0; i < n; i = i + 1) {
+        if (load8(d + i) != 48) { return 0; }
+    }
+    return 1;
+}
+
+# Exactly 64 hex characters. dm-verity root hashes and SHA-256 PCR digests
+# are both this shape.
+fn edge_is_hex64_str(h) {
+    if (h == 0) { return 0; }
+    if (str_len(h) != 64) { return 0; }
+    var d = str_data(h);
+    for (var i = 0; i < 64; i = i + 1) {
+        var c = load8(d + i);
+        var ok = 0;
+        if (c >= 48 && c <= 57)  { ok = 1; }
+        if (c >= 65 && c <= 70)  { ok = 1; }
+        if (c >= 97 && c <= 102) { ok = 1; }
+        if (ok == 0) { return 0; }
+    }
+    return 1;
+}
 
 # Status accessible after edge_boot_run completes — boot-phase logger
 # reads these to surface the detected platform shape.
@@ -39,6 +151,8 @@ var _eb_tpm_present = 0;
 var _eb_dmverity_supp = 0;
 var _eb_pcr_count = 0;
 var _eb_elapsed_ms = 0;
+var _eb_verity_verified = 0;
+var _eb_pcr_mismatches = 0;
 
 # Parse a `pcr_bindings` spec like "7+14" or "0,7,14" into a vec of
 # i64 indices. Accepts any non-digit separator (`+`, `,`, ` `, `:`)
@@ -72,15 +186,28 @@ fn _eb_parse_pcr_indices(spec) {
 # its raw src/dmverity.cyr can't be pulled cross-repo (unguarded internal
 # `include "src/error.cyr"`). This is a 1-syscall + optional-exec probe, so
 # reproducing it here is far cheaper than dragging in 13 MB of unused x509/RSA
-# `.bss`. When 1.2.1 wires real dm-verity *verify* (which needs sigil's
-# dmverity_open/verify with device paths), revisit sourcing a sigil dm-verity
-# profile then. Semantics preserved: probe sysfs first, veritysetup fallback.
+# `.bss`. 1.5.7 verifies integrity through `veritysetup verify` instead, so
+# a sigil dm-verity profile is still not needed; revisit only if
+# `veritysetup open` (which needs a real device-mapper stack) is ever wired.
+# Semantics preserved: probe sysfs first, veritysetup fallback.
 fn _eb_dmverity_supported() {
     if (sys_access("/sys/module/dm_verity", 0) == 0) { return 1; }
-    var args = vec_new();
-    vec_push(args, "/usr/sbin/veritysetup");
-    vec_push(args, "--version");
-    return exec_vec(args) == 0;
+    # 1.5.7: was `exec_vec(["/usr/sbin/veritysetup", "--version"]) == 0`,
+    # which had two defects. The path was hardcoded to /usr/sbin, so on a
+    # split-usr system — or anywhere veritysetup ships only in /usr/bin —
+    # the probe reported "unsupported" for a box that supports it. And
+    # `exec_vec` is the same stdlib family as exec_vec_str: an unbounded
+    # `sys_waitpid(pid, &stbuf, 0)` that discards its own return value and
+    # reads a STATIC status buffer, so a wait that does not land reports
+    # exit 0 — here, a false "dm-verity supported". Unbounded matters most:
+    # this runs at phase 6c in PID 1, where a stalled child is a dead board.
+    #
+    # run_safe_cmd_timeout (argonaut 1.13.2) resolves the binary across
+    # /usr/sbin, /sbin, /usr/bin, /bin and bounds the wait. 3 s is generous
+    # for `--version`.
+    var cmd = safe_cmd_new(str_from("veritysetup"));
+    safe_cmd_add_arg(cmd, str_from("--version"));
+    return run_safe_cmd_timeout(cmd, 3000) == 0;
 }
 
 # Has the wall-clock budget been spent?
@@ -103,6 +230,121 @@ fn _eb_over_budget(start_ms, max_ms) {
     return (monotonic_ms() - start_ms) > max_ms;
 }
 
+# dm-verity INTEGRITY VERIFICATION, without instantiating a dm target.
+#
+# `veritysetup verify <data> <hash> <root_hash>` walks the hash tree in pure
+# userspace and exits 0 only if every block hashes up to root_hash. It needs
+# no device-mapper, no kernel module and no /dev/mapper node — which is what
+# makes it usable here, and testable in an initramfs where dm is a module
+# that nothing can load. `veritysetup open` (which argonaut's
+# verify_rootfs_integrity builds) does need all of that, and is what stays
+# deferred to real hardware.
+#
+# This is the honest half of the 1.2.0 deferral: kybernet can now say "the
+# rootfs image matches the root hash the operator pinned", which is the
+# actual trust question. Mounting it read-only through dm-verity so that
+# LATER corruption is caught at read time is the other half, and needs a
+# device-mapper stack this init cannot assume.
+#
+# Bounded through argonaut 1.13.2's run_safe_cmd_timeout, NOT the stdlib's
+# exec_vec_str — the latter waits forever and fails OPEN (it discards
+# waitpid's return and reads a static status buffer, so a wait that does not
+# land reports success). On a verify path that would be a verification that
+# never ran, reported as verified.
+#
+# Returns: 0 verified, 1 not configured, 2 verification FAILED,
+#          3 tool missing or unrunnable.
+fn _eb_verity_verify(budget_ms) {
+    if (_eb_root_device == 0 || _eb_hash_device == 0 || _eb_root_hash == 0) {
+        return 1;
+    }
+    var cmd = safe_cmd_new(str_from("veritysetup"));
+    safe_cmd_add_arg(cmd, str_from("verify"));
+    safe_cmd_add_arg(cmd, _eb_root_device);
+    safe_cmd_add_arg(cmd, _eb_hash_device);
+    safe_cmd_add_arg(cmd, _eb_root_hash);
+
+    var rc = run_safe_cmd_timeout(cmd, budget_ms);
+    if (rc == 0) { return 0; }
+    # 127 is "binary not found" from _resolve_safe_binary; -1 is a spawn
+    # failure or a timeout we already killed. Neither is a verification
+    # verdict, and neither may be reported as one.
+    if (rc == 127 || rc < 0) { return 3; }
+    return 2;
+}
+
+# Compare the live PCR readings against the configured baselines.
+#
+# REPORT-ONLY, deliberately, and this is a policy decision rather than an
+# unfinished one. PCR 7 and 14 legitimately change on any firmware or
+# kernel update, so an enforcing comparison turns a routine signed upgrade
+# into a fleet-wide refusal to boot. Worse, the oracle here is
+# /usr/bin/tpm2_pcrread — a file living on the very rootfs under
+# verification, read through sigil's exec_capture, which discards the
+# child's wait status and zero-fills anything it could not parse. A control
+# that is defeated by replacing a file must not be able to permanently
+# brick a board. The hardware-rooted version of this is TPM *sealing*,
+# which fails soft. See roadmap v1.2.2.
+#
+# So: operators get fleet drift in dmesg, before it can cost them a boot.
+# Returns the number of MISMATCHES (0 = all matched or nothing to compare).
+fn _eb_compare_pcrs(values) {
+    if (_eb_expected_pcrs == 0) { return 0; }
+    var n = vec_len(_eb_expected_pcrs);
+    if (n == 0) { return 0; }
+    if (values == 0) { return 0; }
+
+    var have = vec_len(values);
+    var mismatches = 0;
+    for (var i = 0; i < n; i = i + 1) {
+        if (i >= have) {
+            klog("edge boot: PCR baseline configured for an index that was not read");
+            mismatches = mismatches + 1;
+        } else {
+            var got = tpm_pcr_value_value(vec_get(values, i));
+            var want = vec_get(_eb_expected_pcrs, i);
+            if (edge_is_all_zero_hex(got) == 1) {
+                # Never a match. sigil zero-fills a PCR it could not parse,
+                # so all-zero means "unread", not "read as zero".
+                klog("edge boot: PCR read back all-zero — UNREADABLE, not a match");
+                mismatches = mismatches + 1;
+            } elif (str_eq(got, want) == 0) {
+                klog("edge boot: PCR MISMATCH vs configured baseline");
+                kmsg("kybernet: edge boot: PCR mismatch vs baseline (report-only)");
+                mismatches = mismatches + 1;
+            }
+        }
+    }
+    if (mismatches == 0) {
+        klog("edge boot: all configured PCR baselines MATCH");
+    } else {
+        klog2("edge boot: PCR baselines not matching (report-only): ", _eb_u64(mismatches));
+    }
+    return mismatches;
+}
+
+# Small decimal formatter — klog2 takes cstr.
+fn _eb_u64(n) {
+    var b = alloc(24);
+    var l = fmt_int_buf(n, b);
+    store8(b + l, 0);
+    return b;
+}
+
+# Refuse the boot for `reason` — or, under kybernet.edge=permissive, log it
+# loudly and continue. Returns the value edge_boot_run should return, so
+# every refusal site is `return _eb_refuse(...)` and none can forget the
+# permissive check.
+fn _eb_refuse(klog_msg, kmsg_msg) {
+    klog(klog_msg);
+    kmsg(kmsg_msg);
+    if (_eb_mode_permissive == 1) {
+        klog("edge boot: PERMISSIVE — continuing despite the above");
+        return 1;
+    }
+    return 0;
+}
+
 # Run the edge-boot pre-flight. Returns 1 to continue boot, 0 to
 # abort (caller should drop_to_emergency). Caller is responsible for
 # the boot_mode gate — this is a no-op if the config doesn't request
@@ -118,6 +360,39 @@ fn edge_boot_run(config) {
     if (ec == 0) {
         klog("edge boot: no EdgeBootConfig — skipping");
         return 1;
+    }
+
+    # Cmdline escape hatches, resolved once. An operator locked out by a
+    # hardware change or a stale baseline cannot edit a config file on a
+    # rootfs that is itself what failed to verify, so the way back in has
+    # to be the kernel cmdline. 1.5.7.
+    _eb_mode_off = _cmdline_has("kybernet.edge=off", 17);
+    _eb_mode_permissive = _cmdline_has("kybernet.edge=permissive", 24);
+    if (_eb_mode_off == 1) {
+        # NARROWED at 1.5.7. /proc/cmdline is only as trustworthy as the
+        # bootloader — which is exactly the surface verified boot exists to
+        # protect — so a total, silent bypass is the wrong thing to ship.
+        # An operator who pinned a root_hash gets `off` DOWNGRADED to
+        # permissive: every check still runs and every result still reaches
+        # dmesg, it just does not refuse. The recovery property is kept
+        # (the board boots) without the audit trail disappearing.
+        #
+        # On a board with no root_hash configured there is nothing to
+        # bypass, so `off` is honoured as written.
+        if (_eb_root_hash != 0) {
+            klog("edge boot: kybernet.edge=off DOWNGRADED to permissive — root_hash is configured");
+            kmsg("kybernet: edge boot: cmdline off downgraded to permissive, checks still run");
+            _eb_mode_off = 0;
+            _eb_mode_permissive = 1;
+        } else {
+            klog("edge boot: DISABLED by kybernet.edge=off — skipping");
+            kmsg("kybernet: edge boot disabled by cmdline");
+            return 1;
+        }
+    }
+    if (_eb_mode_permissive == 1) {
+        klog("edge boot: PERMISSIVE (kybernet.edge=permissive) — checks run, refusals suppressed");
+        kmsg("kybernet: edge boot PERMISSIVE — refusals suppressed");
     }
 
     var start_ms = monotonic_ms();
@@ -143,9 +418,8 @@ fn edge_boot_run(config) {
             # line on this path was main.cyr's generic "phase 6c: FATAL
             # edge-boot prerequisite missing" — the operator got the fact of
             # a refusal but never the reason. 1.4.2 audit MEDIUM.
-            klog("FATAL: tpm_attestation required but TPM unavailable");
-            kmsg("edge-boot REFUSED: tpm_attestation required, no TPM present");
-            return 0;
+            return _eb_refuse("FATAL: tpm_attestation required but TPM unavailable",
+              "edge-boot REFUSED: tpm_attestation required, no TPM present");
         }
     }
 
@@ -153,28 +427,31 @@ fn edge_boot_run(config) {
     # Budget checkpoint BEFORE the probe: _eb_dmverity_supported may exec
     # veritysetup and block on it.
     if (_eb_over_budget(start_ms, max_ms) == 1) {
-        klog("FATAL: edge boot exceeded max_boot_ms before dm-verity probe");
-        kmsg("edge-boot REFUSED: max_boot_ms exceeded before dm-verity probe");
-        return 0;
+        return _eb_refuse("FATAL: edge boot exceeded max_boot_ms before dm-verity probe",
+          "edge-boot REFUSED: max_boot_ms exceeded before dm-verity probe");
     }
     _eb_dmverity_supp = _eb_dmverity_supported();
     if (_eb_dmverity_supp == 1) {
         klog("edge boot: dm-verity supported");
     } else {
-        klog("edge boot: dm-verity not supported");
-        if (readonly_req == 1) {
-            klog("FATAL: readonly_rootfs required but dm-verity unavailable");
-            kmsg("edge-boot REFUSED: readonly_rootfs required, dm-verity unsupported");
-            return 0;
-        }
+        # NOT a refusal any more (1.5.7). This probe answers "can the kernel
+        # instantiate a dm-verity target", which is what `veritysetup open`
+        # needs — and kybernet does not call open. It verifies with
+        # `veritysetup verify`, which walks the hash tree in pure userspace
+        # and works fine on a kernel with no dm at all. Refusing here failed
+        # boards that could verify perfectly well. The refusal now keys on
+        # the actual verification RESULT below, which is the thing that
+        # answers the trust question.
+        klog("edge boot: dm-verity target instantiation unavailable (verify does not need it)");
     }
 
-    # ---- PCR read (measurement; comparison vs baseline is 1.2.1) ----
+    # ---- PCR read (measurement only; see the header on baseline compare) ----
     if (_eb_tpm_present == 1 && tpm_req == 1) {
         var indices = _eb_parse_pcr_indices(pcr_spec);
         _eb_pcr_count = vec_len(indices);
         if (_eb_pcr_count > 0) {
-            klog2("edge boot: reading PCRs ", "(measurement only — baseline compare lands in 1.2.1)");
+            klog2("edge boot: reading PCRs ",
+              "(measurement only — baseline compare needs real hardware)");
             # sigil cannot report tool failure here, so check consumer-side.
             # tpm_read_pcr shells out to /usr/bin/tpm2_pcrread via
             # exec_capture, which returns the captured BYTE COUNT and
@@ -184,37 +461,79 @@ fn edge_boot_run(config) {
             # is an attestation "pass" derived from a tool that never ran.
             # Fail closed on a missing binary. 1.4.2 audit MEDIUM-2.
             if (sys_access("/usr/bin/tpm2_pcrread", 0) != 0) {
-                klog("FATAL: tpm_attestation required but /usr/bin/tpm2_pcrread missing");
-                kmsg("edge-boot REFUSED: /usr/bin/tpm2_pcrread missing");
-                return 0;
+                return _eb_refuse("FATAL: tpm_attestation required but /usr/bin/tpm2_pcrread missing",
+                  "edge-boot REFUSED: /usr/bin/tpm2_pcrread missing");
             }
             # Budget checkpoint BEFORE the exec — tpm_read_pcr shells out
             # to tpm2_pcrread and blocks on it with no timeout.
             if (_eb_over_budget(start_ms, max_ms) == 1) {
-                klog("FATAL: edge boot exceeded max_boot_ms before PCR read");
-                kmsg("edge-boot REFUSED: max_boot_ms exceeded before PCR read");
-                return 0;
+                return _eb_refuse("FATAL: edge boot exceeded max_boot_ms before PCR read",
+                  "edge-boot REFUSED: max_boot_ms exceeded before PCR read");
             }
             var pcr_res = tpm_read_pcr(TPM_SHA256, indices);
             if (is_err_result(pcr_res) == 1) {
-                klog("FATAL: tpm_read_pcr failed");
-                kmsg("edge-boot REFUSED: tpm_read_pcr failed");
-                return 0;
+                return _eb_refuse("FATAL: tpm_read_pcr failed",
+                  "edge-boot REFUSED: tpm_read_pcr failed");
             }
             klog("edge boot: PCR read complete");
+            _eb_pcr_mismatches = _eb_compare_pcrs(result_unwrap(pcr_res));
         } else {
             klog("edge boot: pcr_bindings empty — skipping PCR read");
         }
     }
 
-    # ---- LUKS unlock — deferred to 1.2.1 ----
+    # ---- LUKS unlock — deferred to real hardware ----
+    #
+    # argonaut's unlock_luks builds a `cryptsetup open --token-only` call,
+    # which needs a TPM-sealed LUKS2 token. There is nothing to unlock
+    # against in an initramfs, and a synthetic passphrase volume would
+    # exercise cryptsetup without exercising the thing that matters. The
+    # device path is parsed and validated so the config surface is stable.
     if (luks_req == 1) {
-        klog("edge boot: LUKS unlock — device-path config lands in 1.2.1; skipped");
+        if (_eb_luks_device != 0) {
+            klog2("edge boot: LUKS device configured, unlock deferred to hardware: ",
+              str_data(_eb_luks_device));
+        } else {
+            klog("edge boot: luks_enabled set but no luks_device configured");
+        }
     }
 
-    # ---- dm-verity verify — deferred to 1.2.1 ----
-    if (readonly_req == 1 && _eb_dmverity_supp == 1) {
-        klog("edge boot: dm-verity verify — device-path config lands in 1.2.1; skipped");
+    # ---- dm-verity integrity verification (1.5.7) ----
+    #
+    # Runs whenever devices are configured, independently of whether the
+    # kernel can instantiate a dm target — `veritysetup verify` is pure
+    # userspace. That is deliberate: a board whose dm-verity module is
+    # missing can still learn that its rootfs image matches the pinned root
+    # hash, and that is the more useful half of the answer.
+    if (_eb_root_device != 0) {
+        var vbudget = 10000;
+        if (max_ms > 0) {
+            vbudget = max_ms - (monotonic_ms() - start_ms);
+            if (vbudget < 500) { vbudget = 500; }
+        }
+        var vres = _eb_verity_verify(vbudget);
+        if (vres == 0) {
+            _eb_verity_verified = 1;
+            klog("edge boot: dm-verity integrity VERIFIED against configured root_hash");
+        } elif (vres == 2) {
+            _eb_verity_verified = 0;
+            if (readonly_req == 1) {
+                return _eb_refuse("FATAL: dm-verity verification FAILED — rootfs does not match root_hash",
+                  "edge-boot REFUSED: dm-verity verification failed");
+            }
+            klog("WARNING: dm-verity verification FAILED, but readonly_rootfs not required");
+        } else {
+            _eb_verity_verified = 0;
+            if (readonly_req == 1) {
+                return _eb_refuse("FATAL: dm-verity requested but veritysetup could not run",
+                  "edge-boot REFUSED: veritysetup missing or unrunnable");
+            }
+            klog("edge boot: veritysetup unavailable — integrity NOT verified");
+        }
+    } elif (readonly_req == 1) {
+        klog("edge boot: readonly_rootfs set but no verity device config");
+        klog("edge boot: integrity NOT verified");
+        kmsg("kybernet: edge boot: readonly_rootfs set without device config, integrity NOT verified");
     }
 
     # ---- Budget check ----
@@ -228,8 +547,8 @@ fn edge_boot_run(config) {
         # actually required; warn otherwise.
         klog("edge boot: exceeded max_boot_ms budget");
         if (tpm_req == 1 || readonly_req == 1) {
-            kmsg("edge-boot REFUSED: max_boot_ms budget exceeded");
-            return 0;
+            return _eb_refuse("FATAL: edge boot over max_boot_ms budget",
+              "edge-boot REFUSED: max_boot_ms budget exceeded");
         }
         klog("WARNING: over budget, but no hard prerequisite set — continuing");
     }
@@ -244,3 +563,5 @@ fn edge_boot_tpm_present()    { return _eb_tpm_present; }
 fn edge_boot_dmverity_supp()  { return _eb_dmverity_supp; }
 fn edge_boot_pcr_count()      { return _eb_pcr_count; }
 fn edge_boot_elapsed_ms()     { return _eb_elapsed_ms; }
+fn edge_boot_verity_ok()      { return _eb_verity_verified; }
+fn edge_boot_pcr_mismatches() { return _eb_pcr_mismatches; }

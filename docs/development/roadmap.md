@@ -319,17 +319,54 @@ gate runs used a `path` override, which drops the pin and which
 `deps --verify` cannot detect. Now 5 commit-pinned, resolved from the real
 remote tags with no override. See the manifest note in CLAUDE.md.
 
-### v1.5.7 — close the remaining edge-boot deferrals
+### v1.5.7 — edge boot actually verifies  ✅ SHIPPED
 
-Folds in the long-stalled v1.2.1 scope, which is still the honest state of
-`edge_boot.cyr`: it *detects* TPM and dm-verity but verifies neither. LUKS
-unlock, dm-verity verify and PCR-baseline comparison all log "lands in 1.2.1"
-and skip. Blocked on the same argonaut `EdgeBootConfig` extension listed under
-v1.2.1 above; now that argonaut is in scope for edits, that is unblocked.
+The premise of this item was wrong in both directions.
 
-- [ ] Everything under v1.2.1, re-dated
-- [ ] Re-state the deferrals in `edge_boot.cyr`'s header against real versions
-      rather than "1.2.1"
+**The blocker it named did not exist.** "Blocked on argonaut extending
+`EdgeBootConfig` with device paths", carried since 1.2.0 — but
+`execute_edge_boot(config, root_device, hash_device, root_hash,
+luks_device)` has always taken them as **parameters**. No argonaut struct
+change was needed, and the claim is deleted from the header.
+
+**The gap it did not name was a live foot-gun.** kybernet parsed no edge
+config at all, so `config_edge()` always returned argonaut's
+`edge_config_default()` — `readonly_rootfs=1, luks_enabled=1,
+tpm_attestation=1` — with `verify_boot=1`. `"boot_mode": "edge"` was an
+un-overridable demand for a TPM *and* dm-verity, and the refusal path drops
+to the emergency shell and then **powers the board off**.
+
+- [x] `edge` config block, validated entirely at load time (device paths,
+      64-hex root hash, PCR indices 0-23, all-zero baselines rejected).
+      A typo is a readable config error, never a phase-6c poweroff
+- [x] **Default flipped**: absent block = detection-only
+- [x] **dm-verity integrity verification** via `veritysetup verify` — pure
+      userspace, no device-mapper — bounded through argonaut 1.13.2's
+      `run_safe_cmd_timeout`
+- [x] PCR baseline comparison, **report-only** (see below)
+- [x] `kybernet.edge=permissive`, and `kybernet.edge=off` narrowed so it
+      downgrades rather than silently bypassing a pinned board
+- [x] An edge refusal no longer opens an **unauthenticated root shell**
+- [x] `kybernet.harness` edge pass: intact image verifies, corrupted image
+      is refused, both escape hatches exercised
+- [x] Header re-stated against reality — deferrals now name *hardware*,
+      not the long-shipped "1.2.1"
+
+**Two upstream defects found and fixed on the way (argonaut 1.13.2):**
+argonaut built every SafeCommand with a bare binary name and `execve` does
+not search `$PATH`, so its whole edge-boot exec path died 127 and could
+never have worked. And `exec_vec_str` waits unbounded and **fails open** —
+it discards `waitpid`'s return and reads a static status buffer, so a wait
+that does not land reports success. On `veritysetup verify` that is a
+verification which never ran, reported as verified.
+
+**Why PCR comparison is report-only, deliberately:** PCR 7/14 change on any
+firmware or kernel update, so enforcement turns a routine signed upgrade
+into a fleet-wide refusal. And the oracle is `/usr/bin/tpm2_pcrread` — a
+file on the very rootfs under verification, read through an `exec_capture`
+that discards the child's wait status and zero-fills what it cannot parse.
+A control defeated by replacing a file must not be able to brick a board.
+The hardware-rooted version is TPM *sealing*, which fails soft.
 
 ### v1.5.8 — harden the emergency-auth gate
 
@@ -338,6 +375,22 @@ v1.2.1 above; now that argonaut is in scope for edits, that is unblocked.
       digest readable for one release so existing configs are not bricked
 - [ ] Suppress console echo while reading the password (`ECHO` off via
       `TCSETS`), and restore it afterwards including on the failure path
+
+### v1.5.9 — edge boot on real hardware (was v1.2.2)
+
+Everything below needs a real device-mapper stack or a real TPM, and is
+**not** covered by the QEMU gate — measured, not assumed: the harness
+kernel has `CONFIG_BLK_DEV_DM=m`, no `CONFIG_DM_INIT`, and the initramfs
+busybox has no `insmod`. In-VM `veritysetup open` returns "Cannot
+initialize device-mapper". Putting a module loader inside PID 1 to make a
+test pass is scaffolding in the one process that must never crash.
+
+- [ ] `veritysetup open` + read-only mount of the verified target — catches
+      corruption at READ time, not just once at boot
+- [ ] LUKS unlock against a TPM-sealed LUKS2 token
+- [ ] PCR baseline **enforcement**, rooted in TPM sealing rather than in a
+      userspace tool that lives on the filesystem being verified
+- [ ] RPi4 / NUC boot validation
 
 ## Deferred (no movement until trigger surfaces)
 
