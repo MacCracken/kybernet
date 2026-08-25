@@ -80,7 +80,7 @@ var _ep_results = 0;   # reusable vec of _ep_slots pointers
 var _ep_health_tfd = 0 - 1;
 var _ep_watchdog_tfd = 0 - 1;
 # 1.5.4: the restart timer. TOKEN_RESTART has been in the enum above since
-# the Rust port with nothing creating a timer for it — the deferred-restart
+# the Rust port with nothing creating a timer for it — the CHANGELOG 1.5.4 deferred-restart
 # mechanism it belonged to was dropped. See src/lib/restart_queue.cyr.
 var _ep_restart_tfd = 0 - 1;
 
@@ -222,19 +222,19 @@ fn eventloop_setup(signal_fd, health_sec, watchdog_sec, restart_sec) {
         }
     }
 
-    # Restart timer — drives the deferred-restart queue (1.5.4). 1 s, the
+    # Restart timer — drives the deferred-restart queue (CHANGELOG 1.5.4). 1 s, the
     # same tick the Rust original used: fine-grained enough that a 1 s
     # health-breach delay is not doubled, cheap enough to ignore.
     var rfd_r = timer_new(restart_sec);
     if (is_ok(rfd_r) == 1) {
         _ep_restart_tfd = result_unwrap(rfd_r);
         if (is_err_result(epoll_add_read(epfd, _ep_restart_tfd, TOKEN_RESTART)) == 1) {
-            klog("WARNING: restart timer epoll registration failed — deferred restarts disabled");
+            klog("WARNING: restart timer epoll registration failed — deferred restarts disabled");  # CHANGELOG 1.5.4: shipped feature name
             sys_close(_ep_restart_tfd);
             _ep_restart_tfd = 0 - 1;
         }
     } else {
-        klog("WARNING: restart timer creation failed — deferred restarts disabled");
+        klog("WARNING: restart timer creation failed — deferred restarts disabled");  # CHANGELOG 1.5.4: shipped feature name
     }
 
     return Ok(epfd);

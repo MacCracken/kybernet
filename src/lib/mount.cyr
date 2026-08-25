@@ -65,7 +65,7 @@ fn mount_devtmpfs() {
 #
 # Sizing: array is BYTES, not slots. 6 entries × 48 bytes/entry =
 # 288 bytes used of 480 (10 entries) — headroom taken at 1.4.2, closing
-# the 1.1.5 audit's deferred LOW-2. Sitting at exact capacity meant the
+# the 1.1.5 audit's deferred LOW-2 (closed at CHANGELOG 1.4.2). Sitting at capacity meant the
 # next entry added (bpf, tracefs) would overflow BSS silently, which is
 # the same shape as that audit's HIGH-2. The BSS cost is negligible and headroom
 # kills a class of regression. The 0.95.0 `_mount_table[8]→[240]`

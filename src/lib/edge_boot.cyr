@@ -6,8 +6,8 @@
 # resolves from sigil's `tpm` distlib profile (dist/sigil-tpm.cyr — 1.4.0).
 # dm-verity capability detection is a LOCAL probe (`_eb_dmverity_supported`,
 # below): sigil has no dm-verity distlib profile and pulling the full bundle
-# for one syscall would drag in 13 MB of unused crypto `.bss`. The deferred
-# dm-verity *verify* is done at 1.5.7 by shelling out to `veritysetup verify`
+# for one syscall would drag in 13 MB of unused crypto `.bss`. What CHANGELOG
+# 1.5.7 calls the dm-verity *verify* is done by shelling out to `veritysetup verify`
 # rather than by pulling sigil's storage surface — see _eb_verity_verify.
 #
 # WHAT THIS FILE DOES (as of 1.5.7):
@@ -25,8 +25,9 @@
 #     enforced at the end when a hard prerequisite is set (1.5.3)
 #   - `kybernet.edge=off` / `=permissive` cmdline escape hatches (1.5.7)
 #
-# STILL DEFERRED, and deferred to REAL HARDWARE rather than to a version
-# number — the QEMU harness provably cannot cover these (dm is a module and
+# STILL OPEN — see the roadmap's "Blocked on hardware" section. Held against
+# REAL HARDWARE rather than a version number: the QEMU harness provably cannot
+# cover these (dm is a module and
 # nothing in an initramfs can load one):
 #   - `veritysetup open` + read-only mount of the verified target. This is
 #     what catches corruption at READ time, as opposed to verifying the
@@ -34,10 +35,14 @@
 #     assume. argonaut's verify_rootfs_integrity already builds the command.
 #   - LUKS unlock. argonaut's unlock_luks builds a `--token-only` cryptsetup
 #     invocation, which needs a TPM-sealed LUKS2 token on real hardware.
-#   - PCR baseline comparison against `expected_pcrs`. The baselines are
-#     parsed and validated here, but comparing them needs a real TPM to
-#     produce a real measurement; comparing against a synthetic one proves
-#     nothing. See roadmap v1.2.2.
+#   - PCR baseline ENFORCEMENT against `expected_pcrs`. ⚠ Note the word:
+#     COMPARISON is done and is live — `_eb_compare_pcrs` runs at every edge
+#     boot with a TPM and reports drift to dmesg. Per the roadmap, what is left is acting
+#     on a mismatch, which is only meaningful once the baseline is rooted in
+#     TPM sealing rather than in a userspace tool living on the filesystem
+#     being verified. (This bullet used to claim the comparison itself was
+#     deferred; it has not been since 1.5.7.) See the roadmap's "Blocked on
+#     hardware" section.
 #
 # ⚠ The header this replaces claimed all of the above "lands in 1.2.1" and
 # that it was blocked on argonaut extending EdgeBootConfig with device
@@ -214,15 +219,23 @@ fn _eb_dmverity_supported() {
 #
 # The pre-1.5.3 budget check ran ONCE, after every step it was meant to
 # bound — a post-mortem, and warn-only besides. It could not prevent
-# anything: by the time it noticed, the two unbounded operations
-# (_eb_dmverity_supported's `veritysetup --version` exec, and tpm_read_pcr's
-# `tpm2_pcrread` exec, both blocking waits on external programs with no
-# timeout of their own) had already run to completion.
+# anything: by the time it noticed, the unbounded operations had already run
+# to completion.
 #
-# It still cannot interrupt a call that is already blocked — that needs a
-# timeout inside sigil's exec path, which is not kybernet's to add. What it
-# CAN do is refuse to START the next expensive step once the budget is
-# spent, which is what this gives. Checked before each exec-backed step.
+# Both of kybernet's own execs are bounded now: _eb_dmverity_supported and
+# _eb_verity_verify go through argonaut 1.13.2's run_safe_cmd_timeout (1.5.7).
+# ⚠ ONE UNBOUNDED EXEC REMAINS, and it is not kybernet's code:
+# tpm_read_pcr -> sigil's agnosys_run_capture -> the stdlib's exec_capture,
+# which does an unbounded blocking read on the pipe and an unbounded
+# sys_waitpid, then DISCARDS the status — so an absent or failing
+# tpm2_pcrread returns Ok(0) and sigil zero-fills every PCR. That is standing
+# rule 17's exact shape. sigil is first-party and editable, so this is a fix
+# to make there, not a fact to live with; it is on the roadmap under
+# "Blocked upstream". The sys_access precheck below and this budget
+# checkpoint bound nothing once that call starts.
+#
+# What this CAN do is refuse to START the next expensive step once the budget
+# is spent, which is what it gives. Checked before each exec-backed step.
 #
 # Returns 1 when over budget. max_ms <= 0 means no budget configured.
 fn _eb_over_budget(start_ms, max_ms) {
@@ -238,7 +251,7 @@ fn _eb_over_budget(start_ms, max_ms) {
 # makes it usable here, and testable in an initramfs where dm is a module
 # that nothing can load. `veritysetup open` (which argonaut's
 # verify_rootfs_integrity builds) does need all of that, and is what stays
-# deferred to real hardware.
+# left to real hardware; see the roadmap's "Blocked on hardware" section.
 #
 # This is the honest half of the 1.2.0 deferral: kybernet can now say "the
 # rootfs image matches the root hash the operator pinned", which is the
@@ -284,7 +297,7 @@ fn _eb_verity_verify(budget_ms) {
 # child's wait status and zero-fills anything it could not parse. A control
 # that is defeated by replacing a file must not be able to permanently
 # brick a board. The hardware-rooted version of this is TPM *sealing*,
-# which fails soft. See roadmap v1.2.2.
+# which fails soft. See the roadmap's "Blocked on hardware" section.
 #
 # So: operators get fleet drift in dmesg, before it can cost them a boot.
 # Returns the number of MISMATCHES (0 = all matched or nothing to compare).
@@ -482,7 +495,7 @@ fn edge_boot_run(config) {
         }
     }
 
-    # ---- LUKS unlock — deferred to real hardware ----
+    # ---- LUKS unlock — roadmap: "Blocked on hardware" ----
     #
     # argonaut's unlock_luks builds a `cryptsetup open --token-only` call,
     # which needs a TPM-sealed LUKS2 token. There is nothing to unlock
@@ -491,7 +504,7 @@ fn edge_boot_run(config) {
     # device path is parsed and validated so the config surface is stable.
     if (luks_req == 1) {
         if (_eb_luks_device != 0) {
-            klog2("edge boot: LUKS device configured, unlock deferred to hardware: ",
+            klog2("edge boot: LUKS device configured, unlock deferred to hardware: ",  # roadmap: "Blocked on hardware"
               str_data(_eb_luks_device));
         } else {
             klog("edge boot: luks_enabled set but no luks_device configured");

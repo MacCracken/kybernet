@@ -224,9 +224,17 @@ fn seccomp_apply_profile(profile) {
 # cyrius stdlib also exports was cross-checked against it. The handful the
 # stdlib does not export (mprotect, rt_sigreturn, accept, sendto,
 # sigaltstack, clock_gettime, set_robust_list, rseq) come from the kernel
-# table and are pending validation on real aarch64 hardware — this whole
-# module is not yet wired into the boot path (see the header note), so
-# that validation gates enabling it, not this release.
+# table and have never been executed on real aarch64 hardware.
+#
+# ⚠ THIS COMMENT USED TO SAY (see roadmap v1.6.0) "the module is not wired into the
+# boot path, so that validation gates enabling it, not this release." That
+# was true when it was written and has been FALSE since 1.4.3:
+# service_sandbox.cyr's kyb_pre_exec calls seccomp_apply() through argonaut's
+# pre-exec hook, driven by the documented `"seccomp": "basic"` config key. The
+# enabling event the comment named as the trigger for validation happened, and
+# the validation did not — the stale claim is precisely what hid that. Tracked
+# on the roadmap now (v1.6.0 for the filter itself, hardware section for the
+# aarch64 numbers) rather than in a comment nobody re-reads.
 #
 # Note the ABI differences, not just renumbering: aarch64 has no dup2
 # (dup3 only), no arch_prctl, and epoll_pwait instead of epoll_wait.

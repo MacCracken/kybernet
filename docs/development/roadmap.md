@@ -1,151 +1,381 @@
 # Kybernet Roadmap
 
-**Current: v1.5.9** — see [CHANGELOG.md](../../CHANGELOG.md) for what each release
-actually did. This file carries only what is NOT done; everything shipped is a one-line
-entry under [History](#history).
+**Current: v1.5.9** — [CHANGELOG.md](../../CHANGELOG.md) is the record of what each
+release actually did. This file carries only what is **not** done.
+
+Everything below came out of a deliberate sweep of the tree after 1.5.9 shipped, and
+every item names the file that proves it. Where a claim was verified by running
+something rather than by reading, it says so.
+
+**Pins:** `v1.6.x` is scoped work with a clear finish line. `v1.x.x` is real but needs
+a design decision or is too large to date. The last two sections are blocked on
+something outside this repo.
+
+`cyrius lint` reports **0 untracked deferrals** across all 23 source files as of this
+revision — every deferral comment in the tree now cross-references this file or a
+CHANGELOG entry. Keeping that at zero is a v1.6.1 item, because the linter is advisory
+in CI today.
 
 ---
 
-## Active
+## v1.6.0 — the confinement path does not confine
 
-### v1.5.10 — edge boot on real hardware (was v1.2.2)
+Four defects in the security path 1.4.3–1.5.2 built. Each is reachable from a
+documented config key, none is covered by a gate, and the first is not a degradation —
+it is a guarantee of failure.
 
-Everything below needs a real device-mapper stack or a real TPM, and is
-**not** covered by the QEMU gate — measured, not assumed: the harness
-kernel has `CONFIG_BLK_DEV_DM=m`, no `CONFIG_DM_INIT`, and the initramfs
-busybox has no `insmod`. In-VM `veritysetup open` returns "Cannot
-initialize device-mapper". Putting a module loader inside PID 1 to make a
-test pass is scaffolding in the one process that must never crash.
+- [ ] **`"seccomp": "basic"` kills every service it is applied to.**
+      `seccomp_basic_service()` (`src/lib/seccomp.cyr:264`) allowlists 37 syscalls.
+      **`execve` is not one of them** — `BS_EXECVE` exists in neither `#ifdef` arm —
+      and the default action is `SECCOMP_RET_KILL_PROCESS` (`seccomp.cyr:127`).
+      `kyb_pre_exec` loads the filter as step 4 and argonaut execs on the very next
+      line (`lib/argonaut_process_mgmt.cyr:443-449`).
 
-- [ ] `veritysetup open` + read-only mount of the verified target — catches
-      corruption at READ time, not just once at boot
+      **Verified by execution**, through kybernet's own code in `kyb_pre_exec`'s order
+      (`set_no_new_privs()` → `seccomp_apply(seccomp_basic_service())` →
+      `execve("/bin/true")`): *killed by SIGSYS (31)*. A dynamically linked binary
+      needs at least `execve`, `access`, `newfstatat`, `pread64`, `prlimit64` before it
+      reaches `main`.
+
+      README advertises the key (`README.md:89-95`). Nothing catches it because
+      `grep -rn seccomp qemu/` returns nothing — no fixture sets it, so
+      `kyb_policy_kind` is `SECCOMP_NONE` on every gated boot and `seccomp_apply` has
+      never executed in a release gate on either arch. **The deliverable is the
+      fixture, not the syscall list** — the preset's real footprint is only
+      discoverable empirically.
+
+- [ ] **Landlock fails OPEN inside a hook documented as fail-closed.**
+      `sandbox.cyr:151-163`/`:237-248` return `Ok(1)` for "kernel has no Landlock";
+      `service_sandbox.cyr:117-119` tests only `is_err_result`. On a pre-5.13 kernel a
+      service carrying an explicit rule list starts with **no filesystem confinement**
+      and the hook reports success — the outcome that file's own header calls "worse
+      than not running it", and README says "fails closed".
+
+- [ ] **`_stage_verify_rootfs` re-keys a boot refusal to `_eb_dmverity_supported`,
+      which standing rule 18 forbids in as many words.** `boot_stages.cyr:68-76` fails
+      a *required* boot step when the kernel cannot instantiate a dm target — exactly
+      the refusal 1.5.7 removed from `edge_boot.cyr:437-445` because it failed boards
+      that verify perfectly well. Concrete case: edge board, no dm module, no
+      `veritysetup`. Phase 6c logs "not verified" and continues; phase 7 then drops to
+      the emergency shell. The honest signal exists and is ignored —
+      `edge_boot_verity_ok()` (`edge_boot.cyr:566`) returns the real
+      `veritysetup verify` result and has **zero callers**.
+
+- [ ] **`edge_apply_defaults` clears 3 of `EdgeBootConfig`'s 5 fields**
+      (`svc_config.cyr:254-259`), so `max_boot_ms` keeps argonaut's **3000** and
+      `pcr_bindings` keeps `"7+14"` on every path — absent block, partial block, and
+      the malformed-block reset. An operator who never set a budget can be refused and
+      **powered off** by one: `veritysetup verify` hashes the whole rootfs against an
+      inherited 3 s deadline. This is rule 19's exact sentence — "never one they
+      inherit from a struct default they never saw" — and 1.5.7 fixed it for the three
+      booleans and stopped. The edge fixture sets `"max_boot_ms": 20000`, the one value
+      that hides it.
+
+- [ ] **A malformed config on SIGHUP silently swaps in defaults and drops the emergency
+      credential.** `reload_config` cannot fail: `load_config()` falls back to
+      `argonaut_config_default()` on a parse error and returns it, so a truncated or
+      mistyped `/etc/kybernet/config.json` replaces the live config wholesale — and
+      because `g_emerg_hash` is a side effect of the same function, the recovery
+      credential goes with it. 1.5.9 made that change *visible* in the log; it did not
+      make the reload refuse. A reload that cannot fail should at least keep the old
+      config when the new one does not parse.
+- [ ] **The config read is a silent 16 KiB cliff.** `load_config` reads into
+      `alloc(16384)` and `file_read_all` truncates without saying so, so a config that
+      grows past the buffer becomes a JSON parse error and takes the defaults path
+      above. Needs a size check and a readable error.
+- [ ] **`"enabled": false` is counted as a boot failure.** A service explicitly
+      disabled by the operator is reported as a failed start, and enough of them can
+      route the board to the emergency shell. Disabled is not failed.
+- [ ] **Service names are not sanitized on the teardown paths.** The 2026-08-24 audit's
+      MEDIUM-3 added validation on the create path; the teardown sweep and the registry
+      still accept a name with `/` or `..` in it. Same traversal, different door.
+
+---
+
+## v1.6.1 — gates that cannot fail
+
+The gates are the reason to trust any of the above. Several cannot currently go red.
+
+- [ ] **The bench regression gate is never run by CI.** `grep -rn bench-history
+      .github/` returns nothing; CI runs bare `cyrius bench` under
+      `continue-on-error: true`. Standing rule 6 calls it a release gate that "blocks
+      the cut" — today that is human discipline only, and `release.yml` adds no step.
+- [ ] **The QEMU harness cannot fail the build.** `ci.yml:249` is
+      `continue-on-error: true`, and an unreadable `/dev/kvm` sets `skip=1` so every
+      later step no-ops and the job goes green having executed nothing. The workflow
+      comment carries the standing instruction ("flip it off … once reliably green")
+      with no tracking item. Rule 23 says this is the only gate that executes a reactor
+      iteration.
+- [ ] **28 of the harness's 46 assertions never run in CI.** The qemu job installs
+      `qemu-system-x86 cpio` only — no `cryptsetup-bin`, no OpenSSL 3.2 — so
+      `build-initramfs.sh` drops all three edge/auth fixtures and passes 3, 4a and 4b
+      skip. Rule 26 says both credential formats are gated; in CI neither is. One
+      `apt-get` line fixes the verity half.
+- [ ] **Turn `cyrius lint` into a hard gate — its untracked-deferral detector is the
+      thing that keeps this file honest, and it is disabled.** `ci.yml:72-75` keeps Lint
+      advisory "once the standing dead-code warnings are addressed". Measured across all
+      23 files: **0 dead-code warnings** — the stated blocker does not exist.
+      The 12 untracked deferrals it did find (edge_boot 5, eventloop 4, mount 1,
+      seccomp 1, termios 1) **are now 0**: every one has been cross-referenced to this
+      roadmap or to a CHANGELOG entry, which is what the linter asks for. Note it
+      matches **per line** — the reference has to share the line with the deferral word.
+      What is left before `continue-on-error` can come off: **23 warnings, all
+      over-length lines in `src/test.cyr`.**
+- [ ] **CI's "raw system()" scan is vacuous.** `ci.yml:217` passes `\bsystem\s*\(` to
+      BRE `grep`, an unclosed group; grep exits 2, stderr is discarded, and the check
+      always reports clean. The neighbouring `syscall(59/60)` checks do work.
+- [ ] **The aarch64 build can silently no-op** (`ci.yml:99-102` → `exit 0` + warning),
+      and `release.yml:100-102` then publishes a release with no aarch64 artifact.
+- [ ] **`cyrius test` asserts `0 failed` but not the count**, so a suite that silently
+      shrinks still passes. `bench-history.sh` has the same hole — it never compares
+      the recorded benchmark count against the previous run, and two benches self-skip
+      under root.
+- [ ] **No gate has ever executed `handle_health_tick` or `handle_watchdog_tick`.** No
+      fixture carries a `health_check` block, so both drain empty vecs forever and every
+      1.5.4 restart-on-threshold and watchdog path is unexercised. Corollary worth
+      stating plainly: **with no `health_check` configured there is no watchdog at all.**
+- [ ] **`test_reload_config_is_narrow` never calls `reload_config`**
+      (`test.cyr:743-768`) — it asserts that its own two `store64`s did what stores do.
+      Root cause: `test.cyr` includes `src/lib/*` but not `src/main.cyr`, so **none of
+      main.cyr's 25 functions is under unit test.** The pure helpers (`_read_line_fd`'s
+      new `-2` overflow path, `_emerg_envp`'s 7-slot bound) are trivially extractable.
+
+- [ ] **The edge gate skips on exactly the regression class it exists to catch.** If
+      `veritysetup` is missing on the build host the fixtures are dropped and the pass
+      reports SKIP — which is correct locally and useless as a gate, because a change
+      that breaks verity detection produces the same SKIP as a machine without the tool.
+- [ ] **The structured-logging path has zero coverage and its init failure is invisible
+      for the life of the boot.** `slog_init` failing leaves `g_log_fd` at 0 and nothing
+      says so again.
+- [ ] **There is no Argon2 benchmark on x86_64 either.** 1.5.9's work cap is defended by
+      one-off measurements taken during that release and never re-run; `bench.cyr` has
+      no credential entry, so a parameter or toolchain change that doubles the cost
+      passes every gate silently.
+- [ ] **Two orphaned QEMU scripts.** `boot-crash-test.sh` and `boot-shutdown-test.sh`
+      are busybox-based, run nothing from `build/`, cannot fail, and use less than the
+      512 MB that rule 8 says `alloc_init` needs. Wire them or delete them.
+
+---
+
+## v1.6.2 — code that does nothing, and docs that say it does
+
+- [ ] **Boot phase 6b is a provable no-op.** `execute_tmpfiles()` (`main.cyr:316-361`)
+      iterates `config_tmpfiles(cfg)`, which only `argonaut_config_default()` ever
+      writes — as an empty `vec_new()`. No `tmpfiles` key is parsed anywhere in
+      `src/lib/`, so the loop body has never executed. It would not work if it did:
+      main.cyr declares its own `enum TmpfileType` that silently collides with
+      argonaut's (`TMP_TOUCH == TMP_DEVICE == 2`; cyrius does not warn on duplicate
+      enums), reads `mode` at the offset where argonaut keeps `target`, and hands a
+      boxed `Str` to `sys_mkdir` as a cstr (rule 3). Advertised at `main.cyr:10` and
+      `overview.md:55`. Either build it or delete the phase and the enum.
+- [ ] **sd_notify is received, classified, logged, and discarded.** `handle_notify_msg`
+      (`main.cyr:1080-1099`) is five `klog` calls and a `default: return 0`; nothing
+      reaches `g_init`. `READY=1` marks nothing ready, `WATCHDOG=1` refreshes nothing
+      (a correctly pinging service is still killed on schedule), `MAINPID=` is not
+      parsed, and **any process on the box can forge any message** — `notify_read`
+      passes a NULL `src_addr` and the socket never sets `SO_PASSCRED`. argonaut already
+      ships the finished version (`notify_try_recv_authenticated`, `notify_parse`,
+      `init_notify_bind`); all of it has zero kybernet call sites. README and
+      `overview.md` advertise the feature. argonaut deferred its own half of the
+      propagation, so this is a two-repo item.
+- [ ] **`log_to_console` is parsed, stored, copied on reload, and never acted upon.**
+      `config_log_console` has two readers in the tree: its definition and the reload
+      copy. `klog`/`klog2` write to `STDERR_FD` unconditionally. The 1.5.0 comment says
+      the value "was ignored entirely" — only the *spelling* was fixed.
+- [ ] **`boot_timeout_ms` and every per-stage `timeout_ms` are parsed and never
+      enforced.** No reader of `config_boot_timeout` outside the reload copy; `step + 24`
+      is never loaded. A boot stage can hang indefinitely with its timeout sitting unread
+      beside it. Enforcing it under PID 1 needs a real mechanism — the reactor is not
+      running at phase 7 — so at minimum say the values are advisory.
+- [ ] **Dead chains to delete or wire.** `cgroup_setup_agent` (zero references anywhere)
+      → `move_to_cgroup` + `cgroup_apply_resource_limits`, all superseded at 1.5.5 by the
+      child-side `_kyb_join_cgroup`; `any_failures` (`reaper.cyr:69`);
+      `edge_boot_elapsed_ms` / `edge_boot_verity_ok` / `edge_boot_pcr_mismatches` (zero
+      callers, and two comments claim "main reads these … in the boot summary" — there is
+      no boot summary); `edge_hash_device` / `edge_luks_device` / `edge_expected_pcrs`.
+      `src/tmpfiles.cyr` is the one argonaut module with no call site in the entire link
+      set — one manifest line.
+- [ ] **Stale comments that mislead about live behaviour.** `seccomp.cyr:228` says the
+      module "is not yet wired into the boot path" — it has been since 1.4.3, and that
+      claim is what let the aarch64 validation lapse. `edge_boot.cyr:218-219` names
+      `_eb_dmverity_supported` as unbounded; 1.5.7 gave it `run_safe_cmd_timeout(cmd,
+      3000)`. `edge_boot.cyr:40,287` point at "roadmap v1.2.2", renumbered twice since.
+      CLAUDE.md rule 9 justifies the `if`-ladder as "the per-service Landlock path"; the
+      live path is `sandbox_from_config` → `_access_to_flags`, and `_ll_access_to_kernel`
+      is reached only from `sandbox_from_ruleset`, which nothing but a benchmark calls.
+
+- [ ] **`notify.cyr` hand-rolls a socket syscall table whose stated fold-out trigger has
+      fired.** The header promises "fold these out when `sys_socket`/`sys_bind`/
+      `sys_recvfrom` land in the stdlib". **They have landed** —
+      `~/.cyrius/lib/syscalls_linux_common.cyr:470`, `:521`, `:531`. This is no longer
+      an upstream wait; it is deletable code.
+- [ ] **A standing `duplicate symbol … conflicting value` warning on every build.**
+      argonaut's `enum SocketType { SOCK_STREAM; SOCK_DGRAM; SOCK_SEQPACKET; }` is
+      unvalued, so cyrius numbers it from **0** while the kernel and
+      `~/.cyrius/lib/net.cyr` use 1/2. Harmless today only because every call site in
+      both repos passes the literals — argonaut's own `sys_socket(1, 2, 0)` included —
+      so the enum is decorative. It is still a trap for the next person who uses it, and
+      CLAUDE.md's capability rule says a `conflicting value` warning means the two
+      definitions have diverged. Fix in argonaut: give the enum kernel values or drop
+      it. A build with a permanent warning trains people to ignore warnings.
+- [ ] **`health_check.interval_ms` does not control polling frequency.** The key is
+      parsed onto the `HealthCheck` struct, but the reactor polls on its own fixed timer,
+      so a service asking for a 5 s check gets the global interval.
+- [ ] **Unbounded arena growth on two reactor hot paths** — the 1.4.2 MEDIUM-7 class,
+      reopened. In the one arena rule 8 says PID 1 never resets.
+
+---
+
+## v1.x.x — real, but needs a decision or is too large to date
+
+- [ ] **No service can run as non-root.** The whole uid/gid half of `privdrop.cyr` is
+      unreachable: `secure_from_context` and `has_cap` have no references anywhere,
+      `privdrop_from_context` is called only by the former, `drop_privileges` only by
+      those two. There is no `user`/`group` key in `svc_apply_security_json`, and
+      argonaut's `ServiceDefinition` has no such field either — the agnostik
+      `security_context` bridge is a bridge to nothing. Wants a config key, numeric-uid
+      resolution (this tree has no `/etc/passwd` reader), a `drop_privileges` call as
+      step 5 of `kyb_pre_exec` — after Landlock, before seccomp — and a fixture that
+      prints its own `Uid:`.
+- [ ] **The audit chain never rotates and is never drained.** Measured, not estimated:
+      **242 arena bytes per record**, `max_capacity` 0 so `_chain_auto_rotate` returns
+      immediately, 2000 records → 2000 retained, 0 rotations. argonaut writes on
+      kybernet's behalf once per health-checked service per tick, so at the shipped 30 s
+      interval that is ~0.68 MB/day/service in the one arena rule 8 says PID 1 never
+      resets. Latent only because no shipped config uses `health_check`; it arms the
+      first time an operator adds one.
+- [ ] **A P(-1) audit.** The last was cut at 1.4.2, seven releases ago. Everything that
+      is now the attack surface — `edge_boot`'s exec path, `emergency_auth`'s KDF, the
+      security/limits parsers, `restart_queue`, `termios`, and the live
+      seccomp/Landlock/capset path — landed after it. Both prior audits found CRITICALs
+      every gate was blind to.
+- [ ] **Landlock is pinned to ABI 1.** `_landlock_handled_mask()` covers bits 0-12, so
+      `REFER` (ABI 2), `TRUNCATE` (ABI 3) and `IOCTL_DEV` (ABI 5) are unrestricted for
+      every sandboxed service. The 8-byte `landlock_ruleset_attr` pins ABI 1
+      deliberately; nothing records that as a scope decision. Wants a version probe.
+- [ ] **No hard CPU bandwidth cap.** kybernet can express `cpu.weight` (relative share)
+      but not `cpu.max`, so a service cannot be capped at 0.5 CPU. Mechanical blocker:
+      `_cgroup_write_u64` (`cgroup.cyr:425`) emits one integer and `cpu.max` takes
+      `"<quota> <period>"`. The same block also documents "plain integers only — no
+      `64M` suffixes".
+- [ ] **Move the emergency credential out of the world-readable config.**
+      `/etc/kybernet/emergency.cred` at 0600 costs almost nothing and defeats a local
+      unprivileged reader. It does **not** defeat the image-holder adversary, which is
+      why it complements the 1.5.9 KDF rather than replacing it. Changes the config
+      surface, so it is its own release.
+- [ ] **A dynamic memory ceiling for the KDF.** 1.5.9 caps `m_cost` statically at
+      64 MiB, the bottom edge of the band where an anonymous mmap succeeds and the touch
+      OOMs. `system_free_memory()` exists (`~/.cyrius/lib/sys.cyr:366`). Deliberately not
+      shipped: a bound that depends on free RAM at boot makes a credential valid on one
+      board and invalid on another. Revisit if a board under 512 MB appears.
+
+- [ ] **Seven `ServiceDefinition` fields have no config key at all.** `ready_check` and
+      `restart_config` are the notable two: argonaut supports them, kybernet's parser
+      offers no way to set them, so the readiness and restart-policy surfaces are
+      argonaut defaults on every AGNOS board. Needs a decision about how much of
+      argonaut's model kybernet intends to expose.
+
+---
+
+## Blocked on hardware (was v1.5.10 / v1.2.2)
+
+Not a version pin — these need a real device-mapper stack or a real TPM, and the QEMU
+gate provably cannot cover them: the harness kernel has `CONFIG_BLK_DEV_DM=m`, no
+`CONFIG_DM_INIT`, and the initramfs busybox has no `insmod`. Putting a module loader
+inside PID 1 to make a test pass is scaffolding in the one process that must never
+crash.
+
+- [ ] `veritysetup open` + read-only mount of the verified target — catches corruption
+      at READ time, not just once at boot
 - [ ] LUKS unlock against a TPM-sealed LUKS2 token
-- [ ] PCR baseline **enforcement**, rooted in TPM sealing rather than in a
-      userspace tool that lives on the filesystem being verified
+- [ ] PCR baseline **enforcement**, rooted in TPM sealing rather than in a userspace tool
+      that lives on the filesystem being verified. (Comparison is implemented and called;
+      only enforcement is deferred — `edge_boot.cyr:28-40` is stale on this.)
 - [ ] RPi4 / NUC boot validation
+- [ ] **Argon2 has never been measured on ARM.** Every timing behind 1.5.9's work cap is
+      x86_64; the RPi4 figures are extrapolated and `benches/history.csv` has no aarch64
+      row. The cross-build is release-gated but never *executed*.
+- [ ] **The aarch64 seccomp table has never been executed anywhere.** Eight numbers
+      (`mprotect`, `rt_sigreturn`, `accept`, `sendto`, `sigaltstack`, `clock_gettime`,
+      `set_robust_list`, `rseq`) were taken from `asm-generic/unistd.h` rather than the
+      stdlib. They check out on inspection; no gate has run them. Folds into v1.6.0's
+      fixture work if an aarch64 QEMU pass ever exists.
 
 ---
 
-## Deferred (no movement until trigger surfaces)
+## Blocked upstream / on an external consumer
 
-- **Control socket for agnoshi runtime commands** — separate transport surface; pinned until an agnoshi consumer drives the protocol shape
-- **Binary signing on release** — pinned until libro signing/timestamping is consumer-driven from outside kybernet's tree
-
-## Opened by v1.5.9 — not blocking, but real
-
-- [ ] **The credential lives in a world-readable config file.** `/etc/kybernet/config.json`
-      carries `emergency_password_hash` alongside everything else. Moving it to
-      `/etc/kybernet/emergency.cred` at 0600 costs almost nothing and completely
-      defeats a local unprivileged reader. It does **not** defeat the image-holder
-      adversary — which is why it complements the KDF rather than replacing it, and
-      why 1.5.9 did the KDF first. It changes the config surface, so it is its own
-      release.
-- [ ] **Argon2 has never been measured on ARM.** Every timing behind the 1.5.9 work
-      cap is x86_64 (m=19456/t=2 → 230 ms here); the RPi4 figures are *extrapolated*,
-      and there is no aarch64 row anywhere in `benches/history.csv`. The cross-build
-      is release-gated but never executed. Measure on a board before trusting the
-      ceiling.
-- [ ] **A dynamic memory ceiling.** 1.5.9 caps `m_cost` statically at 64 MiB, which
-      sits exactly at the bottom edge of the band where an anonymous mmap succeeds
-      and the touch OOMs. `system_free_memory()` exists (`~/.cyrius/lib/sys.cyr:366`)
-      and an `m*1024 <= free/4` check would close the small-board case. Deliberately
-      not shipped: a bound that depends on free RAM at boot makes a credential valid
-      on one board and invalid on another — a new failure mode traded for a narrow
-      gain. Revisit if a board under 512 MB appears.
-- [ ] **`fl_alloc`'s unchecked mmap return is still there**, in two places
-      (`freelist.cyr:404-406` large path, `:231-241` arena refill). Both store through
-      `_fl_mmap`'s raw return, which is a negative errno on failure. kybernet works
-      around it (audit rule 24), but every other consumer of sigil's allocating
-      crypto wrappers is exposed, and sigil's own `if (mem == 0)` guards are dead
-      code because of it. The cyrius repo is off-limits from here — this wants
-      filing upstream, not fixing.
-
-**Closed since this list was written:** validating `drop_cap_sets()` on privileged
-hardware. The unit suite runs unprivileged, where every capability path short-circuits on
-the euid check — but the 1.5.2 harness `kyb-confined` service asserts `CapEff=0` and
-`NoNewPrivs=1` from inside a real service under QEMU, where kybernet is genuinely PID 1
-as root and `capset(2)` really executes. See `qemu/boot-test.sh`.
+- [ ] **sigil's `exec_capture` / `exec_vec` fail open and wait unbounded.**
+      `agnosys_run_capture` checks only `n < 0`, so an absent or failing `tpm2_pcrread`
+      returns `Ok(0)` and sigil zero-fills every PCR — an attestation "pass" from a tool
+      that never ran. `agnosys_run_checked` uses `exec_vec`, which standing rule 17
+      forbids outright. kybernet's `tpm_read_pcr` call (`edge_boot.cyr:473`) is the last
+      unbounded exec in PID 1; `edge_boot.cyr:222` declines it as "not kybernet's to add".
+      **That framing is the mistake the 2026-08-24 audit already retracted once** —
+      HIGH-1 was filed deferred as "blocked upstream", and the correct fix was to add the
+      seam to argonaut. sigil is first-party. This is a sigil release, then a kybernet
+      bump.
+- [ ] **cyrius stdlib filings, genuinely off-limits from here.** ioctl / termios /
+      poll — `2026-08-24-sys-ioctl-wrapper-missing.md`, behind `src/lib/termios.cyr` and
+      `_read_line_fd`'s `sleep_ms` poll loop. And `fl_alloc`'s unchecked `_fl_mmap`
+      return in two places (`freelist.cyr:404-406`, `:231-241`), which is why sigil's
+      own `if (mem == 0)` guards are dead code.
+      (The socket-wrapper filing is **closed** — `sys_socket`/`sys_bind`/`sys_recvfrom`
+      have landed, so `notify.cyr`'s hand-rolled table moved to v1.6.2 as deletable
+      code rather than an upstream wait.)
+- [ ] **Control socket for agnoshi runtime commands** — a separate transport surface,
+      pinned until an agnoshi consumer drives the protocol shape.
+- [ ] **Binary signing on release** — pinned until libro signing/timestamping is
+      consumer-driven from outside kybernet's tree.
 
 ---
 
 ## History
 
-### v1.5.9 — Salted, memory-hard emergency credential (2026-08-25)
-All five sub-items closed, none deferred. The credential is Argon2id in a self-describing `v1$t$m$p$salt$tag` record — agnostic's format, adopted unchanged rather than inventing a second one for the pack. PHC was passed over: its B64 is the standard alphabet with padding stripped and no stdlib codec handles that shape, so it meant hand-rolling base64 inside PID 1 to interoperate with tools this project does not use. `argon2id_into` over an `alloc()` arena, never the `fl_alloc` wrapper whose own `mem == 0` guard is dead code. Provisioning is `scripts/mkcred.sh` over `openssl kdf`, proved byte-identical to sigil — so no compiled tool, which matters because PID 1 has no command line at all. Parameter bounds are rejections, never clamps: a clamped `m` derives a different tag and bricks the board. The floor mattered as much as the ceiling — sigil accepts `m=8 KiB`, which fits in a GPU streaming multiprocessor and surrenders memory-hardness entirely. sigil 3.12.10 moved the Argon2 working lane onto the caller's arena, turning a +377 KB link into +25 KB. Legacy 64-hex still verifies by delegating to argonaut's unchanged code, and both formats are gated in QEMU. 567 tests, 42 harness properties.
+One line per release. Detail lives in [CHANGELOG.md](../../CHANGELOG.md).
 
-### v1.5.8 — The emergency-auth gate actually works (2026-08-25)
-Both roadmap items were aimed past a defect that made the gate non-functional. `setup_console` points fd 0 at /dev/null by design, and the password prompt added at 1.5.4 read fd 0 — so it got EOF instantly and every authentication failed, correct password or not. 1.5.7's forced `require_auth` on an edge refusal turned that into a reboot loop recoverable only from the bootloader. Reproduced in QEMU before any change. Interactive reads now open their own /dev/console (`O_RDWR|O_NOCTTY`); console echo suppression added in a new `src/lib/termios.cyr` (the stdlib has no ioctl, termios or poll — filed as a cyrius issue); the read is bounded; a rejection halts instead of rebooting; the shell got a real stdin and a real envp. Harness feeds a password over the serial line. Salted KDF deferred to 1.5.9. 491 tests.
+- **v1.5.9** — Salted, memory-hard emergency credential. Argon2id in a self-describing
+  `v1$t$m$p$salt$tag` record (agnostic's format, adopted rather than invented);
+  `scripts/mkcred.sh` over `openssl kdf`, byte-identical to sigil; parameter bounds are
+  rejections, never clamps. sigil 3.12.10 moved the Argon2 lane onto the caller's arena
+  (+377 KB link → +25 KB) and took the toolchain 6.5.21 → 6.5.35. Legacy digests still
+  verify; both formats gated. 567 tests, 42 harness properties.
+- **v1.5.8** — The emergency-auth gate did not work at all: the prompt read fd 0, which
+  is `/dev/null` by design, so no password could ever authenticate — and 1.5.7's forced
+  `require_auth` made that a reboot loop. Interactive reads now open their own console;
+  echo suppression in a new `termios.cyr`; a rejection halts instead of rebooting.
+- **v1.5.7** — Edge boot actually verifies, via `veritysetup verify` (pure userspace). An
+  absent `edge` block now means detection-only rather than an un-overridable demand.
+- **v1.5.6** — Consumed argonaut 1.13.1's arch repairs; no forked service had its own
+  session on ARM. Restored two dropped commit pins.
+- **v1.5.5** — Cgroup limits actually applied: no controller was ever enabled, and
+  `ResourceLimits` is defined twice with incompatible layouts.
+- **v1.5.4** — Rust port complete, `rust-old/` removed. Eight dropped behaviours closed,
+  including deferred restarts and `$NOTIFY_SOCKET`.
+- **v1.5.3** — Lifecycle cleanup: cgroup teardown wired, `reload_config` narrowed,
+  refusals reach dmesg.
+- **v1.5.2** — Per-service security profiles as config data; capability numbers corrected
+  across agnostik and argonaut (both disagreed with the kernel).
+- **v1.5.1** — Boot stages that do something; `execute_boot_stage` had been `return 1`
+  for all eleven arms.
+- **v1.5.0** — Config-driven services; three defects in a start path that had never run.
+- **v1.4.3** — 686 lines of security code reachable from nothing reached a production
+  path, via argonaut 1.9.0's pre-exec hook.
+- **v1.4.2** — P(-1) audit: 20 findings, both CRITICALs gate-invisible (spinning
+  timerfds, an x86_64-only `epoll_event` layout). Added the reactor gate.
+- **v1.4.1** — Toolchain 6.5.35 + dependency refresh; retired the `path` overrides that
+  made tag pins inert.
+- **v1.4.0** — THIN sigil surface: 14.35 MB → 0.96 MB.
+- **v1.3.x** — Benchmarks became a regression-gated release gate; the 6.0.x → 6.2.11
+  leap; agnosys dropped for sigil.
+- **v1.2.x** — Edge boot scaffolding: capability detection, PCR reads, the flag gate.
+- **v1.1.x** — Modernization: the QEMU PID-1 harness, cgroup path precomputation, the
+  fourth P(-1) audit.
+- **v1.0.x** — The Rust → Cyrius port and its toolchain rebases.
 
-### v1.5.7 — Edge boot actually verifies (2026-08-25)
-The roadmap's stated blocker did not exist — argonaut's `execute_edge_boot` always took device paths as parameters. The gap it did not name did: kybernet parsed no edge config at all, so `"boot_mode": "edge"` was an un-overridable demand for a TPM and dm-verity whose refusal path powers the board off. An absent `edge` block now means detection-only. Real dm-verity integrity verification via `veritysetup verify` (pure userspace, so no device-mapper needed); PCR baseline comparison report-only and deliberately so; `kybernet.edge=permissive`, and `=off` narrowed so it cannot silently bypass a pinned board. argonaut 1.13.2 fixed two upstream defects found on the way: bare binary names against an `execve` that does not search `$PATH`, and an `exec_vec_str` that waits unbounded and fails OPEN. 477 tests.
+⚠ The roadmap ITEMS once numbered v1.2.1 and v1.2.2 were never what shipped under those
+tags. That work is now v1.5.7 (real verification) and the hardware section above.
 
-### v1.5.6 — argonaut's hardcoded x86_64 syscall numbers (2026-08-25)
-Consumed argonaut 1.13.1's arch repairs. `syscall(112)` for setsid is 157 on aarch64, so no service argonaut forked ever got its own session on ARM; `syscall(35)` for nanosleep is `unlinkat` there. Import list 12 → 13 modules — `src/syscall_compat.cyr` is mandatory, since types/health/notify all call into it. Also restored the argonaut and agnostik commit pins that 1.5.4/1.5.5 had dropped from the lock. 440 tests.
-
-### v1.5.5 — Cgroup limits actually applied (2026-08-25)
-Two things the roadmap item did not know about. Service cgroups had no controller files at all — nothing ever wrote `cgroup.subtree_control`, so every limit write would have been ENOENT (confirmed in a real PID-1 boot). And `ResourceLimits` is defined twice with incompatible layouts across argonaut and agnostik, silently, so the item's literal instruction would have set `memory.max` from a service's `nofile`. Limits now come from a `limits` config block into agnostik's `cgroup_limits`; placement moved into the child's pre-exec so even a oneshot lands in its cgroup before running. 437 tests.
-
-### v1.5.4 — Rust port complete; rust-old/ removed (2026-08-25)
-Eight behaviours the port had dropped, closed. Deferred restarts (the SIGCHLD handler restarted synchronously, discarding argonaut's exponential backoff); health-check failures and watchdog kills now act; `$NOTIFY_SOCKET` finally exported, which needed a new argonaut seam since it builds the child envp itself; emergency-shell `require_auth` — which the roadmap called blocked on a primitive that had existed all along. `rust-old/` deleted, 44 files. 409 tests.
-
-### v1.5.3 — Lifecycle cleanup and observability (2026-08-25)
-cgroup teardown wired in (previously no production call site); reload_config narrowed to what it can honestly apply; edge-boot refusals reach dmesg; edge-boot budget enforces before each exec-backed step. One audit finding corrected as misdiagnosed. 309 tests.
-
-### v1.5.2 — Per-service security profiles (2026-08-25)
-Profiles as config data; capability numbers corrected across agnostik/argonaut (both disagreed with the kernel, and kybernet's privilege drop fed them to capset(2)); harness proves confinement as root. 296 tests.
-
-### v1.5.1 — Boot stages that do something (2026-08-25)
-execute_boot_stage was `return 1` for all eleven arms, so init_mark_step_failed and the emergency path were dead code. Stages now return OK/SKIP/FAIL and check real state; argonaut 1.10.1 added the SKIPPED marker that made an honest third answer possible. Bench gate gained a noise floor. 255 tests.
-
-### v1.5.0 — Config-driven services (2026-08-24)
-services parsed from JSON; three defects fixed in the start path that had never executed; argonaut 1.10.0 for the enum parsers, service-set accessors and the oneshot-dependency fix. Harness now boots real services. 235 tests.
-
-### v1.4.2 — P(-1) audit pass (2026-08-24)
-Fifth P(-1) sweep; first since 1.1.5. 2 CRITICAL / 5 HIGH / 7 MEDIUM / 6 LOW, 19 of 20 closed. Both CRITICALs were gate-invisible: undrained level-triggered timerfds (PID 1 spinning at 100% CPU ~10s after every boot, then a kernel panic) and an x86_64-only `struct epoll_event` layout (kernel-written heap overflow + signals never handled on aarch64). Added the `kybernet.harness=loop` reactor gate — verified to fail on the unfixed tree — because no release gate had ever executed an event-loop iteration. 194 tests.
-
-### v1.4.1 — Toolchain 6.5.35 + dependency refresh (2026-08-24)
-cyrius 6.4.62 → 6.5.35; sigil 3.12.9 / agnostik 1.4.0 / libro 2.8.12 / argonaut 1.8.6. Retired the `[deps.patra]` git block (it was downgrading the newer stdlib fold) and the `path = "../…"` fields (they made the tag pins inert locally). Manifest trimmed 6,924 → 2,784 bytes. CI format gate repaired for `cyrius fmt`'s in-place rewrite. No functional source change; 177 tests, harness green (673–911 ms of a 3000 ms budget).
-
-### v1.4.3 — Dead security code reached a production path (2026-08-24)
-Audit HIGH-1: 686 lines of seccomp/Landlock/privilege-drop code that was reachable from nothing. argonaut 1.9.0 grew `argonaut_set_pre_exec_hook`, and `kyb_pre_exec` now confines services between fork and exec. 203 tests.
-
-### v1.4.0 — THIN sigil surface; 14.35 MB → 0.96 MB (2026-07-13)
-cyrius 6.2.11 → 6.4.62 and every sibling dep to its latest tag, but the headline is that kybernet stopped pulling the monolithic `dist/sigil.cyr` — a 93% smaller PID-1 binary. 177 tests.
-
-### v1.3.x arc — Toolchain and dependency refreshes (2026-06)
-v1.3.0 made benchmarks a mandatory regression-checked release gate; v1.3.1–v1.3.3 pin alignments (cyrius 6.0.26 → 6.0.56); v1.3.4 the 6.0.x → 6.2.11 leap that folded `json` into `bayan` and ended implicit stdlib auto-include; v1.3.5 dropped agnosys, re-sourcing TPM/dm-verity/LUKS from sigil. 177 tests throughout.
-
-### v1.2.x arc — Edge boot scaffolding (2026-05-11 → 2026-05-28)
-v1.2.0 landed capability detection (TPM via sigil, dm-verity via a local probe), PCR reads and the flag-driven prerequisite gate. v1.2.1 pinned argonaut 1.7.0 to light the boot-to-shell path; v1.2.2 took the toolchain to cyrius 6.0.14 and restored the aarch64 cross-build; v1.2.3 was a dependency refresh.
-
-⚠ Note the roadmap ITEMS once numbered v1.2.1 ("real-device verify") and v1.2.2 ("real hardware validation") were never what shipped under those tags — the tags are the bumps above. That work is now v1.5.7 (which did the real verification) and v1.5.10 (hardware).
-
-### v1.1.x arc — Modernization (2026-05-11)
-v1.1.1 compiler-headroom cliff + size pass; v1.1.2 CLOEXEC audit + mount graceful degradation; v1.1.3 cgroup path precomputation; v1.1.4 the QEMU PID-1 boot harness; v1.1.5 the fourth P(-1) audit. 177 tests by the end of the arc.
-
-### v1.1.0 — Foundation refresh (2026-05-11)
-cyrius 5.7.12 → 5.10.44, dist-bundle adoption, argonaut imports extended, `kybernet_run()` renamed off a stdlib collision, cc2-era scripts removed. 140 tests.
-
-### v1.0.2 — Toolchain rebase (2026-04-27)
-cyrius 4.5.0 → 5.7.12, manifest renamed `cyrius.toml` → `cyrius.cyml`, agnosys 1.0.2 / agnostik 1.0.0 / libro 2.0.5 / argonaut 1.5.0. 140 tests.
-
-### v1.0.1 — Release-pipeline patches (2026-04-12)
-Versioning fixups, no source-level changes.
-
-### v1.0.0 — Argonaut-integrated release (2026-04-12)
-JSON config + SIGHUP reload, exponential-backoff restarts, emergency shell, tmpfile directives, structured JSON logging. P(-1) hardening (5 CRITICAL + 3 HIGH). klog batching (2.7x), mount cache (1583x). 140 tests, 46 benchmarks.
-
-### v0.90.0 — Security + argonaut integration
-seccomp BPF, Landlock sandbox, capability dropping, sd_notify socket, full argonaut integration.
-
-### v0.9.0 — Cyrius rewrite
-Complete port from Rust to Cyrius. 727 lines (was 1,649 Rust).
-
-### v0.51.0 — Rust-era fd and signal fixes (2026-04-03)
-`into_raw_fd()` for /dev/console (the `File` destructor was closing stdout's fd); a signal drain loop per epoll wake; `process_pending_restarts` switched to retain+collect.
-
-### v0.50.0 — Rust-era hardening + QEMU boot
-P(-1) audit, QEMU boot testing, crash recovery, clean shutdown.
-
-### v0.1.0 — Scaffold
-Project scaffold, console, mount, signals, reaper, cgroup, privdrop, epoll.
+**Closed and removed from this file:** the v1.5.9 KDF items (all five shipped);
+`drop_cap_sets()` privileged validation (the 1.5.2 `kyb-confined` harness service asserts
+`CapEff=0` / `NoNewPrivs=1` as real root under QEMU).

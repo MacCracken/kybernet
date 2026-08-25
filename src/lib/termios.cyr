@@ -59,7 +59,7 @@ fn termios_get(fd, buf) {
 }
 
 # Write attributes back. `flush` non-zero uses TCSETSF, which discards input
-# received but not yet read — see termios_echo_off for why that matters.
+# received but still unconsumed — see termios_echo_off for why that matters.
 fn termios_set(fd, buf, flush) {
     if (buf == 0) { return 0; }
     var req = TCSETS;
