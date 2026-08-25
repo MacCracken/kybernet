@@ -290,25 +290,34 @@ what this item literally said would have set `memory.max` from argonaut's
 - Every service gets a cgroup, not just the long-lived ones (harness
   teardown count 2 → 6).
 
-### v1.5.6 — argonaut's hardcoded x86_64 syscall numbers
+### v1.5.6 — argonaut's hardcoded x86_64 syscall numbers  ✅ SHIPPED
 
-Found while wiring 1.5.5's pre-exec placement. argonaut calls
-`syscall(N, ...)` with literal x86_64 numbers in paths kybernet uses on
-every service spawn and shutdown, and kybernet ships an aarch64 binary:
+Fixed upstream in **argonaut 1.13.1**; consumed here by bumping the pin.
 
-- `src/process_mgmt.cyr:256` `syscall(112)  # SYS_setsid` — x86_64 setsid is
-  112, aarch64 is **157**. Every service argonaut forks fails to get its own
-  session on aarch64.
-- `src/process_mgmt.cyr:422,443,495` and `src/main.cyr:193`
-  `syscall(35, ...)  # SYS_nanosleep` — aarch64 35 is `unlinkat`. These are
-  the service STOP/poll paths.
-- `src/main.cyr:181` `syscall(0, ...)  # read`; `src/notify.cyr:104`
-  `syscall(41, ...)  # socket`; `src/pid1_harness.cyr:125` `syscall(87, ...)`
+argonaut called `syscall(N, ...)` with literal x86_64 numbers in paths
+kybernet uses on every service spawn and shutdown, and kybernet ships an
+aarch64 binary. The headline: `syscall(112)` for `setsid` is **157** on
+aarch64, so no service argonaut forked ever got its own session on ARM;
+`syscall(35)` for `nanosleep` is `unlinkat` there, in the service STOP/poll
+paths.
 
-This is exactly the class standing rule 1 exists to prevent, in a dep rather
-than in kybernet. Fix is per-site: use the stdlib `sys_*` wrapper, or an
-`#ifdef CYRIUS_ARCH_*` gated enum where none exists. Belongs in argonaut,
-not here.
+argonaut's fix introduces `src/syscall_compat.cyr` — `#ifdef CYRIUS_ARCH_*`
+gated `ag_sys_*` wrappers — and switches `setsid` to the dispatching stdlib
+`sys_setsid()`. Verified the pairs against the kernel tables:
+clock_gettime 228/113, getsid 124/156, sendto 44/206, getsockopt 55/209,
+poll 7/ppoll 73.
+
+⚠ **This changed kybernet's import list, 12 → 13 modules.**
+`types.cyr` / `health.cyr` / `notify.cyr` all call `ag_sys_*`, so
+`src/syscall_compat.cyr` had to be added — first, mirroring argonaut's own
+chain. Omitting it warns `undefined function` and SIGILLs at runtime
+(standing rule 7).
+
+Also folded in: `cyrius.lock` regained the `commit` lines for argonaut and
+agnostik. They were missing from the 1.5.4 and 1.5.5 cuts because the local
+gate runs used a `path` override, which drops the pin and which
+`deps --verify` cannot detect. Now 5 commit-pinned, resolved from the real
+remote tags with no override. See the manifest note in CLAUDE.md.
 
 ### v1.5.7 — close the remaining edge-boot deferrals
 

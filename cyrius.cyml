@@ -85,8 +85,9 @@ modules = ["dist/libro.cyr"]
 # omitted — kybernet IS PID 1; that harness is argonaut's own test rig.
 [deps.argonaut]
 git = "https://github.com/MacCracken/argonaut.git"
-tag = "1.13.0"
+tag = "1.13.1"
 modules = [
+    "src/syscall_compat.cyr",
     "src/types.cyr",
     "src/boot.cyr",
     "src/services.cyr",

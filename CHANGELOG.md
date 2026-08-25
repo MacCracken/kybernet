@@ -7,6 +7,69 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.5.6] — 2026-08-24
+
+**aarch64 service spawning was broken in a dependency, and the lock was
+missing two commit pins.** No kybernet source change. Requires **argonaut
+1.13.1**. 440 assertions, 0 failures.
+
+### Fixed — argonaut's hardcoded x86_64 syscall numbers (upstream)
+
+Found while wiring 1.5.5's pre-exec cgroup placement. argonaut called
+`syscall(N, ...)` with literal **x86_64** numbers in paths kybernet uses on
+every service spawn and every shutdown — and kybernet builds and ships an
+aarch64 binary.
+
+```
+syscall(112)  # setsid      x86_64 112, aarch64 157   -> not setsid on ARM
+syscall(35)   # nanosleep   x86_64  35, aarch64  35 = unlinkat
+syscall(0)    # read        syscall(41) # socket      syscall(87) # unlink
+```
+
+So on aarch64 no service argonaut forked ever got its own session, and the
+service STOP/poll paths called `unlinkat` where they meant to sleep. This is
+exactly the class standing rule 1 exists to prevent, sitting in a dep rather
+than in kybernet — the cross-build succeeds either way, which is the whole
+problem.
+
+argonaut 1.13.1 fixes it with `src/syscall_compat.cyr`: `#ifdef
+CYRIUS_ARCH_*` gated `ag_sys_*` wrappers, plus a switch to the dispatching
+stdlib `sys_setsid()`. Pairs verified against the kernel tables before
+consuming — clock_gettime 228/113, getsid 124/156, sendto 44/206,
+getsockopt 55/209, poll 7 / ppoll 73 (aarch64 has no `poll`).
+
+### Changed — the argonaut import list is 13 modules, and the new one is mandatory
+
+kybernet imports argonaut selectively, so a new module is not picked up
+automatically. `types.cyr`, `health.cyr` and `notify.cyr` — all three
+imported here — now call `ag_sys_*`, so `src/syscall_compat.cyr` is required
+and is listed **first**, mirroring argonaut's own include chain. Omitting it
+produces `undefined function 'ag_sys_clock_gettime'`, which links and then
+**SIGILLs at runtime** (standing rule 7).
+
+### Fixed — `cyrius.lock` was missing the argonaut and agnostik commit pins
+
+Both the 1.5.4 and 1.5.5 cuts shipped a lock with no `commit` line for the
+deps whose local gates had run under a temporary `path = "../<dep>"`
+override. `path` makes cyrius skip commit-pin verification, and the lock is
+written from disk — so the line is simply absent, and
+`cyrius deps --verify` still reports "N verified, 0 failed" because it
+cannot miss what is not there.
+
+This cut resolves from the real remote tags with no override:
+**70 deps locked, 5 commit-pinned** (sigil, agnostik, libro, argonaut,
+patra), 70 verified / 0 failed. Recorded as a manifest rule in CLAUDE.md so
+the next dep change follows dep-tag → regenerate lock → verify pins →
+consumer-tag.
+
+### Benchmarks
+
+No regressions; five improvements, largest `restart_queue_pop_due_empty`
+4 → 3 ns/op. Harness green — 767 ms of a 3000 ms budget, reactor wakeups
+24 of a 500 ceiling.
+
+---
+
 ## [1.5.5] — 2026-08-24
 
 **Per-service cgroup limits are configured, applied, and proven.** Suite
