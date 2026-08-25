@@ -21,6 +21,11 @@
 /qemu/initramfs-edge/
 /qemu/initramfs-auth/
 /qemu/initramfs-auth.cpio.gz
+# The KDF-format auth fixture (1.5.9). Its credential is generated fresh by
+# scripts/mkcred.sh on every build — a new CSPRNG salt each time — so it is
+# an artifact by construction and must never be checked in.
+/qemu/initramfs-auth-kdf/
+/qemu/initramfs-auth-kdf.cpio.gz
 /qemu/initramfs-edge.cpio.gz
 /qemu/edge/
 

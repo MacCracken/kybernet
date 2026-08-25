@@ -1,0 +1,520 @@
+# emergency_auth.cyr — the emergency-shell credential: format, validation,
+# and verification. 1.5.9.
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# Until 1.5.9 the stored credential was a bare unsalted single-round SHA-256
+# hex digest (argonaut's `password_hash`), produced by
+# `printf 'pw' | sha256sum`. That is adequate against someone reading over an
+# operator's shoulder and weak against anyone holding the config file: no
+# salt means one rainbow table covers every AGNOS board at once, and one
+# SHA-256 round means a commodity GPU tries billions of candidates a second.
+#
+# The credential now carries a memory-hard KDF, and it carries its own
+# parameters:
+#
+#     v1$<t>$<m>$<p>$<salt-hex>$<tag-hex>
+#
+# e.g. v1$2$19456$1$4142...4f50$8c19...d428
+#
+# The format is agnostic's (`agnostic/src/auth/crypto.cyr`), adopted
+# unchanged so the AGNOS pack has ONE credential record shape rather than
+# two. Its central decision is the one worth restating here: **parameters
+# are stored, not assumed.** A bare salt+tag verified against compile-time
+# constants means the day anyone raises `m` every existing credential stops
+# verifying — silently, because the recomputation simply no longer matches,
+# and the operator sees "wrong password" on a password that is right.
+#
+# PHC (`$argon2id$v=19$m=...,t=...,p=...$b64salt$b64tag`) was considered and
+# passed over. It would be the more portable spelling, but its B64 is the
+# standard alphabet with padding stripped, and the stdlib has no codec for
+# that shape: `bayan_base64_decode` refuses input whose length is not a
+# multiple of 4 (bayan.cyr:81), and `bayan_base64url_decode` tolerates the
+# missing padding but uses the `-_` alphabet. Adopting PHC therefore meant
+# hand-rolling a base64 codec inside PID 1 to gain interoperability with
+# tools this project does not use. Hex costs nothing new — `hex_decode_into`
+# is already linked and is alloc-free — and it keeps the provisioning script
+# to plain shell (see scripts/mkcred.sh).
+#
+# WHAT RUNS WHERE
+# ---------------
+# Nothing in this file draws entropy. The salt is generated once, offline, by
+# the provisioning tool and travels inside the record; PID 1 only ever reads
+# it. That is deliberate — `random_bytes` blocks until the kernel pool is
+# seeded, and a blocking call at phase 6c is exactly audit rule 22's failure
+# mode.
+#
+# Verification runs in `drop_to_emergency` at phase 6c, BEFORE the event
+# loop: nothing is reaping, nothing services a watchdog. Every bound in this
+# file exists because of that.
+
+# ================================================================
+# Credential kinds
+# ================================================================
+#
+# The two formats are provably disjoint, which is what makes the legacy path
+# impossible to force:
+#   - legacy is EXACTLY 64 characters, all of them [0-9a-fA-F]
+#   - v1 begins "v1$" — 'v' is not a hex digit and '$' is not either
+# No string satisfies both predicates, so a v1 record can never be mistaken
+# for a legacy digest and downgraded onto the unsalted path.
+var EMERG_CRED_NONE = 0;      # nothing configured
+var EMERG_CRED_LEGACY = 1;    # 64-hex unsalted SHA-256 (deprecated)
+var EMERG_CRED_ARGON2ID = 2;  # v1$t$m$p$salt$tag
+var EMERG_CRED_INVALID = 3;   # present but unparseable — always denies
+
+# ================================================================
+# Parameter bounds
+# ================================================================
+#
+# ⚠ THESE ARE NOT sigil's BOUNDS, AND THEY ARE DELIBERATELY TIGHTER AT BOTH
+# ENDS. sigil enforces only RFC 9106 §3.1's *structural* minimums —
+# `t >= 1`, `m >= 8p`, `saltlen >= 8`, `outlen >= 4` (argon2.cyr:395-399) — and
+# no ceiling whatsoever. Every one of those floors is satisfiable by a
+# credential that is worthless (see the notes on each constant below), and the
+# missing ceiling is the roadmap item.
+#
+# WHY REJECT AND NOT CLAMP. The parameters live inside the stored credential,
+# not in a policy knob: kybernet only ever verifies, the provisioning tool
+# generates. Clamping a stored m=1048576 down to 65536 would compute Argon2
+# over different inputs and derive a DIFFERENT tag — so a correct password
+# would fail, permanently, with no diagnostic that says why. Clamping converts
+# a config typo into a brick. Rejecting at LOAD time, with the reason on the
+# console and in dmesg, is the only honest answer (audit rule 19).
+#
+# WHY THE CEILING EXISTS AT ALL, mechanically. `m` feeds `argon2_mem_bytes`
+# directly, and neither it nor `argon2_hash_into` checks for overflow. The
+# clean-failure region is only the very top: `alloc()` refuses `size >
+# ALLOC_MAX` (2 GiB) and `argon2_hash_into` checks `mem == 0`. The DANGEROUS
+# band is 64 MiB..2 GiB, where the anonymous mmap SUCCEEDS — Linux overcommits
+# — and Argon2 then faults in every page, because it touches all of them
+# (fill, then the end-of-call `memset`). In PID 1, which is unkillable, an OOM
+# there is not a dead process, it is `Out of memory and no killable processes`
+# → kernel panic. The 64 MiB ceiling sits exactly at the bottom edge of that
+# band. Worse still: `m = 2^54 + 1024` wraps `argon2_mem_bytes` to 1 MiB, so
+# `alloc()` succeeds and the fill runs far outside it — a wild write from one
+# config integer. `_emerg_parse_bounded` refuses during digit accumulation, so
+# no such value is ever constructed.
+#
+# The timings, measured on this dev host (x86_64, sigil 3.12.x). ARM figures
+# are EXTRAPOLATED — there is no ARM measurement in this repo, and a board
+# deployment should measure rather than trust the multiplier:
+#     m=8192  t=1 p=1  ->   54 ms   (the cheapest legal record)
+#     m=19456 t=2 p=1  ->  232 ms   (the default)
+#     m=65536 t=2 p=1  ->  801 ms   (work cap, memory-heavy corner)
+#     m=16384 t=8 p=1  ->  718 ms   (work cap, time-heavy corner)
+# The last two are the cap's two extremes and they land within 12 % of each
+# other, which is the point of capping the PRODUCT rather than each factor.
+var EMERG_ARGON_T_MIN = 1;
+var EMERG_ARGON_T_MAX = 8;
+
+# ⚠ THE FLOOR IS 8 MiB, NOT sigil's 8 KiB. `argon2_hash_into` enforces only
+# `m_cost >= 8 * parallelism` (argon2.cyr:399) — 8 KiB at p=1 — and that is an
+# RFC *structural* minimum, not a security floor. 8 KiB fits inside a single
+# GPU streaming multiprocessor's shared memory (an RTX 4090 has ~100 KB per
+# SM), so an attacker never touches DRAM and the entire memory-hardness
+# argument evaporates: the credential would be no better than a fast hash with
+# extra steps. 8 MiB exceeds per-SM shared memory by ~80x and forces DRAM
+# traffic, which is the property being bought. It also sits just above OWASP's
+# weakest listed rung (m=7168).
+var EMERG_ARGON_M_MIN = 8192;      # KiB = 8 MiB
+var EMERG_ARGON_M_MAX = 65536;     # KiB = 64 MiB — RFC 9106 §4's second
+# recommended option, exactly
+
+# ⚠ PARALLELISM MUST BE 1. sigil fills lanes serially inside each slice
+# (argon2.cyr:441-445, "filling lane-by-lane inside each slice is a correct
+# serial schedule"), so p > 1 gives THIS defender no speedup at all — while it
+# cuts the sequential depth an attacker must reproduce by a factor of p. It is
+# strictly worse for kybernet in both directions. scripts/mkcred.sh emits p=1;
+# a record from a tool that used RFC 9106's p=4 is refused with a message
+# rather than quietly verified at a discount.
+var EMERG_ARGON_P_MIN = 1;
+var EMERG_ARGON_P_MAX = 1;
+
+# ⚠ THE WORK CAP IS THE ONE THAT BOUNDS THE PID-1 STALL. Memory is not the
+# real hazard — time is. The static ceilings alone still admit m=65536 x t=8 =
+# 524,288 block-operations, which is ~1.2 s on this dev host and an
+# extrapolated 16-26 s on an RPi4-class core, spent at phase 6c where nothing
+# is reaping and nothing services a watchdog (audit rule 22). 131,072 caps that
+# at roughly 4-6 s on the same ARM extrapolation while still admitting every
+# sensible parameter set: the default m=19456 t=2 is 38,912, and OWASP's whole
+# equal-strength ladder sits between 36k and 47k.
+var EMERG_ARGON_WORK_MAX = 131072;
+
+# RFC 9106 §4's recommendations are the FLOORS here, not the RFC §3.1
+# structural minimums (which are 8 bytes of salt and 4 of tag — a 4-byte tag
+# is guessable in 2^32 tries and sigil would accept it).
+var EMERG_SALT_MIN = 16;           # bytes — RFC 9106 §4, 128-bit salt
+var EMERG_SALT_MAX = 64;
+var EMERG_TAG_MIN = 32;            # bytes — RFC 9106 §4, 256-bit tag
+var EMERG_TAG_MAX = 64;
+
+# The parameters scripts/mkcred.sh writes, and what argonaut/agnostik/
+# sy-core all use: RFC 9106's memory-constrained option as OWASP states it.
+var EMERG_ARGON_T_DEFAULT = 2;
+var EMERG_ARGON_M_DEFAULT = 19456;
+var EMERG_ARGON_P_DEFAULT = 1;
+
+# ================================================================
+# Record parsing
+# ================================================================
+
+# The `want`-th `$`-separated field of a record, or 0 when the record has no
+# such field. Returning 0 for "absent" rather than an empty Str is what lets
+# every caller below null-check before use — a truncated record is a real
+# input here (a half-written config, a truncated image), and `str_len(0)`
+# reads through a null Str header, which in PID 1 is a kernel panic. (`str_sub`
+# can also return 0 on allocator failure, so the same null-check covers that.)
+#
+# ⚠ THE RETURNED FIELD IS NOT NUL-TERMINATED. `str_sub` → `str_new` stores the
+# pointer and length without copying (`str.cyr:42-52`), so a field aliases the
+# middle of the record and the byte after it is the `$` separator — or, for the
+# last field, whatever follows the record in the arena. **Every use must carry
+# an explicit length**: `str_len`-bounded loops, or `hex_decode_into(ptr, len,
+# out)`. Never hand a field to anything that reads to a NUL.
+fn _emerg_field(stored, want) {
+    if (stored == 0) { return 0; }
+    var n = str_len(stored);
+    var d = str_data(stored);
+    var field = 0;
+    var start = 0;
+    var i = 0;
+    while (i <= n) {
+        var at_end = 0;
+        if (i == n) { at_end = 1; }
+        else { if ((load8(d + i) & 255) == 36) { at_end = 1; } }   # '$'
+        if (at_end == 1) {
+            if (field == want) { return str_sub(stored, start, i - start); }
+            field = field + 1;
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Parse a bounded non-negative decimal Str. Returns the value, or -1 for an
+# empty field, a non-digit, or anything exceeding `max`.
+#
+# ⚠ The bound is checked INSIDE the accumulation loop, not after it. Checking
+# afterwards lets a long digit run overflow i64 first and land on a small
+# positive number that passes the ceiling — the exact shape that turns a
+# ceiling into decoration.
+fn _emerg_parse_bounded(s, max) {
+    if (s == 0) { return 0 - 1; }
+    var n = str_len(s);
+    if (n <= 0 || n > 19) { return 0 - 1; }
+    var d = str_data(s);
+    var acc = 0;
+    for (var i = 0; i < n; i = i + 1) {
+        var c = load8(d + i);
+        if (c < 48 || c > 57) { return 0 - 1; }
+        acc = acc * 10 + (c - 48);
+        if (acc > max) { return 0 - 1; }
+    }
+    return acc;
+}
+
+# Every character of `s` is [0-9a-fA-F] and there is an even number of them.
+# `str_len` of 0 is rejected — an empty salt field is a malformed record, not
+# a zero-length salt.
+fn _emerg_is_hex(s) {
+    if (s == 0) { return 0; }
+    var n = str_len(s);
+    if (n <= 0) { return 0; }
+    if (n % 2 != 0) { return 0; }
+    var d = str_data(s);
+    for (var i = 0; i < n; i = i + 1) {
+        var c = load8(d + i);
+        var ok = 0;
+        if (c >= 48 && c <= 57)  { ok = 1; }
+        if (c >= 65 && c <= 70)  { ok = 1; }
+        if (c >= 97 && c <= 102) { ok = 1; }
+        if (ok == 0) { return 0; }
+    }
+    return 1;
+}
+
+# Does the record start with the literal "v1$"? Cheap, and checked before any
+# field splitting so a legacy digest never enters the parser at all.
+fn _emerg_has_v1_prefix(h) {
+    if (h == 0) { return 0; }
+    if (str_len(h) < 3) { return 0; }
+    var d = str_data(h);
+    if (load8(d) != 118) { return 0; }      # 'v'
+    if (load8(d + 1) != 49) { return 0; }   # '1'
+    if (load8(d + 2) != 36) { return 0; }   # '$'
+    return 1;
+}
+
+# Classify a stored credential. This is the discriminator the whole migration
+# rests on, so it commits to one answer per input and never guesses:
+#   - 0/empty                     -> NONE
+#   - "v1$..." that fully parses  -> ARGON2ID
+#   - "v1$..." that does not      -> INVALID  (never falls back to LEGACY)
+#   - exactly 64 hex characters   -> LEGACY
+#   - anything else               -> INVALID
+fn emerg_cred_kind(h) {
+    if (h == 0) { return EMERG_CRED_NONE; }
+    if (str_len(h) == 0) { return EMERG_CRED_NONE; }
+    if (_emerg_has_v1_prefix(h) == 1) {
+        if (emerg_cred_parse(h, 0) == 1) { return EMERG_CRED_ARGON2ID; }
+        return EMERG_CRED_INVALID;
+    }
+    if (edge_is_hex64_str(h) == 1) { return EMERG_CRED_LEGACY; }
+    return EMERG_CRED_INVALID;
+}
+
+# Parse and bounds-check a v1 record. Returns 1 when every field is present,
+# well-formed and within range; 0 otherwise.
+#
+# When `out` is non-zero it must point at 5 i64 slots, filled on success:
+#   +0  t_cost        +8  m_cost (KiB)   +16 parallelism
+#   +24 salt bytes    +32 tag bytes
+# `out` is untouched on failure, so a caller cannot read half a record.
+fn emerg_cred_parse(h, out) {
+    if (_emerg_has_v1_prefix(h) == 0) { return 0; }
+
+    # Exactly six fields. A seventh means the record carries something this
+    # version does not understand, and guessing at it is how a format grows a
+    # silent second meaning — refuse instead.
+    if (_emerg_field(h, 6) != 0) { return 0; }
+
+    var tf = _emerg_field(h, 1);
+    var mf = _emerg_field(h, 2);
+    var pf = _emerg_field(h, 3);
+    var sf = _emerg_field(h, 4);
+    var gf = _emerg_field(h, 5);
+    if (tf == 0 || mf == 0 || pf == 0 || sf == 0 || gf == 0) { return 0; }
+
+    var t = _emerg_parse_bounded(tf, EMERG_ARGON_T_MAX);
+    var m = _emerg_parse_bounded(mf, EMERG_ARGON_M_MAX);
+    var p = _emerg_parse_bounded(pf, EMERG_ARGON_P_MAX);
+    if (t < EMERG_ARGON_T_MIN) { return 0; }
+    if (m < EMERG_ARGON_M_MIN) { return 0; }
+    if (p < EMERG_ARGON_P_MIN) { return 0; }
+
+    # RFC 9106 §3.1: m must be at least 8 blocks per lane. sigil enforces this
+    # too; a record that trips it would return SIGIL_ERR_INVALID_INPUT at
+    # verify time, which is a denial with no explanation. Catch it at load.
+    if (m < 8 * p) { return 0; }
+
+    # The combined work cap. Both factors are already individually bounded, so
+    # this product cannot overflow (65536 * 8 = 524,288).
+    if (m * t > EMERG_ARGON_WORK_MAX) { return 0; }
+
+    if (_emerg_is_hex(sf) == 0) { return 0; }
+    if (_emerg_is_hex(gf) == 0) { return 0; }
+    var slen = str_len(sf) / 2;
+    var glen = str_len(gf) / 2;
+    if (slen < EMERG_SALT_MIN || slen > EMERG_SALT_MAX) { return 0; }
+    if (glen < EMERG_TAG_MIN  || glen > EMERG_TAG_MAX)  { return 0; }
+
+    if (out != 0) {
+        store64(out, t);
+        store64(out + 8, m);
+        store64(out + 16, p);
+        store64(out + 24, slen);
+        store64(out + 32, glen);
+    }
+    return 1;
+}
+
+# ================================================================
+# Verification
+# ================================================================
+
+# Verify `password` (raw bytes + length) against a v1 record. 1 on match.
+#
+# Every failure returns 0 and none of them says why — this is the
+# authentication path, and the record's shape is already public but the
+# verdict is not.
+fn _emerg_verify_argon2id(h, pw_data, pw_len) {
+    var prm = alloc(40);
+    if (prm == 0) { return 0; }
+    if (emerg_cred_parse(h, prm) == 0) { return 0; }
+    var t = load64(prm);
+    var m = load64(prm + 8);
+    var p = load64(prm + 16);
+    var slen = load64(prm + 24);
+    var glen = load64(prm + 32);
+
+    var sf = _emerg_field(h, 4);
+    var gf = _emerg_field(h, 5);
+    if (sf == 0 || gf == 0) { return 0; }
+
+    var salt = alloc(slen);
+    var want = alloc(glen);
+    var got  = alloc(glen);
+    if (salt == 0 || want == 0 || got == 0) { return 0; }
+    if (hex_decode_into(str_data(sf), str_len(sf), salt) == 0) { return 0; }
+    if (hex_decode_into(str_data(gf), str_len(gf), want) == 0) { return 0; }
+
+    # ⚠ `argon2id_into`, never `argon2id`. The convenience wrapper allocates
+    # through `fl_alloc`, whose large path (freelist.cyr:401-407) does
+    # `store64(blk, 0)` on the raw `_fl_mmap` return — and `_fl_mmap` returns
+    # a small negative errno on failure, not 0. So on exhaustion it writes
+    # through address -12 and faults BEFORE `argon2id`'s own `if (mem == 0)`
+    # guard can fire. In PID 1 that is a kernel panic. `alloc()` checks its
+    # mmap and returns 0 (alloc.cyr:236), which is why the arena comes from
+    # here.
+    var need = argon2_mem_bytes(m, p);
+    if (need <= 0) { return 0; }
+    var mem = alloc(need);
+    if (mem == 0) { return 0; }
+
+    var rc = argon2id_into(mem, pw_data, pw_len, salt, slen, t, m, p, got, glen);
+    if (rc != 0) { return 0; }
+
+    # Constant-time on the digest compare and only there. The record's
+    # version, parameters and field lengths are public; branching on those
+    # leaks nothing. `ct_eq_bytes` is the stdlib primitive (ct.cyr:45) —
+    # note argonaut's `verify_emergency_auth` reaches for
+    # `constant_time_eq_str`, which is LIBRO's, an undeclared cross-repo
+    # dependency this path deliberately does not inherit.
+    return ct_eq_bytes(got, want, glen);
+}
+
+# The verification kybernet's drop_to_emergency calls, replacing argonaut's
+# `verify_emergency_auth` at the one production call site.
+#
+# The contract is argonaut's, unchanged — same struct, same offsets, same
+# 1 = granted / 0 = denied, same fail-closed behaviour when `require_auth` is
+# set with no credential (argonaut 1.8.6 MEDIUM-3).
+#
+# ⚠ The LEGACY arm delegates to argonaut's function verbatim rather than
+# reimplementing SHA-256 here. That is the strongest migration guarantee
+# available: the deprecated path is not "compatible with" the 1.5.8 code, it
+# IS the 1.5.8 code, and the qemu gate that has asserted it since 1.5.8 keeps
+# asserting the same instructions.
+# A lowercase copy of a hex Str.
+#
+# ⚠ THIS EXISTS BECAUSE HEX IS CASE-INSENSITIVE AND argonaut's COMPARE IS NOT.
+# `edge_is_hex64_str` accepts `A-F`, so an uppercase SHA-256 digest — what
+# Windows `certutil -hashfile`, PowerShell `Get-FileHash` and most online
+# hashers emit — classifies LEGACY and is blessed as usable at load. But
+# argonaut's `verify_emergency_auth` recomputes the digest with
+# `hex_encode_str`, which is lowercase, and compares byte-exact. The verdict
+# would then be 0 for EVERY password, correct or not, and a failed emergency
+# authentication halts PID 1 (main.cyr) — the 1.5.4-1.5.7 brick reached
+# through a different door, and blessed on the way in by the very validation
+# 1.5.9 added to prevent it.
+#
+# Normalising rather than rejecting is the right call: an uppercase digest is
+# the CORRECT credential, differently spelled. Denying a correct password over
+# letter case is precisely the failure mode this release exists to remove.
+# Rule 26 still holds — the legacy arm runs argonaut's unchanged code, it just
+# runs it on the canonical spelling of the same value.
+fn _emerg_hex_lower(h) {
+    var n = str_len(h);
+    var d = str_data(h);
+    var out = alloc(n + 1);
+    if (out == 0) { return 0; }
+    for (var i = 0; i < n; i = i + 1) {
+        var c = load8(d + i);
+        if (c >= 65 && c <= 70) { c = c + 32; }   # 'A'-'F' -> 'a'-'f'
+        store8(out + i, c);
+    }
+    store8(out + n, 0);
+    return str_new(out, n);
+}
+
+fn kyb_verify_emergency_auth(esc, password_input) {
+    if (esc == 0) { return 0; }
+    var require_auth = load64(esc + 24);
+    if (require_auth == 0) { return 1; }
+
+    var stored = load64(esc + 32);
+    if (stored == 0) { return 0; }
+
+    # Guarded once, before the split. The legacy arm used to reach argonaut
+    # unguarded, and `verify_emergency_auth` does `str_data(password_input)` —
+    # `load64(0)` in PID 1 is a kernel panic. Only reachable if `str_new` at
+    # the call site returns 0 on a 16-byte allocation, so it is latent rather
+    # than triggerable; the guard costs nothing and the asymmetry was
+    # accidental.
+    if (password_input == 0) { return 0; }
+
+    var kind = emerg_cred_kind(stored);
+    if (kind == EMERG_CRED_ARGON2ID) {
+        return _emerg_verify_argon2id(stored, str_data(password_input),
+          str_len(password_input));
+    }
+    if (kind == EMERG_CRED_LEGACY) {
+        var canon = _emerg_hex_lower(stored);
+        if (canon == 0) { return 0; }
+        store64(esc + 32, canon);
+        return verify_emergency_auth(esc, password_input);
+    }
+    # NONE is already handled by the `stored == 0` test above; reaching here
+    # means INVALID, and an unparseable credential denies. It should never
+    # get this far — load_config rejects it — but a gate that only works
+    # because an earlier gate ran is not a gate.
+    return 0;
+}
+
+# ================================================================
+# Load-time validation (audit rule 19)
+# ================================================================
+
+# Describe a credential for the boot log. Public information only: the kind
+# and, for v1, the cost parameters. Never the salt and never the tag.
+#
+# Logging the parameters is what makes a typo visible at boot instead of at
+# the prompt: an operator who meant m=19456 and wrote m=1945 sees it in
+# dmesg, months before the night they need the shell.
+fn emerg_cred_describe(h) {
+    var kind = emerg_cred_kind(h);
+    if (kind == EMERG_CRED_NONE) { return str_from("none"); }
+    if (kind == EMERG_CRED_LEGACY) {
+        return str_from("legacy unsalted SHA-256 (DEPRECATED — see scripts/mkcred.sh)");
+    }
+    if (kind == EMERG_CRED_INVALID) { return str_from("malformed"); }
+
+    var prm = alloc(40);
+    if (prm == 0) { return str_from("argon2id"); }
+    if (emerg_cred_parse(h, prm) == 0) { return str_from("argon2id"); }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "argon2id t=");
+    str_builder_add_int(sb, load64(prm));
+    str_builder_add_cstr(sb, " m=");
+    str_builder_add_int(sb, load64(prm + 8));
+    str_builder_add_cstr(sb, "KiB p=");
+    str_builder_add_int(sb, load64(prm + 16));
+    str_builder_add_cstr(sb, " salt=");
+    str_builder_add_int(sb, load64(prm + 24));
+    str_builder_add_cstr(sb, "B tag=");
+    str_builder_add_int(sb, load64(prm + 32));
+    str_builder_add_cstr(sb, "B");
+    return str_builder_build(sb);
+}
+
+# 1 when two stored credentials are the SAME credential.
+#
+# ⚠ Compares CONTENTS, not pointers. `_cfg_str` builds a fresh `Str` box on
+# every parse, so a pointer comparison is always "different" after a reload —
+# which would make `reload_config` announce a credential change on every
+# SIGHUP, including the ones that changed nothing. A log line that cries wolf
+# on every reload is worse than no log line, because the one real rotation
+# then looks like all the noise around it.
+#
+# Both being absent counts as the same. Comparing the record verbatim (rather
+# than, say, just the tag) is right: a parameter change with the same password
+# IS a credential change, and an operator should see it.
+fn emerg_cred_same(a, b) {
+    if (a == 0 && b == 0) { return 1; }
+    if (a == 0 || b == 0) { return 0; }
+    return str_eq(a, b);
+}
+
+# 1 when `h` is a credential this build can actually verify, 0 when it is
+# present but unusable. A 0 here must make the caller drop the credential —
+# see load_config, which sets g_emerg_hash back to 0 so phase 6c takes the
+# "no credential configured, suppress the shell" branch rather than the
+# "prompt for a password nothing can ever match" one.
+fn emerg_cred_usable(h) {
+    var kind = emerg_cred_kind(h);
+    if (kind == EMERG_CRED_LEGACY) { return 1; }
+    if (kind == EMERG_CRED_ARGON2ID) { return 1; }
+    return 0;
+}

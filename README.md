@@ -45,7 +45,7 @@ Requires Cyrius 6.5.35 (`cyriusly install 6.5.35 && cyriusly use 6.5.35`).
 ```sh
 cyrius deps                                # Resolve deps from cyrius.cyml into lib/
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet   # Build (DCE recommended)
-cyrius test src/test.cyr                   # Run 491 tests
+cyrius test src/test.cyr                   # Run 567 tests
 cyrius bench src/bench.cyr                 # Run benchmarks
 ```
 
@@ -53,10 +53,11 @@ cyrius bench src/bench.cyr                 # Run benchmarks
 
 | Module | Lines | What |
 |--------|-------|------|
-| main | 1343 | Boot sequence, argonaut init, event loop, emergency shell, shutdown |
+| main | 1393 | Boot sequence, argonaut init, event loop, emergency shell, shutdown |
 | edge_boot | 567 | Verified-boot pre-flight: TPM PCR, dm-verity verification |
 | cgroup | 555 | Cgroup v2 controllers, paths, limits, move, kill, teardown |
 | svc_config | 493 | JSON → ServiceDefinition; security, limits and edge blocks |
+| emergency_auth | 478 | Argon2id credential: record format, parameter bounds, legacy migration |
 | sandbox | 325 | Landlock filesystem sandboxing (builder pattern) |
 | seccomp | 306 | Seccomp BPF filter builder + loader |
 | eventloop | 268 | epoll, timerfds, arch-gated `struct epoll_event` ABI |
@@ -73,7 +74,7 @@ cyrius bench src/bench.cyr                 # Run benchmarks
 | reaper | 75 | Non-blocking waitpid loop, structured results |
 | cmdline | 56 | `/proc/cmdline` token scanning |
 
-**5,403 lines of Cyrius** across `main.cyr` + 18 modules.
+**5,931 lines of Cyrius** across `main.cyr` + 19 modules.
 
 ## Features
 
@@ -105,7 +106,22 @@ cyrius bench src/bench.cyr                 # Run benchmarks
   handler.
 - **Authenticated emergency shell** — optional, opt-in via config. Reads from a
   real `/dev/console` with terminal echo suppressed, on a bounded wait; a
-  rejection halts rather than rebooting into the condition that caused it.
+  rejection halts rather than rebooting into the condition that caused it. The
+  credential is **Argon2id** in a self-describing record that carries its own
+  cost parameters (1.5.9):
+
+  ```
+  "emergency_require_auth": true,
+  "emergency_password_hash": "v1$2$19456$1$<salt-hex>$<tag-hex>"
+  ```
+
+  Generate one with `./scripts/mkcred.sh` (needs OpenSSL 3.2+, whose Argon2id
+  is byte-identical to sigil's). Parameters are validated at config-load time
+  and out-of-range values are **rejected, never clamped** — clamping a
+  verification parameter derives a different tag and would lock the board out
+  permanently. The pre-1.5.9 unsalted 64-hex SHA-256 digest still verifies for
+  one release; the two formats are provably disjoint, so a new record can never
+  be downgraded onto the old path.
 - **Audit logging** — a SHA-256 hash-linked chain via libro, maintained by
   argonaut. Note it is **in-memory only**: kybernet makes no direct `audit_*`
   call and never enables `audit_persist`, so the chain does not survive a
@@ -115,7 +131,7 @@ cyrius bench src/bench.cyr                 # Run benchmarks
 - **Data-driven mount table** — not hardcoded per-mount calls
 - **sd_notify compatible** — READY, STOPPING, WATCHDOG, STATUS, RELOADING messages via epoll
 - **String builder** for path construction and logging
-- **491 tests**, 54 benchmarks
+- **567 tests**, 54 benchmarks
 
 ## Dependencies
 
@@ -123,7 +139,7 @@ Resolved via `cyrius.cyml` (locked in `cyrius.lock`):
 
 | Dep | Version | What |
 |-----|---------|------|
-| sigil | 3.12.9 | TPM / crypto trust surface (thin sub-bundles only) |
+| sigil | 3.12.10 | TPM / crypto trust surface + Argon2id (thin sub-bundles only; toolchain brought to 6.5.35 at this tag) |
 | agnostik | 1.5.1 | Shared AGNOS types (security, agent, error) |
 | libro | 2.8.12 | Cryptographic audit chain |
 | argonaut | 1.13.2 | Service lifecycle, boot stages, health, audit, pre-exec + extra-env hooks |
@@ -135,7 +151,10 @@ modules from `~/.cyrius/lib/`.
 
 sigil is pulled as a **thin** set of capability sub-bundles rather than the
 monolithic `dist/sigil.cyr`, whose x509/RSA bignum banks add static `.bss`
-that dead-code elimination cannot strip.
+that dead-code elimination cannot strip. The same reasoning drove sigil
+3.12.10: its Argon2 profile carried a 352 KB banked static that DCE also could
+not strip, so linking it cost +377 KB for a function called at most once per
+boot. With the working lane moved onto the caller's arena it costs +25 KB.
 
 ## Documentation
 
@@ -151,22 +170,27 @@ that dead-code elimination cannot strip.
 ## Testing
 
 ```sh
-cyrius test src/test.cyr            # 491 assertions
+cyrius test src/test.cyr            # 567 assertions
 bash scripts/bench-history.sh       # 54 benchmarks + regression gate
 bash qemu/boot-test.sh              # PID-1 boot harness (needs KVM)
 ```
 
 The QEMU harness is the gate that matters: it boots kybernet as real PID 1 and
-asserts 35 properties across four passes — the boot sequence, the reactor
+asserts 42 properties across four passes — the boot sequence, the reactor
 (that it sleeps rather than spins), dm-verity verification against a real
 image pair on virtio disks, and the emergency-auth prompt with a password fed
-over the serial line.
+over the serial line. Pass 4 runs against **both** credential formats: the
+deprecated unsalted SHA-256 digest, and an Argon2id `v1` record generated by
+`scripts/mkcred.sh` itself — so the tool operators are given and the code that
+verifies its output are checked against each other under a real PID 1.
 
 ## Requirements
 
 - Linux, x86_64 or aarch64 (both are release-gated; `cyrius build --aarch64`)
 - Cyrius 6.5.35 (`~/.cyrius/bin/cyrius`)
 - No C, no Rust, no libc
+- OpenSSL 3.2+ — **provisioning only**, for `scripts/mkcred.sh`. Nothing kybernet
+  runs at boot depends on it; the verifier is sigil's own Argon2id.
 
 ## Legacy
 

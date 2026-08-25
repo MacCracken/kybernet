@@ -1,45 +1,12 @@
 # Kybernet Roadmap
 
-**Current: v1.5.8** — see [CHANGELOG.md](../../CHANGELOG.md) for what each release
+**Current: v1.5.9** — see [CHANGELOG.md](../../CHANGELOG.md) for what each release
 actually did. This file carries only what is NOT done; everything shipped is a one-line
 entry under [History](#history).
 
 ---
 
 ## Active
-
-### v1.5.9 — salted KDF for the emergency password
-
-Deferred from 1.5.8 deliberately, not skipped. The gate had to work at all
-before the credential format was worth hardening, and the investigation
-turned up three things that need resolving first:
-
-- [ ] **`argon2id()` cannot be called from PID 1 as sigil ships it.** It
-      allocates through `fl_alloc`, whose large path stores to the raw
-      `mmap` return without checking it — so on memory exhaustion it faults
-      instead of returning the error its own `if (mem == 0)` guard expects.
-      Reproduced: exit 139. kybernet must use `argon2id_into(mem, ...)` with
-      an `alloc()` arena, which fails cleanly
-- [ ] **sigil's argon2 profile costs +377 KB, and 352 KB of it is `.bss`** —
-      a single `var SCR[352256]` that DCE cannot strip. Fixable in sigil by
-      taking the scratch lane off the tail of the caller-supplied arena
-      (**not** by caching it in a global — that is audit rule 8, a bump-arena
-      pointer in a static, and it was tried and rejected during this work)
-- [ ] **There is no provisioning story at all.** Nothing in either repo tells
-      an operator how to produce `emergency_password_hash`. Today it happens
-      to be `printf 'pw' | sha256sum`; with a salted KDF that stops being
-      possible with coreutils, so a generator has to ship with the format
-- [ ] Migration: a stored 64-hex SHA-256 must keep working for one release,
-      and the new format must be unambiguous enough that it cannot be
-      downgraded to the legacy path
-- [ ] Parameter CEILING as well as floor — `fl_alloc` has no upper bound, so
-      an `m_cost` parsed from config could OOM or hang PID 1
-
-PBKDF2 was evaluated and rejected: sigil's SHA-256 acceleration is
-`#ifdef CYRIUS_ARCH_X86` only, so every ARM edge board runs the software
-path — measured at ~164x slower than OpenSSL, which buys roughly 6-9k
-iterations in a 1 s budget against an attacker doing millions. Argon2's
-BLAKE2b has no such gap.
 
 ### v1.5.10 — edge boot on real hardware (was v1.2.2)
 
@@ -64,6 +31,35 @@ test pass is scaffolding in the one process that must never crash.
 - **Control socket for agnoshi runtime commands** — separate transport surface; pinned until an agnoshi consumer drives the protocol shape
 - **Binary signing on release** — pinned until libro signing/timestamping is consumer-driven from outside kybernet's tree
 
+## Opened by v1.5.9 — not blocking, but real
+
+- [ ] **The credential lives in a world-readable config file.** `/etc/kybernet/config.json`
+      carries `emergency_password_hash` alongside everything else. Moving it to
+      `/etc/kybernet/emergency.cred` at 0600 costs almost nothing and completely
+      defeats a local unprivileged reader. It does **not** defeat the image-holder
+      adversary — which is why it complements the KDF rather than replacing it, and
+      why 1.5.9 did the KDF first. It changes the config surface, so it is its own
+      release.
+- [ ] **Argon2 has never been measured on ARM.** Every timing behind the 1.5.9 work
+      cap is x86_64 (m=19456/t=2 → 230 ms here); the RPi4 figures are *extrapolated*,
+      and there is no aarch64 row anywhere in `benches/history.csv`. The cross-build
+      is release-gated but never executed. Measure on a board before trusting the
+      ceiling.
+- [ ] **A dynamic memory ceiling.** 1.5.9 caps `m_cost` statically at 64 MiB, which
+      sits exactly at the bottom edge of the band where an anonymous mmap succeeds
+      and the touch OOMs. `system_free_memory()` exists (`~/.cyrius/lib/sys.cyr:366`)
+      and an `m*1024 <= free/4` check would close the small-board case. Deliberately
+      not shipped: a bound that depends on free RAM at boot makes a credential valid
+      on one board and invalid on another — a new failure mode traded for a narrow
+      gain. Revisit if a board under 512 MB appears.
+- [ ] **`fl_alloc`'s unchecked mmap return is still there**, in two places
+      (`freelist.cyr:404-406` large path, `:231-241` arena refill). Both store through
+      `_fl_mmap`'s raw return, which is a negative errno on failure. kybernet works
+      around it (audit rule 24), but every other consumer of sigil's allocating
+      crypto wrappers is exposed, and sigil's own `if (mem == 0)` guards are dead
+      code because of it. The cyrius repo is off-limits from here — this wants
+      filing upstream, not fixing.
+
 **Closed since this list was written:** validating `drop_cap_sets()` on privileged
 hardware. The unit suite runs unprivileged, where every capability path short-circuits on
 the euid check — but the 1.5.2 harness `kyb-confined` service asserts `CapEff=0` and
@@ -73,6 +69,9 @@ as root and `capset(2)` really executes. See `qemu/boot-test.sh`.
 ---
 
 ## History
+
+### v1.5.9 — Salted, memory-hard emergency credential (2026-08-25)
+All five sub-items closed, none deferred. The credential is Argon2id in a self-describing `v1$t$m$p$salt$tag` record — agnostic's format, adopted unchanged rather than inventing a second one for the pack. PHC was passed over: its B64 is the standard alphabet with padding stripped and no stdlib codec handles that shape, so it meant hand-rolling base64 inside PID 1 to interoperate with tools this project does not use. `argon2id_into` over an `alloc()` arena, never the `fl_alloc` wrapper whose own `mem == 0` guard is dead code. Provisioning is `scripts/mkcred.sh` over `openssl kdf`, proved byte-identical to sigil — so no compiled tool, which matters because PID 1 has no command line at all. Parameter bounds are rejections, never clamps: a clamped `m` derives a different tag and bricks the board. The floor mattered as much as the ceiling — sigil accepts `m=8 KiB`, which fits in a GPU streaming multiprocessor and surrenders memory-hardness entirely. sigil 3.12.10 moved the Argon2 working lane onto the caller's arena, turning a +377 KB link into +25 KB. Legacy 64-hex still verifies by delegating to argonaut's unchanged code, and both formats are gated in QEMU. 567 tests, 42 harness properties.
 
 ### v1.5.8 — The emergency-auth gate actually works (2026-08-25)
 Both roadmap items were aimed past a defect that made the gate non-functional. `setup_console` points fd 0 at /dev/null by design, and the password prompt added at 1.5.4 read fd 0 — so it got EOF instantly and every authentication failed, correct password or not. 1.5.7's forced `require_auth` on an edge refusal turned that into a reboot loop recoverable only from the bootloader. Reproduced in QEMU before any change. Interactive reads now open their own /dev/console (`O_RDWR|O_NOCTTY`); console echo suppression added in a new `src/lib/termios.cyr` (the stdlib has no ioctl, termios or poll — filed as a cyrius issue); the read is bounded; a rejection halts instead of rebooting; the shell got a real stdin and a real envp. Harness feeds a password over the serial line. Salted KDF deferred to 1.5.9. 491 tests.

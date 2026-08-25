@@ -36,6 +36,7 @@ include "src/lib/seccomp.cyr"
 include "src/lib/sandbox.cyr"
 include "src/lib/edge_boot.cyr"
 include "src/lib/svc_config.cyr"
+include "src/lib/emergency_auth.cyr"
 include "src/lib/service_sandbox.cyr"
 include "src/lib/restart_queue.cyr"
 include "src/lib/boot_stages.cyr"
@@ -165,6 +166,30 @@ fn load_config() {
     # locks the shell rather than opening it. 1.5.4.
     g_emerg_require_auth = _cfg_bool(root, "emergency_require_auth", 0);
     g_emerg_hash = _cfg_str(root, "emergency_password_hash", 0);
+
+    # Validate the credential HERE, not at the prompt. Until 1.5.9 this was
+    # the one config key with no validation at all: `_cfg_str` returns
+    # whatever string is present, so a truncated or mistyped hash was
+    # accepted at load and surfaced months later as an unexplained
+    # "AUTHENTICATION FAILED" on the one night an operator needed the shell.
+    # Rule 19's principle — a typo should be a readable config error, not a
+    # phase-6c lockout.
+    #
+    # An unusable credential is DROPPED rather than kept. That matters
+    # because phase 6c branches on `g_emerg_hash != 0`: with the credential
+    # dropped, an edge refusal suppresses the root shell entirely; with it
+    # kept, kybernet would prompt for a password that nothing could ever
+    # match and then halt. Both are closed, but only one is honest.
+    if (g_emerg_hash != 0) {
+        if (emerg_cred_usable(g_emerg_hash) == 0) {
+            klog("config: emergency_password_hash is malformed — credential REJECTED");
+            kmsg("kybernet: config: malformed emergency_password_hash, credential rejected");
+            g_emerg_hash = 0;
+        } else {
+            klog2("config: emergency credential: ", str_data(emerg_cred_describe(g_emerg_hash)));
+        }
+    }
+
     if (g_emerg_require_auth == 1) {
         klog("config: emergency shell requires authentication");
     }
@@ -227,11 +252,36 @@ fn _u64_str(n) {
 # is up, and says plainly that the rest needs a reboot. Honest and narrow
 # beats a reload that appears total and is not.
 fn reload_config() {
+    # The emergency credential is a side effect of load_config(), and it was
+    # an UNDOCUMENTED one until 1.5.9: a SIGHUP silently swapped the password
+    # the recovery shell would accept, with nothing in the log to say so.
+    # Re-reading it is the right behaviour — an operator rotating the
+    # credential should not have to reboot to apply it — but a reload that
+    # changes an authentication credential and says nothing is exactly the
+    # kind of "appears total and is not" this function was written to avoid.
+    # Capture the old value so the change can be named.
+    var prev_hash = g_emerg_hash;
+    var prev_req = g_emerg_require_auth;
+
     var new_cfg = load_config();
     if (new_cfg == 0) { return 0; }
 
     var old_cfg = g_config;
     g_config = new_cfg;
+
+    if (prev_req != g_emerg_require_auth) {
+        if (g_emerg_require_auth == 1) {
+            klog("config reload: emergency shell now REQUIRES authentication");
+        } else {
+            klog("config reload: emergency shell no longer requires authentication");
+        }
+    }
+    if (emerg_cred_same(prev_hash, g_emerg_hash) == 0) {
+        # The describe() output is parameters only — never the salt, never
+        # the tag. See emerg_cred_describe.
+        klog2("config reload: emergency credential CHANGED: ",
+          str_data(emerg_cred_describe(g_emerg_hash)));
+    }
 
     if (g_init != 0) {
         # Live-applicable scalars only. These are read fresh on each use,
@@ -343,7 +393,13 @@ fn _read_line_fd(fd, buf, cap, deadline_ms) {
                 if (c == 10 || c == 13) { used = i; saw_nl = 1; break; }
             }
             if (saw_nl == 1) { break; }
-            if (used >= cap - 1) { break; }
+            # ⚠ OVERFLOW IS AN ERROR, NOT A TRUNCATION. This used to `break`
+            # and return the first `cap - 1` bytes, so a passphrase longer
+            # than the buffer was silently verified as a DIFFERENT password —
+            # denied every time, and a denial halts PID 1 forever. Silently
+            # comparing a prefix is also the shape that could let a shorter
+            # provisioned password be satisfied by a longer typed one.
+            if (used >= cap - 1) { return 0 - 2; }
         }
         sleep_ms(50);
     }
@@ -369,7 +425,14 @@ fn _prompt_password(fd, buf, cap) {
         klog("emergency shell: could not disable echo — password will be VISIBLE");
     }
 
+    # The deadline in _read_line_fd is only real if the descriptor is
+    # non-blocking — a canonical-mode tty otherwise parks the first read until
+    # a line arrives and the loop never re-tests the clock. Cleared again
+    # below, on every path, because this same fd becomes the shell's stdin.
+    var nb = console_set_nonblock(fd, 1);
+
     var plen = _read_line_fd(fd, buf, cap, 120000);
+    if (nb == 1) { console_set_nonblock(fd, 0); }
 
     # Restore on EVERY path — success, wrong password, empty, timeout. Echo
     # left off would hand the operator a shell that shows nothing they type.
@@ -445,16 +508,25 @@ fn drop_to_emergency() {
             kmsg("kybernet: emergency auth impossible — no console; halting rather than reboot-looping");
             while (1 == 1) { sys_pause(); }
         }
-        var pbuf = alloc(256);
-        var plen = _prompt_password(con, pbuf, 256);
+        # 512, not 256: scripts/mkcred.sh recommends a multi-word passphrase
+        # and caps the password at 256 bytes, so the prompt must be able to
+        # accept every credential the provisioning tool can mint, with room
+        # for the NUL. A password that does not fit is now an explicit -2
+        # rather than a silent truncation.
+        var pbuf = alloc(512);
+        var plen = _prompt_password(con, pbuf, 512);
         var granted = 0;
+        if (plen == 0 - 2) {
+            klog("emergency shell: password too long for the input buffer");
+            sys_write(con, "Password too long.\n", 19);
+        }
         if (plen >= 0) {
-            granted = verify_emergency_auth(esc, str_new(pbuf, plen));
+            granted = kyb_verify_emergency_auth(esc, str_new(pbuf, plen));
         }
         # Wipe the plaintext regardless of the verdict. The arena is never
         # reset in PID 1, so anything left here persists for the life of
         # the system in a process that can be core-dumped.
-        for (var z = 0; z < 256; z = z + 1) { store8(pbuf + z, 0); }
+        for (var z = 0; z < 512; z = z + 1) { store8(pbuf + z, 0); }
         if (granted == 0) {
             klog("emergency shell: AUTHENTICATION FAILED");
             sys_write(con, "Authentication failed.\n", 23);

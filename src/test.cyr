@@ -20,6 +20,7 @@ include "src/lib/seccomp.cyr"
 include "src/lib/sandbox.cyr"
 include "src/lib/edge_boot.cyr"
 include "src/lib/svc_config.cyr"
+include "src/lib/emergency_auth.cyr"
 include "src/lib/service_sandbox.cyr"
 include "src/lib/restart_queue.cyr"
 include "src/lib/boot_stages.cyr"
@@ -924,6 +925,297 @@ fn test_emergency_auth() {
     # length-blind compare.
     assert_eq(verify_emergency_auth(esc, str_from("hunter")), 0,
       "emerg: prefix of the password -> denied");
+    return 0;
+}
+
+# ================================================================
+# Emergency credential: format, bounds, verification (1.5.9)
+# ================================================================
+#
+# The stored credential stopped being a bare unsalted SHA-256 hex digest at
+# 1.5.9. These pin three separate things, and the third is the one that
+# matters most for the migration:
+#   1. the v1 record parses, bounds-checks, and verifies
+#   2. the legacy 64-hex digest still verifies, unchanged
+#   3. the two are DISJOINT — no input reaches the wrong arm
+#
+# ⚠ THE VECTORS ARE NOT SELF-GENERATED. Both records were produced by
+# OpenSSL 3.6.3's `openssl kdf ... ARGON2ID`, an independent implementation:
+#
+#   salt=$(printf 'kybernet-test-01' | xxd -p)
+#   openssl kdf -keylen 32 -kdfopt pass:hunter2 -kdfopt hexsalt:$salt \
+#       -kdfopt iter:2 -kdfopt memcost:19456 -kdfopt lanes:1 -binary ARGON2ID
+#
+# So a green run here proves sigil's Argon2id agrees with OpenSSL byte for
+# byte, not merely that it agrees with itself. It is also exactly what
+# scripts/mkcred.sh emits, so the generator and the verifier are checked
+# against each other rather than assumed to match.
+var TV_SALT_HEX = "6b796265726e65742d746573742d3031";
+# m=8192 KiB, t=1 — the cheap vector (~55 ms), so the suite does not pay
+# the 230 ms default cost on every negative case. 8192 is the FLOOR: sigil
+# would accept m=8, which fits in a GPU SM and buys nothing.
+var TV_CHEAP = "v1$1$8192$1$6b796265726e65742d746573742d3031$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640";
+# m=19456 KiB, t=2, p=1 — the real default. RFC 9106's memory-constrained
+# option as OWASP states it, and what Rust's Argon2::default() emits.
+var TV_REAL = "v1$2$19456$1$6b796265726e65742d746573742d3031$2b314f63f14b4817f38b55e7c5c53e55a4973ce075d7a95ad2da3a4aa7c57c5e";
+
+fn _cred_kind_of(cs) {
+    return emerg_cred_kind(str_from(cs));
+}
+
+fn test_emergency_cred_format() {
+    println("--- emergency credential format (1.5.9) ---");
+
+    # --- classification -------------------------------------------------
+    assert_eq(emerg_cred_kind(0), EMERG_CRED_NONE, "cred: null is NONE");
+    assert_eq(_cred_kind_of(""), EMERG_CRED_NONE, "cred: empty is NONE");
+    assert_eq(_cred_kind_of(TV_CHEAP), EMERG_CRED_ARGON2ID, "cred: v1 record is ARGON2ID");
+    assert_eq(_cred_kind_of(TV_REAL), EMERG_CRED_ARGON2ID, "cred: default-param record is ARGON2ID");
+
+    # The 1.5.8 credential — sha256("hunter2"). This exact string is what
+    # qemu/build-initramfs.sh has written since 1.5.8.
+    var legacy = "f52fbd32b2b3b86ff88ef6c490628285f482af15ddcb29541f94bcf526a3f6c7";
+    assert_eq(_cred_kind_of(legacy), EMERG_CRED_LEGACY, "cred: 64-hex is LEGACY");
+
+    # --- the disjointness that makes downgrade impossible ---------------
+    # A v1 record can never satisfy the legacy predicate: it contains '$'
+    # and 'v', neither of which is a hex digit, and it is far longer than
+    # 64 characters. Asserted from both directions so a future edit to
+    # either predicate has to argue with a test.
+    assert_eq(edge_is_hex64_str(str_from(TV_CHEAP)), 0, "cred: v1 record is NOT hex64");
+    assert_eq(edge_is_hex64_str(str_from(TV_REAL)), 0, "cred: default record is NOT hex64");
+    assert_eq(emerg_cred_parse(str_from(legacy), 0), 0, "cred: legacy digest does not parse as v1");
+
+    # --- malformed records are refused, never downgraded ----------------
+    # Every one of these is INVALID, not LEGACY — a truncated or corrupt v1
+    # record must not fall back onto the unsalted path.
+    assert_eq(_cred_kind_of("v1"), EMERG_CRED_INVALID, "cred: bare v1 is INVALID");
+    assert_eq(_cred_kind_of("v1$"), EMERG_CRED_INVALID, "cred: v1$ is INVALID");
+    assert_eq(_cred_kind_of("v1$2$19456$1"), EMERG_CRED_INVALID, "cred: truncated before salt is INVALID");
+    assert_eq(_cred_kind_of("v1$2$19456$1$6b796265726e65742d746573742d3031"), EMERG_CRED_INVALID,
+      "cred: missing tag field is INVALID");
+    assert_eq(_cred_kind_of("v9$2$19456$1$6b796265726e65742d746573742d3031$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640"),
+      EMERG_CRED_INVALID, "cred: unknown version is INVALID");
+    assert_eq(_cred_kind_of("nonsense"), EMERG_CRED_INVALID, "cred: garbage is INVALID");
+    # 63 hex chars — one short of legacy, and not v1 either.
+    assert_eq(_cred_kind_of("f52fbd32b2b3b86ff88ef6c490628285f482af15ddcb29541f94bcf526a3f6c"),
+      EMERG_CRED_INVALID, "cred: 63 hex chars is INVALID, not LEGACY");
+    # A seventh field means the record carries something this version does
+    # not understand. Guessing is how a format grows a silent second meaning.
+    assert_eq(_cred_kind_of("v1$1$8192$1$6b796265726e65742d746573742d3031$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640$extra"),
+      EMERG_CRED_INVALID, "cred: a seventh field is INVALID");
+    # Non-hex in the salt / tag.
+    assert_eq(_cred_kind_of("v1$1$8192$1$zz796265726e65742d746573742d3031$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640"),
+      EMERG_CRED_INVALID, "cred: non-hex salt is INVALID");
+    # Odd-length hex cannot be decoded into bytes.
+    assert_eq(_cred_kind_of("v1$1$8192$1$6b796265726e65742d746573742d303$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640"),
+      EMERG_CRED_INVALID, "cred: odd-length salt hex is INVALID");
+    assert_eq(_cred_kind_of("v1$1$8192$1$6b796265726e65742d746573742d3031$182bc4a43ebb6d009ccafa43450d0bf934f584ab185e714d3d506538fb35399"),
+      EMERG_CRED_INVALID, "cred: odd-length tag hex is INVALID");
+
+    # --- parameter bounds (the roadmap's ceiling item) ------------------
+    # These are the reason the ceiling exists: sigil applies a FLOOR to
+    # m_cost and no ceiling at all, and argon2_mem_bytes has no overflow
+    # check — m_cost = 2^54 + 1024 wraps its byte count down to 1 MiB, so
+    # alloc() succeeds and the fill then runs far out of bounds. Inside
+    # PID 1 that is a wild write. The bound is enforced during decimal
+    # accumulation, so a long digit run is refused before it can wrap.
+    assert_eq(_cred_kind_of("v1$2$18014398509482928$1$6b796265726e65742d746573742d3031$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640"),
+      EMERG_CRED_INVALID, "cred: m_cost 2^54+1024 refused (the wrap-to-1MiB wild write)");
+    assert_eq(_cred_kind_of("v1$2$99999999999999999999$1$6b796265726e65742d746573742d3031$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640"),
+      EMERG_CRED_INVALID, "cred: 20-digit m_cost refused before overflow");
+    assert_eq(_cred_kind_of("v1$2$65537$1$6b796265726e65742d746573742d3031$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640"),
+      EMERG_CRED_INVALID, "cred: m_cost one above the 64 MiB ceiling refused");
+    assert_eq(_cred_kind_of("v1$9$8192$1$6b796265726e65742d746573742d3031$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640"),
+      EMERG_CRED_INVALID, "cred: t_cost above ceiling refused");
+    # The floor sigil does NOT provide: it accepts m >= 8*p, i.e. 8 KiB at
+    # p=1, which fits inside one GPU streaming multiprocessor's shared memory
+    # and surrenders the entire memory-hardness argument.
+    assert_eq(_cred_kind_of("v1$1$64$1$6b796265726e65742d746573742d3031$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640"),
+      EMERG_CRED_INVALID, "cred: m_cost 64 KiB refused (sigil would accept it)");
+    assert_eq(_cred_kind_of("v1$1$8191$1$6b796265726e65742d746573742d3031$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640"),
+      EMERG_CRED_INVALID, "cred: m_cost one below the 8 MiB floor refused");
+    # parallelism > 1: sigil fills lanes serially, so p>1 is free for the
+    # attacker and worth nothing to the defender.
+    assert_eq(_cred_kind_of("v1$1$8192$4$6b796265726e65742d746573742d3031$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640"),
+      EMERG_CRED_INVALID, "cred: parallelism 4 refused (serial fill, no defender gain)");
+    # The work cap. Both factors are individually legal here; the product is
+    # not — without it phase 6c could stall for tens of seconds on ARM.
+    assert_eq(_cred_kind_of("v1$8$65536$1$6b796265726e65742d746573742d3031$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640"),
+      EMERG_CRED_INVALID, "cred: m*t above the work cap refused (65536 x 8)");
+    assert_eq(_cred_kind_of("v1$2$65536$1$6b796265726e65742d746573742d3031$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640"),
+      EMERG_CRED_ARGON2ID, "cred: m*t exactly at the work cap accepted");
+    # A 16-byte tag satisfies sigil (floor 4) but not RFC 9106 §4's 256 bits.
+    assert_eq(_cred_kind_of("v1$1$8192$1$6b796265726e65742d746573742d3031$182bc4a43ebb6d009ccafa43450d0bf9"),
+      EMERG_CRED_INVALID, "cred: 16-byte tag refused (RFC 9106 §4 wants 32)");
+    # An 8-byte salt satisfies sigil (floor 8) but not RFC 9106 §4's 128 bits.
+    assert_eq(_cred_kind_of("v1$1$8192$1$6b796265726e6574$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640"),
+      EMERG_CRED_INVALID, "cred: 8-byte salt refused (RFC 9106 §4 wants 16)");
+    assert_eq(_cred_kind_of("v1$0$8192$1$6b796265726e65742d746573742d3031$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640"),
+      EMERG_CRED_INVALID, "cred: t_cost 0 refused (RFC floor)");
+    assert_eq(_cred_kind_of("v1$1$8192$0$6b796265726e65742d746573742d3031$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640"),
+      EMERG_CRED_INVALID, "cred: parallelism 0 refused");
+    assert_eq(_cred_kind_of("v1$1$-64$1$6b796265726e65742d746573742d3031$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640"),
+      EMERG_CRED_INVALID, "cred: negative m_cost refused (no sign accepted)");
+    # m < 8*p is sigil's own floor; catching it here turns an unexplained
+    # denial at phase 6c into a config error at load.
+    assert_eq(_cred_kind_of("v1$1$16$4$6b796265726e65742d746573742d3031$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640"),
+      EMERG_CRED_INVALID, "cred: m_cost < 8*parallelism refused");
+    # A salt below RFC 9106's 8-byte floor.
+    assert_eq(_cred_kind_of("v1$1$8192$1$6b79626572$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640"),
+      EMERG_CRED_INVALID, "cred: 5-byte salt refused");
+
+    # --- the parsed values are the record's, not the defaults -----------
+    var prm = alloc(40);
+    assert_eq(emerg_cred_parse(str_from(TV_REAL), prm), 1, "cred: default record parses");
+    assert_eq(load64(prm), 2, "cred: t_cost read from the record");
+    assert_eq(load64(prm + 8), 19456, "cred: m_cost read from the record");
+    assert_eq(load64(prm + 16), 1, "cred: parallelism read from the record");
+    assert_eq(load64(prm + 24), 16, "cred: 16-byte salt");
+    assert_eq(load64(prm + 32), 32, "cred: 32-byte tag");
+
+    # `out` must be untouched on failure — a caller must never read half a
+    # record. Poison the buffer and confirm a rejected parse leaves it.
+    store64(prm, 0 - 7);
+    assert_eq(emerg_cred_parse(str_from("v1$9$8192$1$6b796265726e65742d746573742d3031$182bc4a4"), prm), 0,
+      "cred: out-of-range record fails to parse");
+    assert_eq(load64(prm), 0 - 7, "cred: failed parse leaves out untouched");
+
+    # --- identity, the predicate reload_config logs on -------------------
+    # ⚠ Pointer equality is the wrong test here and this pins it: `_cfg_str`
+    # builds a fresh Str box on every parse, so two reloads of an UNCHANGED
+    # config produce two different pointers to identical bytes. A pointer
+    # compare would announce a credential rotation on every SIGHUP.
+    assert_eq(emerg_cred_same(0, 0), 1, "cred: absent equals absent");
+    assert_eq(emerg_cred_same(0, str_from(TV_CHEAP)), 0, "cred: absent differs from present");
+    assert_eq(emerg_cred_same(str_from(TV_CHEAP), 0), 0, "cred: present differs from absent");
+    assert_eq(emerg_cred_same(str_from(TV_CHEAP), str_from(TV_CHEAP)), 1,
+      "cred: identical records compare EQUAL across separate Str boxes");
+    assert_eq(emerg_cred_same(str_from(TV_CHEAP), str_from(TV_REAL)), 0,
+      "cred: different records compare unequal");
+
+    # --- usability gate feeding load_config -----------------------------
+    assert_eq(emerg_cred_usable(str_from(TV_CHEAP)), 1, "cred: v1 is usable");
+    assert_eq(emerg_cred_usable(str_from(legacy)), 1, "cred: legacy is usable");
+    assert_eq(emerg_cred_usable(str_from("v1$bogus")), 0, "cred: malformed is NOT usable");
+    assert_eq(emerg_cred_usable(0), 0, "cred: absent is NOT usable");
+    return 0;
+}
+
+fn test_emergency_cred_verify() {
+    println("--- emergency credential verification (1.5.9) ---");
+    var esc = emergency_shell_default();
+
+    # require_auth off short-circuits before any KDF work — the path every
+    # existing deployment takes, and it must not have grown a 230 ms cost.
+    store64(esc + 24, 0);
+    store64(esc + 32, str_from(TV_CHEAP));
+    assert_eq(kyb_verify_emergency_auth(esc, str_from("anything")), 1,
+      "verify: no auth required -> granted without hashing");
+
+    # Fail closed with no credential, exactly as argonaut 1.8.6 MEDIUM-3
+    # established. A misconfiguration must not open a root shell.
+    store64(esc + 24, 1);
+    store64(esc + 32, 0);
+    assert_eq(kyb_verify_emergency_auth(esc, str_from("anything")), 0,
+      "verify: require_auth with no credential -> DENIED");
+
+    # --- the v1 path, against an OpenSSL-generated vector ---------------
+    store64(esc + 32, str_from(TV_CHEAP));
+    assert_eq(kyb_verify_emergency_auth(esc, str_from("hunter2")), 1,
+      "verify: correct password against OpenSSL-generated v1 record");
+    assert_eq(kyb_verify_emergency_auth(esc, str_from("hunter3")), 0,
+      "verify: wrong password denied");
+    assert_eq(kyb_verify_emergency_auth(esc, str_from("")), 0,
+      "verify: empty password denied");
+    assert_eq(kyb_verify_emergency_auth(esc, str_from("hunter")), 0,
+      "verify: prefix of the password denied");
+    assert_eq(kyb_verify_emergency_auth(esc, str_from("hunter22")), 0,
+      "verify: password with a trailing byte denied");
+
+    # The real parameters, once. This is the 19 MiB / ~230 ms arena the
+    # roadmap's fl_alloc item is about: it comes from alloc(), sized by
+    # argon2_mem_bytes, and it is the only place the suite proves the
+    # default-cost path actually runs inside kybernet.
+    store64(esc + 32, str_from(TV_REAL));
+    assert_eq(kyb_verify_emergency_auth(esc, str_from("hunter2")), 1,
+      "verify: m=19456 t=2 p=1 record verifies (19 MiB arena via alloc)");
+    assert_eq(kyb_verify_emergency_auth(esc, str_from("hunter3")), 0,
+      "verify: m=19456 wrong password denied");
+
+    # --- NON-DEFAULT parameters, which is the whole point of the format --
+    # "Parameters are stored, not assumed." A record written under different
+    # costs must still verify, or raising `m` one day silently invalidates
+    # every credential already deployed — and the operator sees "wrong
+    # password" on a password that is right. Both of these were generated by
+    # OpenSSL at costs the module's own defaults do not use.
+    store64(esc + 32, str_from("v1$4$16384$1$6b796265726e65742d746573742d3031$bf3417d3d08ca2fd02f0d7a91e2e3a61bc9fec792ac6e498842cddb8315e3373"));
+    assert_eq(kyb_verify_emergency_auth(esc, str_from("hunter2")), 1,
+      "verify: t=4 m=16384 record verifies (parameters read from the record)");
+    assert_eq(kyb_verify_emergency_auth(esc, str_from("hunter3")), 0,
+      "verify: t=4 m=16384 wrong password denied");
+
+    # A 32-byte salt and a 64-byte tag — the top of both accepted ranges.
+    # Sizing is driven by the record's own field lengths, not by a constant.
+    store64(esc + 32, str_from("v1$1$8192$1$abababababababababababababababababababababababababababababababab$8f01f7179b97bc3ed0b46c3f0da2c1810685d31f86bcc69463de89c1e2b9281ef2ba2d57355ae00099c14617fa71b7251ecedf62d45f5c9d24201cdccdae1527"));
+    assert_eq(kyb_verify_emergency_auth(esc, str_from("hunter2")), 1,
+      "verify: 32-byte salt + 64-byte tag record verifies");
+    assert_eq(kyb_verify_emergency_auth(esc, str_from("hunter3")), 0,
+      "verify: 64-byte-tag wrong password denied");
+
+    # --- the legacy path is byte-for-byte the 1.5.8 behaviour -----------
+    # kyb_verify_emergency_auth delegates this arm to argonaut's
+    # verify_emergency_auth rather than reimplementing SHA-256, so what is
+    # asserted here is the same code 1.5.8 shipped.
+    store64(esc + 32, password_hash("hunter2", 7));
+    assert_eq(kyb_verify_emergency_auth(esc, str_from("hunter2")), 1,
+      "verify: legacy digest still authenticates (one-release migration)");
+    assert_eq(kyb_verify_emergency_auth(esc, str_from("hunter3")), 0,
+      "verify: legacy digest rejects a wrong password");
+
+    # --- an UPPERCASE legacy digest must still authenticate --------------
+    # Hex is case-insensitive; argonaut's compare is not. `edge_is_hex64_str`
+    # accepts A-F, so an uppercase SHA-256 digest — what Windows `certutil`,
+    # PowerShell `Get-FileHash` and most online hashers emit — classified
+    # LEGACY and was blessed as usable at load, while argonaut recomputed a
+    # LOWERCASE digest and compared byte-exact. The verdict was 0 for EVERY
+    # password, and a failed emergency authentication halts PID 1 forever.
+    # The 1.5.4-1.5.7 brick through a different door, and the 1.5.9 validation
+    # was the thing waving it through.
+    store64(esc + 32, str_from("F52FBD32B2B3B86FF88EF6C490628285F482AF15DDCB29541F94BCF526A3F6C7"));
+    assert_eq(emerg_cred_kind(str_from("F52FBD32B2B3B86FF88EF6C490628285F482AF15DDCB29541F94BCF526A3F6C7")),
+      EMERG_CRED_LEGACY, "verify: uppercase digest classifies LEGACY");
+    assert_eq(kyb_verify_emergency_auth(esc, str_from("hunter2")), 1,
+      "verify: UPPERCASE legacy digest authenticates (case-insensitive hex)");
+    store64(esc + 32, str_from("F52FBD32B2B3B86FF88EF6C490628285F482AF15DDCB29541F94BCF526A3F6C7"));
+    assert_eq(kyb_verify_emergency_auth(esc, str_from("hunter3")), 0,
+      "verify: uppercase digest still rejects a wrong password");
+    # Mixed case is the same story and is what a hand-edited config produces.
+    store64(esc + 32, str_from("f52FBD32b2b3B86ff88EF6c490628285F482af15DDCB29541f94BCF526a3F6C7"));
+    assert_eq(kyb_verify_emergency_auth(esc, str_from("hunter2")), 1,
+      "verify: mixed-case legacy digest authenticates");
+
+    # --- a malformed credential denies, it does not fall through --------
+    store64(esc + 32, str_from("v1$2$19456$1$deadbeef"));
+    assert_eq(kyb_verify_emergency_auth(esc, str_from("hunter2")), 0,
+      "verify: malformed credential denies");
+    store64(esc + 32, str_from("not-a-credential"));
+    assert_eq(kyb_verify_emergency_auth(esc, str_from("hunter2")), 0,
+      "verify: unrecognised credential denies");
+
+    # A null config must not be dereferenced — this runs in PID 1.
+    assert_eq(kyb_verify_emergency_auth(0, str_from("hunter2")), 0,
+      "verify: null config denied, not dereferenced");
+
+    # Nor a null password, on EITHER arm. The guard used to be on the argon2id
+    # arm only; the legacy arm reached argonaut, which does
+    # `str_data(password_input)` — load64(0), a kernel panic in PID 1.
+    store64(esc + 32, str_from(TV_CHEAP));
+    assert_eq(kyb_verify_emergency_auth(esc, 0), 0,
+      "verify: null password denied on the argon2id arm");
+    store64(esc + 32, password_hash("hunter2", 7));
+    assert_eq(kyb_verify_emergency_auth(esc, 0), 0,
+      "verify: null password denied on the legacy arm, not dereferenced");
     return 0;
 }
 
@@ -1842,6 +2134,8 @@ fn main() {
     test_restart_queue_bounds();
     test_termios();
     test_emergency_auth();
+    test_emergency_cred_format();
+    test_emergency_cred_verify();
     test_notify_env_entry();
     test_eventloop_setup_full();
     test_reaper_macros();

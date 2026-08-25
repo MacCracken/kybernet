@@ -6,8 +6,8 @@
 
 - **Type**: Cyrius binary (PID 1 init)
 - **License**: GPL-3.0-only
-- **Version**: 1.5.8
-- **Language**: Cyrius 6.5.35 (the whole AGNOS pack front — kybernet/argonaut/libro/agnostik — pins 6.5.35; via `~/.cyrius/bin/cyrius`, `cyriusly use 6.5.35`)
+- **Version**: 1.5.9
+- **Language**: Cyrius 6.5.35 (the whole AGNOS pack front — kybernet/argonaut/libro/agnostik/**sigil**/agnostic — pins 6.5.35; via `~/.cyrius/bin/cyrius`, `cyriusly use 6.5.35`. sigil was the last holdout at 6.5.21 and was brought up at its 3.12.10 tag — a dep that tests on a different compiler from the consumer linking it is a gate that proves nothing)
 - **Tools**: `owl` to read .cyr files. (`cyim` is referenced in sibling repos but is **not installed here** — use ordinary file edits.)
 
 ## Goal
@@ -21,11 +21,11 @@ The helmsman that steers the Argo. Manages system boot, essential mounts, signal
 ```sh
 cyrius deps                                  # Resolve deps from cyrius.cyml into lib/
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet   # Build (DCE recommended)
-cyrius test src/test.cyr                     # Run 491 tests
+cyrius test src/test.cyr                     # Run 567 tests
 cyrius bench src/bench.cyr                   # Run benchmarks
 bash scripts/bench-history.sh                # Record bench history + ≥15% regression gate (MANDATORY on every release)
 cyrius build --aarch64 src/main.cyr build/kybernet-aarch64   # Cross-build aarch64
-bash qemu/boot-test.sh                       # 4 gates: boot markers, reactor, dm-verity, emergency auth (needs KVM)
+bash qemu/boot-test.sh                       # 4 gates: boot markers, reactor, dm-verity, emergency auth x2 formats (needs KVM)
 ```
 
 ## Project Structure
@@ -37,7 +37,7 @@ kybernet/
 ├── VERSION, CLAUDE.md, README.md, CHANGELOG.md, LICENSE
 ├── src/
 │   ├── main.cyr           # Globals + boot sequence + event loop + harness gate
-│   ├── test.cyr           # Integration tests (491 assertions)
+│   ├── test.cyr           # Integration tests (567 assertions)
 │   ├── bench.cyr          # Microbenchmarks
 │   └── lib/
 │       ├── log.cyr        # klog / klog2 / kmsg / slog (factored out at 1.2.0)
@@ -56,6 +56,7 @@ kybernet/
 │       ├── edge_boot.cyr  # Verified-and-sealed boot orchestration (1.2.0+)
 │       ├── service_sandbox.cyr # Per-service pre_exec sandbox (1.4.3)
 │       ├── svc_config.cyr  # JSON -> ServiceDefinition parsing (1.5.0)
+│       ├── emergency_auth.cyr # Argon2id credential: format, bounds, verify (1.5.9)
 │       ├── restart_queue.cyr # Deferred restarts with backoff (1.5.4)
 │       └── boot_stages.cyr  # Per-stage work + OK/SKIP/FAIL status (1.5.1)
 ├── qemu/                  # PID-1 boot harness (1.1.4+)
@@ -63,7 +64,7 @@ kybernet/
 │   ├── boot-test.sh       # the 4-gate harness
 │   └── boot-{crash,shutdown}-test.sh  # auxiliary busybox-based variants
 ├── benches/history.csv    # per-benchmark ns/op; the ≥15% regression gate
-├── scripts/               # bench-history.sh + version-bump.sh
+├── scripts/               # bench-history.sh + version-bump.sh + mkcred.sh (1.5.9)
 ├── docs/
 │   ├── architecture/overview.md
 │   ├── audit/             # P(-1) audit reports (1.1.5+)
@@ -96,7 +97,7 @@ Do **not** add a `path = "../<dep>"` alongside `git`/`tag`. When `path` resolves
 
 ⚠ **A `path` override also DROPS that dep's `commit` line from `cyrius.lock`.** The lock is written from disk, so a resolve under `path` records the file hashes but no commit pin, and `cyrius deps --verify` still reports "N verified, 0 failed" — it cannot miss what is not there. **kybernet 1.5.4 shipped with no argonaut commit pin for exactly this reason.** If a dep change is needed for a release, the order is: finish the dep → **user tags it** → `rm -rf lib && cyrius deps && cyrius deps --verify` in kybernet → confirm `grep '^commit' cyrius.lock` lists every git dep → *then* tag kybernet. Using `path` temporarily to run local gates is fine; shipping the lock it produces is not.
 
-- **sigil 3.12.9** — **THIN surface, NOT the monolithic `dist/sigil.cyr`** (the monolith's x509/RSA bignum banks add static `.bss` that DCE cannot strip). `[deps.sigil] modules` = `dist/sigil-mldsa.cyr` + `src/sha_ni.cyr` + `src/sha256.cyr` + `src/hex.cyr` (the crypto set libro's merkle/audit path needs transitively — **mirrors libro's own sigil block**; mandatory because cyrius dedups the two same-named `sigil` deps to kybernet's root list, so it must cover libro's `ed25519`/`hex`/`SIG_ALG_ED25519`) **+ `dist/sigil-tpm.cyr`** (the `tpm` distlib profile — `tpm_detect`/`tpm_read_pcr`/`TPM_SHA256`, all three called from `src/lib/edge_boot.cyr`). Note libro moved sigil-tpm to an *optional* `[deps.sigil_tpm]` behind a `tpm` feature; kybernet does not enable that feature and supplies sigil-tpm through its own block. dm-verity is **not** sourced from sigil (no dm-verity profile; raw `src/dmverity.cyr` has an unguarded cross-repo include) — `_eb_dmverity_supported` in `src/lib/edge_boot.cyr` is a local probe. sigil banks per-thread crypto scratch over TLS — the reason for the `thread_local` pin + explicit include.
+- **sigil 3.12.10** — **THIN surface, NOT the monolithic `dist/sigil.cyr`** (the monolith's x509/RSA bignum banks add static `.bss` that DCE cannot strip). `[deps.sigil] modules` = `dist/sigil-mldsa.cyr` + `src/sha_ni.cyr` + `src/sha256.cyr` + `src/hex.cyr` (the crypto set libro's merkle/audit path needs transitively — **mirrors libro's own sigil block**; mandatory because cyrius dedups the two same-named `sigil` deps to kybernet's root list, so it must cover libro's `ed25519`/`hex`/`SIG_ALG_ED25519`) **+ `dist/sigil-tpm.cyr`** (the `tpm` distlib profile — `tpm_detect`/`tpm_read_pcr`/`TPM_SHA256`, all three called from `src/lib/edge_boot.cyr`). Note libro moved sigil-tpm to an *optional* `[deps.sigil_tpm]` behind a `tpm` feature; kybernet does not enable that feature and supplies sigil-tpm through its own block. dm-verity is **not** sourced from sigil (no dm-verity profile; raw `src/dmverity.cyr` has an unguarded cross-repo include) — `_eb_dmverity_supported` in `src/lib/edge_boot.cyr` is a local probe. sigil banks per-thread crypto scratch over TLS — the reason for the `thread_local` pin + explicit include. **+ `dist/sigil-argon2.cyr`** (1.5.9 — the emergency-shell KDF, `src/lib/emergency_auth.cyr`). ⚠ **The argon2 module requires sigil >= 3.12.10 and the pin is not cosmetic.** 3.12.9 held Argon2's per-call working lane in a function-local `var SCR[352256]`, which cyrius promotes to a shared global because it exceeds the 122,880-byte per-fn stack budget — and `.bss` is not code, so DCE cannot strip it. Measured: linking the 3.12.9 profile cost **+377,048 bytes**, of which **+352,256** was that one array, for a function called at most once per boot. 3.12.10 takes the lane off the tail of the caller's arena (widening `argon2_mem_bytes` by `_ARGON2_SCR_LANE` = 5,504) and the same link costs **+24,784**. Adding the module against an older sigil silently restores the 352 KB. The argon2 profile also redefines `crypto_scratch.cyr`'s six functions byte-identically with `dist/sigil-mldsa.cyr` — the resulting `duplicate fn 'cbank'` warnings are the same benign shape `random.cyr` already produces across mldsa/tpm, not the `conflicting value` class that means a real divergence.
 - **agnostik 1.5.1** — `dist/agnostik.cyr` (full bundle). NOTE its error kinds are namespaced `STIK_ERR_*` — do **not** use bare `ERR_*` names (they collide with sigil's/sakshi's enums). 1.4.0 added a `*_parse()` inverse for all 31 enums that had `*_name()`; they return `Err(STIK_ERR_INVALID_ARGUMENT)` on an unrecognised string rather than defaulting to a sentinel. ⚠ **1.5.0 corrected `enum LinuxCapability`** — it omitted `CAP_MAC_OVERRIDE`/`CAP_MAC_ADMIN`, shifting everything above 31 by two — and added `capability_name`/`capability_parse`. 1.5.1 added `cglim_set_memory_high`/`cglim_set_cpu_max`/`cglim_set_cpu_weight`, the three `cgroup_limits` fields that had accessors but no setter.
 - **libro 2.8.12** — `dist/libro.cyr` (full bundle). Pulls a thin sigil surface itself. ⚠ 2.8.11/2.8.12 changed the audit-chain **on-disk preimage**: chains written by libro ≤ 2.8.10 will not verify. Only affects `config.audit_persist` deployments (default off) — kybernet makes zero direct `audit_*` calls and imports argonaut's audit modules only to close the compile-time symbol graph.
 - **patra** — no longer an explicit dep. Comes from the stdlib fold (1.13.10) via `[deps].stdlib`; libro pulls it transitively too. kybernet calls no `patra_*` symbol directly.
@@ -111,9 +112,9 @@ Do **not** add a `path = "../<dep>"` alongside `git`/`tag`. When `path` resolves
 
 1. Make changes to `src/main.cyr` or `src/lib/*.cyr`
 2. Build: `CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet`
-3. Test: `cyrius test src/test.cyr` (491 tests must pass)
+3. Test: `cyrius test src/test.cyr` (567 tests must pass)
 4. Cross-build: `cyrius build --aarch64 src/main.cyr build/kybernet-aarch64` (verify both arches)
-5. Harness (needs KVM): `bash qemu/boot-test.sh` — 35 properties across four passes: boot markers + budget, the reactor gate, dm-verity verification, the emergency-auth prompt
+5. Harness (needs KVM): `bash qemu/boot-test.sh` — 42 properties across four passes: boot markers + budget, the reactor gate, dm-verity verification, the emergency-auth prompt against BOTH credential formats
 5b. **On a version bump: `bash scripts/bench-history.sh`** — records per-benchmark ns/op to `benches/history.csv` and exits non-zero on a ≥15% regression vs the previous run. Review and explain (or fix) any flagged delta before cutting.
 6. All functions return `Result` or `Option` where failure is possible
 7. Use `str_builder` for path construction
@@ -158,6 +159,12 @@ Apply on every change touching src/:
 
 23. **A release gate that stops before the event loop does not test the event loop.** `kybernet.harness=1` shuts down at phase 9; `kybernet.harness=loop` runs the real reactor for 5 s and asserts a bounded wakeup count (ceiling 500, observed 21). Keep it green and keep it in CI — it is the only gate that executes a reactor iteration, and it is verified to FAIL on the unfixed 1.4.1 shape.
 
+24. **⚠ NEVER call sigil's `argon2id` / `argon2i` / `argon2d` from PID 1 — only the `*_into` forms, over an `alloc()` arena.** The convenience wrappers size with `argon2_mem_bytes` and then hand it to `fl_alloc`, whose large path does `store64(blk, 0)` on the **raw `_fl_mmap` return** (`freelist.cyr:404-406`). That return is a small negative errno on failure, not 0 — so on exhaustion it writes through address `-12` and faults *before* the wrapper's own `if (mem == 0)` guard can fire, which makes that guard dead code. In PID 1 the fault is a kernel panic. `alloc()` checks its mmap and returns 0 (`alloc.cyr:188`, `:235`), and `argon2_hash_into` checks `mem == 0`, so `argon2id_into(alloc(argon2_mem_bytes(m, p)), ...)` fails cleanly. **Size the arena with `argon2_mem_bytes`, never `m_cost * 1024`** — since sigil 3.12.10 the scratch lane rides the arena's tail and a hand-computed size is 5,504 bytes short. 1.5.9.
+
+25. **A KDF parameter read from config gets a CEILING and a WORK CAP, and is REJECTED — never clamped.** sigil enforces only RFC 9106 §3.1's structural floors (`t>=1`, `m>=8p`, salt>=8, tag>=4) and **no ceiling at all**, and `argon2_mem_bytes` has **no overflow check**: `m = 2^54 + 1024` wraps its byte count to 1 MiB, so `alloc()` succeeds and the fill then runs far outside the buffer — a wild write in PID 1 from one config integer. Bound during decimal accumulation (`_emerg_parse_bounded`), not after, or a long digit run overflows onto a small value that passes the ceiling. The dangerous memory band is **64 MiB … 2 GiB**: below it is fine, above it `alloc()` refuses cleanly, and inside it the anonymous mmap *succeeds* (Linux overcommits) and Argon2 faults in every page it touches — in an unkillable PID 1 that is `Out of memory and no killable processes`, a kernel panic. Cap `m * t` too: memory is not the hazard, **time** is, and phase 6c has nothing reaping and nothing servicing a watchdog (rule 22). And **clamping is worse than rejecting**: the parameters live inside the stored credential, so a clamped `m` derives a *different* tag and turns a config typo into a permanent lockout with no diagnostic. Reject at LOAD time with the reason on console and dmesg (rule 19). **The bounds kybernet enforces, and they must stay in lockstep with `scripts/mkcred.sh`'s `--check` (the review found three places where the script's "copy" of them was not actually a copy):** `1 <= t <= 8`; `8192 <= m <= 65536` KiB; `p == 1` exactly; `m * t <= 131072`; salt 16..64 B; tag 32..64 B. Every FLOOR is deliberately above sigil's, which are RFC §3.1's *structural* minimums and not security floors — sigil accepts `m = 8 KiB` (fits inside one GPU streaming multiprocessor's shared memory, so the attacker never touches DRAM and memory-hardness is gone), an 8-byte salt and a **4-byte tag**. `p == 1` because sigil fills lanes serially: `p > 1` gives this defender no speedup while cutting the sequential depth an attacker must reproduce by a factor of p. The `m * t` cap is the one that bounds the PID-1 stall — the static ceilings alone still admit m=65536 x t=8, an extrapolated 16-26 s on an RPi4-class core. 1.5.9.
+
+26. **The emergency credential has two formats and they must stay provably DISJOINT.** Legacy is exactly 64 characters all from `[0-9a-fA-F]`; the Argon2id record begins `v1$` — `v` is not a hex digit and `$` is not either, so no string satisfies both predicates and a `v1` record can never be coerced onto the unsalted path. A malformed `v1` record classifies `INVALID`, **never** falling back to `LEGACY`. The legacy arm **delegates to argonaut's `verify_emergency_auth` verbatim** rather than reimplementing SHA-256 — the deprecated path is not "compatible with" the old code, it *is* the old code. Both formats are gated in `qemu/boot-test.sh` pass 4; dropping either fixture makes the migration promise untested. 1.5.9.
+
 
 ## Release gates
 
@@ -167,7 +174,7 @@ Every version bump runs all of these, in this order, and they must all be green 
 rm -rf lib && cyrius deps && cyrius deps --verify   # expect: N verified, 0 failed
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet
 cyrius build --aarch64 src/main.cyr build/kybernet-aarch64
-cyrius test src/test.cyr                            # 491 tests, 0 failed
+cyrius test src/test.cyr                            # 567 tests, 0 failed
 bash scripts/bench-history.sh                       # ≥15% regression gate
 bash qemu/boot-test.sh                              # needs KVM
 ```
@@ -183,4 +190,4 @@ Plus a **sibling-free reproduction** — the only gate that catches a tag which 
 - Do not add C, Rust, or assembly files — everything is Cyrius
 - Do not reference `../cyrius/` repo — use installed toolchain at `~/.cyrius/`
 - Do not bump a dep tag to a value > the highest existing git tag (CI clones from `git + tag`; an unreleased VERSION-file value fails resolution — see 1.1.0 CHANGELOG note)
-- Test after every change (491 tests + harness when KVM available)
+- Test after every change (567 tests + harness when KVM available)

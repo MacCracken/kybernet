@@ -79,3 +79,35 @@ fn console_open_rw() {
     if (fd < 0) { return 0 - 1; }
     return fd;
 }
+
+# ⚠ WITHOUT THIS THE INTERACTIVE READ'S DEADLINE DOES NOT EXIST.
+#
+# `_read_line_fd` polls with `sleep_ms` because the cyrius stdlib has no
+# `poll`/`select` (the same gap that forced src/lib/termios.cyr). A poll loop
+# over a BLOCKING descriptor is not a poll loop: a tty in canonical mode holds
+# the first `read` until a line arrives, so the loop never gets back to its
+# `monotonic_ms() < deadline` test and the 120 s bound audit rule 22 requires
+# is decorative. The prompt was written as bounded from 1.5.8 and was not.
+#
+# The flag is set only around the read and cleared before the fd is handed to
+# the emergency shell — a shell whose stdin is O_NONBLOCK reads EOF-ish
+# garbage and exits, which is the 1.5.8 bug in a new costume.
+#
+# F_GETFL 3 / F_SETFL 4 / O_NONBLOCK 0x800 are arch-uniform on Linux
+# (asm-generic/fcntl.h; x86's asm/fcntl.h just includes it), and SYS_FCNTL is
+# in both arch tables (72 / 25), so `syscall(SYS_FCNTL, ...)` satisfies audit
+# rule 1 with no `#ifdef`. 1.5.9.
+enum ConsoleFcntl { F_GETFL = 3; F_SETFL = 4; O_NONBLOCK = 2048; }
+
+# Set or clear O_NONBLOCK on `fd`. Returns 1 on success, 0 otherwise.
+# Non-fatal by design: a console that will not take the flag should still be
+# usable for a password prompt, exactly as termios_echo_off is best-effort.
+fn console_set_nonblock(fd, on) {
+    if (fd < 0) { return 0; }
+    var fl = syscall(SYS_FCNTL, fd, F_GETFL, 0);
+    if (fl < 0) { return 0; }
+    var want = fl | O_NONBLOCK;
+    if (on == 0) { want = fl & (0 - 1 - O_NONBLOCK); }
+    if (syscall(SYS_FCNTL, fd, F_SETFL, want) < 0) { return 0; }
+    return 1;
+}

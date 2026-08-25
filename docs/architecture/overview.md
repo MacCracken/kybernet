@@ -87,6 +87,7 @@ All under `src/lib/`, included by `src/main.cyr`.
 | `boot_stages.cyr` | Per-stage work with OK / SKIP / FAIL status |
 | `restart_queue.cyr` | Deferred service restarts, static storage |
 | `edge_boot.cyr` | Verified-boot pre-flight: TPM, PCR, dm-verity verification |
+| `emergency_auth.cyr` | Emergency-shell credential: `v1$t$m$p$salt$tag` Argon2id record, parameter bounds, legacy-digest migration (1.5.9) |
 
 ## Dependencies
 
@@ -98,9 +99,10 @@ Resolved by `cyrius deps` from `cyrius.cyml` and sha256-pinned in `cyrius.lock`;
 - **agnostik 1.5.1** — shared AGNOS types (`security_context`, `capability_set`,
   `cgroup_limits`, `agent_config`)
 - **libro 2.8.12** — cryptographic audit logging (SHA-256 hash-linked chain)
-- **sigil 3.12.9** — a deliberately **thin** surface: ML-DSA, SHA-256, hex, and the
-  TPM profile. Never the monolith, whose x509/RSA banks add `.bss` that DCE cannot
-  strip.
+- **sigil 3.12.10** — a deliberately **thin** surface: ML-DSA, SHA-256, hex, the TPM
+  profile, and (1.5.9) Argon2id. Never the monolith, whose x509/RSA banks add `.bss`
+  that DCE cannot strip. The Argon2 profile had the same problem until 3.12.10 moved
+  its 352 KB working lane onto the caller's arena — see CHANGELOG [1.5.9].
 - **patra**, **sakshi** — from the cyrius stdlib fold, not explicit deps
 
 `agnosys` was **dropped at 1.3.5**; its trust and storage stack moved into sigil.

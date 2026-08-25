@@ -63,11 +63,16 @@ stdlib = [
 #      must stay in sync with it: cyrius dedups both same-named sigil deps to
 #      this root list, so this list has to cover libro's ed25519/hex too.
 #   2. sigil-tpm — kybernet's own TPM surface (src/lib/edge_boot.cyr).
+#   3. sigil-argon2 — the emergency-shell KDF (src/lib/emergency_auth.cyr).
+#      Requires sigil >= 3.12.10: earlier releases bank the Argon2 working
+#      lane in a static `var SCR[352256]`, and DCE keeps .bss. Measured on
+#      3.12.9 that is +377 KB of binary for a function called at most once
+#      per boot. See CHANGELOG.md [1.5.9].
 # dm-verity is deliberately not sourced from sigil; see CHANGELOG.md [1.4.0].
 [deps.sigil]
 git = "https://github.com/MacCracken/sigil.git"
-tag = "3.12.9"
-modules = ["dist/sigil-mldsa.cyr", "src/sha_ni.cyr", "src/sha256.cyr", "src/hex.cyr", "dist/sigil-tpm.cyr"]
+tag = "3.12.10"
+modules = ["dist/sigil-mldsa.cyr", "src/sha_ni.cyr", "src/sha256.cyr", "src/hex.cyr", "dist/sigil-tpm.cyr", "dist/sigil-argon2.cyr"]
 
 [deps.agnostik]
 git = "https://github.com/MacCracken/agnostik.git"
