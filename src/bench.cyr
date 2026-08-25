@@ -50,6 +50,49 @@ fn report(name, total_ns, iterations) {
 # Syscall baselines (parity with agnosys bench_compare)
 # ================================================================
 
+# ⚠ THE CALIBRATION REFERENCE. DO NOT "OPTIMIZE" OR REMOVE THIS.
+#
+# It exists so the regression gate can tell "kybernet got slower" apart from
+# "this machine is busy". It is a fixed integer loop that touches no kybernet
+# code, no allocator and no syscall, so its cost moves ONLY with machine
+# conditions — CPU contention, frequency scaling, thermal state. scripts/
+# bench-history.sh divides every other benchmark by this one before comparing
+# against history, so a box under load scales every number together and
+# nothing is flagged.
+#
+# Without it the gate was unusable on a working machine: three consecutive
+# runs at load average 24 reported 52, then 21, then 51 regressions, on
+# primitives the release never touched (strlen +144%, getpid +70%). A gate
+# that only passes on an idle box is not a gate. 1.6.1.
+#
+# The arithmetic is deliberately dependency-chained (each step feeds the
+# next) so the optimiser cannot vectorise or elide it, and the accumulator is
+# consumed by `report` so it cannot be dead-coded away.
+# Each reported "op" is 64 dependent rounds, which puts the figure in the
+# low hundreds of ns rather than the 3 ns a single round measures. That
+# matters: `cyrius bench` reports WHOLE nanoseconds, so a 3 ns reference
+# quantises the scale factor to +/-33% and is useless as a divisor.
+fn bench_calibration() {
+    var iters = 40000;
+    var start = now_ns();
+    var acc = 1;
+    var k = 0;
+    while (k < iters) {
+        var r = 0;
+        while (r < 64) {
+            acc = (acc * 1103515245 + 12345) & 0x7FFFFFFF;
+            acc = acc ^ (acc >> 7);
+            r = r + 1;
+        }
+        k = k + 1;
+    }
+    var elapsed = now_ns() - start;
+    # Fold acc into a value the compiler cannot prove unused.
+    if (acc == 0) { println(""); }
+    report("_calibration (reference loop)", elapsed, iters);
+    return 0;
+}
+
 fn bench_getpid() {
     var iters = 1000000;
     var start = now_ns();
@@ -1005,6 +1048,12 @@ fn main() {
     println("===================================================");
     println("  kybernet benchmark — Cyrius");
     println("===================================================");
+    println("");
+
+    # Calibration FIRST, so the scale factor is measured under the same
+    # machine conditions as everything that follows.
+    println("Calibration:");
+    bench_calibration();
     println("");
 
     # --- Syscall baselines ---

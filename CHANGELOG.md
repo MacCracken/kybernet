@@ -153,15 +153,46 @@ Harness 42 → 44 properties.
 - Tests 567 → 608. The seccomp additions are asserted individually so a future
   trim has to argue with a test, and the `execve` assertion names what its
   absence did.
-- **The benchmark gate could not be evaluated for this release.** The machine
-  carried a load average above 24 from unrelated work; runs flagged 52, then
-  21, then 51 regressions on primitives this release does not touch
-  (`strlen(52 chars)` +144 %, `getpid` +70 %). `benches/history.csv` was left
-  at its 1.5.9 state rather than recording a measurement that means nothing.
-  **Re-run `scripts/bench-history.sh` on a quiet machine before tagging.** The
-  one regression that would be real and attributable is
-  `seccomp_basic_service+build`, and its expected size is the +33 % filter
-  growth above.
+- **One benchmark regressed, and it is the expected one.**
+  `seccomp_basic_service+build` 1707 -> 2260 ns/op (**+32 %**), which is the
+  42 -> 56 BPF instruction growth (+33 %) landing almost exactly where
+  arithmetic said it would. It runs once per confined service at startup, so
+  +553 ns is not a number anything can notice. Three benchmarks improved and
+  two moved inside the noise floor; nothing else changed.
+
+### Fixed — the benchmark gate did not work on a machine doing other things
+
+This nearly went out as "could not be evaluated". The gate compared **raw
+absolute ns/op** against the previous run, so at load average 24 three
+consecutive runs reported **52, then 21, then 51** regressions — on primitives
+this release never touched (`strlen(52 chars)` +144 %, `getpid` +70 %,
+`memcpy` +40 %). A gate that only passes on an idle box is not a gate; it is a
+request to stop working, and asking for one is the wrong answer.
+
+Two mechanisms, neither of which asks anything of the operator:
+
+- **Best of N runs** (`RUNS`, default 3). Contention only ever *adds* time, so
+  the minimum across runs is the closest estimate of true cost and is far more
+  robust than a mean. This alone took the same loaded machine from 52
+  regressions to 1.
+- **Normalisation against a calibration loop.** `_calibration (reference loop)`
+  in `src/bench.cyr` is fixed integer arithmetic that touches no kybernet code,
+  no allocator and no syscall, so its cost moves *only* with machine
+  conditions. `calibration_now / calibration_then` is how much slower this box
+  is than the one that recorded history, and every comparison is scaled by it.
+  A uniformly slower machine now flags nothing.
+
+The runner also pins to one CPU (`taskset`) and raises priority (`nice`) where
+those exist — best-effort, no privilege required to try.
+
+Raw ns/op still goes into `benches/history.csv`: the history stays a record of
+what was actually measured, and the scale is recomputed from the stored
+calibration row on each run.
+
+**Verified to still fail on a real regression**, which is the property that
+matters — a gate that tolerates noise is worthless if it also tolerates
+defects. With `bench_getpid` deliberately slowed, the gate reported
+`getpid: 292 -> 339 ns/op (expected ~294 on this box, +15%)` and **exited 1**.
 
 ---
 

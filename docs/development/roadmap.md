@@ -27,6 +27,10 @@ The gates are the reason to trust any of the above. Several cannot currently go 
       .github/` returns nothing; CI runs bare `cyrius bench` under
       `continue-on-error: true`. Standing rule 6 calls it a release gate that "blocks
       the cut" — today that is human discipline only, and `release.yml` adds no step.
+      The reason it could not be a CI gate is **fixed as of 1.6.0**: it compared raw
+      absolute ns/op and so flagged dozens of false regressions on any loaded runner.
+      Best-of-N plus calibration normalisation make it noise-tolerant while still
+      failing on a real regression (verified). Wiring it into CI is now just a step.
 - [ ] **The QEMU harness cannot fail the build.** `ci.yml:249` is
       `continue-on-error: true`, and an unreadable `/dev/kvm` sets `skip=1` so every
       later step no-ops and the job goes green having executed nothing. The workflow
