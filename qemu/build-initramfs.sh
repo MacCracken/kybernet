@@ -113,6 +113,38 @@ fi
 # so capset(2) really executes instead of short-circuiting on the euid
 # check.
 #
+# kyb-orphan covers the one property qemu/boot-crash-test.sh existed for:
+# reaping a child kybernet did NOT start. `sh -c 'sleep 0.2 & exit 0'` exits
+# immediately, so the backgrounded sleep is reparented to PID 1 and, 200 ms
+# later, PID 1's own reaper must collect it — reap_and_log's path, not
+# argonaut's init_reap_services.
+#
+# ⚠ The delay is 0.2 s and not 1 s deliberately. The boot pass shuts down at
+# ~600 ms, and a child still alive inside kyb-orphan's cgroup at that point
+# makes the teardown's rmdir return EBUSY — `removed service cgroups` then
+# reports one fewer than were created. That is a real race in the teardown
+# (kill_cgroup does not wait for the processes to actually die before
+# remove_service_cgroup runs) and it is on the roadmap for v1.6.2; this
+# fixture is not the place to hold it open. That script has been retired: it booted
+# with `-m 256M`, which audit rule 8 says fails alloc_init's mmap outright,
+# so it would have panicked before testing anything, and its header still
+# described a kybernet without service management.
+#
+# kyb-health is the 1.6.1 proof, and like kyb-seccomp it exists because a
+# whole subsystem had never been executed by any gate. `grep -rn health_check
+# qemu/` returned NOTHING before this: no fixture carried a health_check
+# block, so `init_poll_health` recorded nothing for any service, both
+# handle_health_tick and handle_watchdog_tick drained empty vecs on every
+# reactor tick, and every one of 1.5.4's restart-on-threshold and
+# watchdog-kill paths was dead code in practice. Worth stating plainly:
+# **with no health_check configured there is no watchdog at all**, because
+# init_check_watchdog's only non-startup arm is health-check-driven.
+#
+# It fails deterministically: a TCP connect to 127.0.0.1:9 (discard), which
+# nothing in the initramfs listens on. `retries: 1` means the first failed
+# poll crosses the threshold, and the reactor's health tick — 2 s under
+# `kybernet.harness=loop` — then has to act on it rather than log forever.
+#
 # kyb-seccomp is the 1.6.0 proof, and it is the fixture whose absence let a
 # fatal defect ship for three releases. `"seccomp": "basic"` did not merely
 # fail to confine — it KILLED every service it was applied to, because the
@@ -246,6 +278,30 @@ if [ -n "$BUSYBOX" ]; then
       "security": {
         "no_new_privs": true,
         "capabilities": []
+      }
+    },
+    {
+      "name": "kyb-orphan",
+      "description": "backgrounds a child then exits, orphaning it to PID 1",
+      "binary": "/bin/sh",
+      "args": ["-c", "sleep 0.2 & exit 0"],
+      "type": "oneshot",
+      "restart": "never"
+    },
+    {
+      "name": "kyb-health",
+      "description": "fails a TCP health check so the reactor acts on it",
+      "binary": "/bin/sleep",
+      "args": ["600"],
+      "type": "simple",
+      "restart": "on-failure",
+      "health_check": {
+        "type": "tcp",
+        "target": "127.0.0.1",
+        "port": 9,
+        "interval_ms": 1000,
+        "timeout_ms": 200,
+        "retries": 1
       }
     },
     {

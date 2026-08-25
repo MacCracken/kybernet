@@ -69,15 +69,32 @@ jobs:
           done
           [ $fail -eq 0 ] || { echo "fmt: drift detected"; exit 1; }
 
-      - name: Lint (advisory)
-        # Advisory-only; tighten to fail-on-warning once the
-        # standing dead-code warnings are addressed.
-        continue-on-error: true
+      - name: Lint (HARD GATE)
+        # ⚠ NOT advisory any more, and the untracked-deferral half is the
+        # point. `cyrius lint` flags a comment that says deferred / not yet /
+        # TODO without a cross-reference to a CHANGELOG or roadmap entry —
+        # which is exactly how 1.6.0's four fatal defects went unnoticed:
+        # every one of them was described in a comment nobody tracked.
+        #
+        # The tree is at 0 deferrals and 0 warnings as of 1.6.1. Keeping it
+        # there is what stops docs/development/roadmap.md drifting back into
+        # fiction. If this fails: either fix the line, or cross-reference the
+        # deferral to the roadmap ON THE SAME LINE (the matcher is per-line).
         run: |
+          FAIL=0
           for f in src/main.cyr src/test.cyr src/bench.cyr src/lib/*.cyr; do
             [ -f "$f" ] || continue
-            cyrius lint "$f"
+            OUT=$(cyrius lint "$f" 2>&1)
+            echo "$OUT"
+            D=$(printf '%s' "$OUT" | grep -oE '^[0-9]+ untracked' | grep -oE '^[0-9]+' || echo 0)
+            W=$(printf '%s' "$OUT" | grep -oE '^[0-9]+ warnings' | grep -oE '^[0-9]+' || echo 0)
+            if [ "${D:-0}" -gt 0 ] || [ "${W:-0}" -gt 0 ]; then FAIL=1; fi
           done
+          if [ "$FAIL" -ne 0 ]; then
+            echo "ERROR: lint is a hard gate — 0 untracked deferrals and 0 warnings required."
+            exit 1
+          fi
+          echo "lint clean: 0 untracked deferrals, 0 warnings" 
 
       - name: Vet
         run: cyrius vet src/main.cyr
@@ -96,9 +113,17 @@ jobs:
         # renamed cc5_aarch64 → cycc_aarch64 (cc5_aarch64 retained as a
         # symlink); accept either so the guard works across toolchain ages.
         run: |
+          # ⚠ FAILS rather than skipping. CLAUDE.md's release gates list the
+          # aarch64 cross-build as mandatory and README says both arches are
+          # release-gated — but this step exited 0 with a warning when the
+          # backend was absent, and release.yml then published with no
+          # aarch64 artifact at all (`if [ -f ... ]`). A gate that advertises
+          # an architecture and quietly ships without it is worse than one
+          # that never claimed it. 1.6.1.
           if [ ! -x "$HOME/.cyrius/bin/cycc_aarch64" ] && [ ! -x "$HOME/.cyrius/bin/cc5_aarch64" ]; then
-            echo "::warning::no aarch64 backend (cycc_aarch64/cc5_aarch64) in this Cyrius — skipping"
-            exit 0
+            echo "::error::no aarch64 backend (cycc_aarch64/cc5_aarch64) in this Cyrius toolchain"
+            echo "kybernet release-gates BOTH architectures. Refusing to pass this step."
+            exit 1
           fi
           CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr build/kybernet-aarch64
           file build/kybernet-aarch64 | grep -q "aarch64" || {
@@ -106,9 +131,22 @@ jobs:
           echo "kybernet-aarch64: $(wc -c < build/kybernet-aarch64) bytes"
 
       - name: Test
+        # ⚠ THE COUNT IS ASSERTED, NOT JUST "0 failed". A suite that silently
+        # SHRINKS passes the old check trivially — delete half the tests and
+        # `0 failed` is still true. The floor comes from CLAUDE.md, which
+        # carries the current number; raising it is a deliberate edit made in
+        # the same commit that adds the tests.
         run: |
           cyrius test src/test.cyr 2>&1 | tee /tmp/test_output
           tail -1 /tmp/test_output | grep -E "^[0-9]+ passed," | grep -q "0 failed"
+          COUNT=$(tail -1 /tmp/test_output | sed -E 's/^([0-9]+) passed.*/\1/')
+          FLOOR=$(grep -oE '\(([0-9]+) tests must pass\)' CLAUDE.md | grep -oE '[0-9]+' | head -1)
+          if [ -z "$FLOOR" ]; then echo "ERROR: could not read the test floor from CLAUDE.md"; exit 1; fi
+          echo "assertions: ${COUNT} (floor from CLAUDE.md: ${FLOOR})"
+          if [ "$COUNT" -lt "$FLOOR" ]; then
+            echo "ERROR: the suite SHRANK — ${COUNT} < ${FLOOR}. Tests were removed, or a test_* stopped being called."
+            exit 1
+          fi
 
       - name: Shell scripts parse
         run: |
@@ -169,10 +207,27 @@ jobs:
             echo "::warning::openssl on this runner has no ARGON2ID ($(openssl version)) — generation half skipped"
           fi
 
-      - name: Bench
-        # Non-fatal — bench numbers vary by runner.
-        continue-on-error: true
-        run: cyrius bench src/bench.cyr
+      - name: Bench regression gate
+        # ⚠ Standing rule 6 calls this a release gate that "blocks the cut",
+        # and until 1.6.1 it existed only as human discipline — `grep -rn
+        # bench-history .github/` returned nothing and this step ran a bare
+        # `cyrius bench` under continue-on-error, asserting nothing.
+        #
+        # It could not have been a CI gate before: comparing raw absolute
+        # ns/op meant dozens of false regressions on any shared runner. 1.6.0
+        # fixed that with best-of-N plus normalisation against a calibration
+        # loop, and the result was verified to still FAIL on a real
+        # regression. So it can be a gate now.
+        #
+        # `benches/history.csv` is commit-keyed and a CI runner is not the
+        # machine that recorded it, so the FIRST run on a new runner has no
+        # calibration reference and compares raw — hence RUNS=5 here rather
+        # than the default 3, and hence this stays advisory on pull_request
+        # while being enforced on the release path.
+        continue-on-error: ${{ github.event_name == 'pull_request' }}
+        env:
+          RUNS: 5
+        run: bash scripts/bench-history.sh
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -194,11 +249,18 @@ jobs:
         # eat lines with inline comments).
         run: |
           FAIL=0
+          # ⚠ grep -rEn, NOT grep -rn. This helper took a pattern written in
+          # ERE and fed it to BRE grep, where `\(` OPENS A GROUP — so
+          # `\bsystem\s*\(` was an unmatched group, grep exited 2 with
+          # "Unmatched ( or \(", stderr was discarded by 2>/dev/null and the
+          # status was swallowed into the awk pipe. `hits` was therefore
+          # ALWAYS empty and the check always reported clean. It was the only
+          # caller of this helper, so the whole thing was decoration. 1.6.1.
           scan() {
             local label="$1"; shift
             local pat="$1"; shift
             local hits
-            hits=$(grep -rn "$pat" src/ 2>/dev/null | awk -F: '
+            hits=$(grep -rEn "$pat" src/ 2>/dev/null | awk -F: '
               { line=$3; for(i=4;i<=NF;i++) line=line":"$i;
                 sub(/^[[:space:]]+/,"",line);
                 if (substr(line,1,1) != "#") print $1":"$2":"line }')
@@ -214,7 +276,7 @@ jobs:
           # Direct exit(60) outside main entrypoint.
           hits=$(grep -rn 'syscall( *60' src/lib/ 2>/dev/null || true)
           [ -n "$hits" ] && { echo "FAIL: direct exit syscall in lib module"; echo "$hits"; FAIL=1; }
-          scan "raw system()" '\bsystem\s*\('
+          scan "raw system()" 'system[[:space:]]*\('
           # Unbounded stack buffers (>= 64KB → require heap review).
           awk -F: '
             /var [A-Za-z_][A-Za-z0-9_]*\[[0-9]+\]/ {
@@ -244,9 +306,18 @@ jobs:
     # nested virt) but leave it root-only; this job installs qemu, opens
     # /dev/kvm perms (the same udev rule the android-emulator-runner action
     # uses), unlocks the host kernel image, then runs the real PID-1 boot.
-    # Kept continue-on-error because not every runner image guarantees KVM
-    # — flip it off to make the harness a hard PR gate once reliably green.
-    continue-on-error: true
+    # ⚠ NO continue-on-error. This is a HARD GATE as of 1.6.1.
+    #
+    # It was advisory "until reliably green", and the cost of that was
+    # measured rather than argued: 1.6.0 shipped four defects that a harness
+    # assertion would have caught, and 1.6.1's first new fixture found a
+    # SIGSEGV in argonaut's watchdog that panicked PID 1. A gate that cannot
+    # turn the build red is a log line.
+    #
+    # The missing-prerequisite path is handled honestly instead: if KVM or a
+    # kernel image genuinely is not available the job FAILS with a clear
+    # reason rather than passing silently. Set ALLOW_HARNESS_SKIP=1 in repo
+    # variables to restore the old behaviour on a runner that cannot host it.
     needs: [build]
     steps:
       - uses: actions/checkout@v4
@@ -254,7 +325,14 @@ jobs:
       - name: Install QEMU + enable KVM
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-x86 cpio
+          # ⚠ cryptsetup-bin AND busybox-static are load-bearing, not extras.
+          # Without veritysetup, build-initramfs.sh drops ALL THREE of the
+          # edge and auth fixtures, and boot-test.sh then SKIPs passes 3, 4a
+          # and 4b — 28 of its assertions, including both credential formats
+          # that CLAUDE.md rule 26 says are gated. The job went green having
+          # tested a quarter of what it advertises.
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 cpio cryptsetup-bin busybox-static
           # /dev/kvm exists on hosted runners but is root:kvm 0660 and the
           # runner user isn't in the kvm group. Make the node world-RW.
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
@@ -281,8 +359,15 @@ jobs:
             missing="$missing kernel-image"
           fi
           if [ -n "$missing" ]; then
-            echo "::warning::QEMU harness skipped — missing:$missing"
-            echo "skip=1" >> $GITHUB_OUTPUT
+            if [ "${{ vars.ALLOW_HARNESS_SKIP }}" = "1" ]; then
+              echo "::warning::QEMU harness skipped — missing:$missing (ALLOW_HARNESS_SKIP=1)"
+              echo "skip=1" >> $GITHUB_OUTPUT
+            else
+              echo "::error::QEMU harness CANNOT RUN — missing:$missing"
+              echo "This is the only gate that boots kybernet as real PID 1. Failing rather"
+              echo "than passing silently. Set repo variable ALLOW_HARNESS_SKIP=1 to override."
+              exit 1
+            fi
           else
             echo "Using kernel: $KERNEL"
             echo "kernel=$KERNEL" >> $GITHUB_OUTPUT
@@ -312,7 +397,10 @@ jobs:
           # ~0.8s); 8s budget + 60s qemu timeout buy generous headroom.
           BUDGET_MS: 8000
         run: |
-          bash qemu/boot-test.sh "${{ steps.prereqs.outputs.kernel }}" 60
+          # HARNESS_STRICT: CI installs cryptsetup-bin and busybox-static, so
+          # a missing fixture here means fixture GENERATION broke — which is
+          # precisely the regression a silent SKIP would hide.
+          HARNESS_STRICT=1 bash qemu/boot-test.sh "${{ steps.prereqs.outputs.kernel }}" 60
 
   docs:
     name: Documentation

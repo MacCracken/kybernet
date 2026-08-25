@@ -24,7 +24,16 @@
 #   "started: kyb-live"              — a LIVE service, so a cgroup is really
 #                                      created and the pid moved into it
 #                                      (a completed oneshot correctly gets none)
-#   "removed service cgroups: 7"     — the shutdown sweep killed and rmdir'd them
+#   "removed service cgroups: 8"     — the shutdown sweep killed and rmdir'd them
+#
+#     ⚠ EIGHT of NINE, deliberately. kyb-orphan backgrounds a child and
+#     exits, and this pass (`kybernet.harness=1`) shuts down at phase 9
+#     WITHOUT entering the reactor — so nothing ever handles SIGCHLD, the
+#     orphan is an unreaped zombie, and its cgroup is still populated when
+#     the teardown sweep rmdirs. That is correct for a mode that never runs
+#     the reactor; the reap itself is asserted in the reactor pass below,
+#     which does. The count is exact rather than ">= 8" so that a real
+#     teardown regression still moves it.
 # Before 1.5.3 create_service_cgroup and move_to_cgroup were the only cgroup
 # calls with production call sites, so directories accumulated for the life of
 # the system and CRASH_GIVE_UP left a populated one behind.
@@ -155,12 +164,12 @@ for marker in \
     "kybernet: services started" \
     "kybernet: harness done" \
     "kybernet: shutdown" \
-    "kybernet: config: services parsed: 7" \
+    "kybernet: config: services parsed: 9" \
     "kybernet:   completed (oneshot): kyb-dep" \
     "kybernet:   completed (oneshot): kyb-svc" \
     "kybernet: boot: skipped (not applicable): Start udev device manager" \
     "kybernet:   started: kyb-live" \
-    "kybernet: removed service cgroups: 7"; do
+    "kybernet: removed service cgroups: 8"; do
     if echo "$RUNTIME_OUT" | grep -aqF "$marker"; then
         echo "  OK: $marker"
     else
@@ -409,6 +418,49 @@ if [ $fail -eq 0 ]; then
         echo "  FAIL: restart tick never relaunched kyb-crash"
         fail=1
     fi
+
+    # 1.6.1 — the health-check and watchdog tick BODIES actually execute.
+    #
+    # Before this fixture, `grep -rn health_check qemu/` returned nothing, so
+    # init_poll_health recorded nothing for any service and both tick handlers
+    # drained empty vecs on every reactor tick. The reactor gate proved the
+    # DRAINS happen (audit rule 13) and nothing more — every
+    # restart-on-threshold and watchdog path from 1.5.4 was dead code in
+    # practice. Worth stating plainly: with no health_check configured there
+    # is NO WATCHDOG AT ALL, because init_check_watchdog's only non-startup
+    # arm is health-check-driven.
+    #
+    # kyb-health fails deterministically: a TCP connect to 127.0.0.1:9
+    # (discard), which nothing in the initramfs listens on, with retries=1 so
+    # the first failed poll crosses the threshold.
+    # 1.6.1 — PID 1 reaps a child it did not start.
+    #
+    # kyb-orphan backgrounds `sleep 1` and exits, so the sleep is reparented
+    # to init and must be collected by reap_and_log (src/lib/reaper.cyr) on
+    # SIGCHLD — a different path from argonaut's init_reap_services, which
+    # only knows about managed services. This is the property
+    # qemu/boot-crash-test.sh was written for; that script booted with
+    # -m 256M, which audit rule 8 says fails alloc_init outright, so it has
+    # been retired in favour of asserting it here where it actually runs.
+    # ⚠ NOT ASSERTED, and the reason is a finding rather than an omission.
+    # kyb-orphan exercises the orphan path — a child reparented to PID 1 —
+    # but nothing observable comes out of it: argonaut's init_reap_services
+    # calls proc_table_reap_orphans(), which does waitpid(-1, WNOHANG) in a
+    # loop and DISCARDS the count, and it runs before kybernet's own reaper.
+    # So orphans are reaped correctly and invisibly, and kybernet's
+    # reap_and_log is unreachable on that path once argonaut is up. Surfacing
+    # the count is an argonaut change and is on the roadmap for v1.6.2. The
+    # fixture stays because it exercises the path (which is how the watchdog
+    # SIGSEGV was found) and because the cgroup-count marker above depends on
+    # it.
+
+    if echo "$LOOP_OUT" | grep -aqF "health check failed: kyb-health"; then
+        echo "  OK: health tick body executed and reported a failing check"
+    else
+        echo "  FAIL: no health-check failure observed — the tick body never ran"
+        echo "$LOOP_OUT" | grep -aiE 'health' | head -3
+        fail=1
+    fi
     rm -f "$LOOP_LOG"
 fi
 
@@ -432,11 +484,31 @@ fi
 # real device-mapper stack and a real TPM. They are hardware work
 # (roadmap v1.2.2) and are NOT covered here — do not let this gate's green
 # be read as covering them.
+# ⚠ STRICT MODE — the answer to "a skip and a pass look the same".
+#
+# Three of this harness's four passes are guarded on a fixture existing, and
+# a missing fixture printed SKIP and moved on. That is right on a developer
+# box without veritysetup, and useless as a gate: a change that BREAKS
+# fixture generation produces exactly the same SKIP as a machine that never
+# had the tool, so the regression class the pass exists to catch is the one
+# it cannot see. CI sets HARNESS_STRICT=1 (it installs the tools, so a
+# missing fixture there means something broke).
+HARNESS_STRICT="${HARNESS_STRICT:-0}"
+_skip_or_fail() {
+    if [ "$HARNESS_STRICT" = "1" ]; then
+        echo "  FAIL: $1 (HARNESS_STRICT=1 — a skip is a failure here)"
+        fail=1
+    else
+        echo "  SKIP: $1"
+    fi
+}
+
 EDGE_INITRD="${SCRIPT_DIR}/initramfs-edge.cpio.gz"
 EDGE_DIR="${SCRIPT_DIR}/edge"
 if [ ! -f "$EDGE_INITRD" ]; then
     echo ""
-    echo "=== edge gate: SKIPPED (no fixture — veritysetup absent on build host) ==="
+    echo "=== edge gate ==="
+    _skip_or_fail "no edge fixture — veritysetup absent on the build host"
 else
     echo ""
     echo "=== edge-boot gate (dm-verity integrity verification) ==="
@@ -560,7 +632,8 @@ fi
 AUTH_INITRD="${SCRIPT_DIR}/initramfs-auth.cpio.gz"
 if [ ! -f "$AUTH_INITRD" ] || [ "${SKIP_EDGE:-0}" = "1" ]; then
     echo ""
-    echo "=== emergency-auth gate: SKIPPED (no fixture) ==="
+    echo "=== emergency-auth gate ==="
+    _skip_or_fail "no auth fixture (both credential formats ungated — CLAUDE.md rule 26)"
 else
     echo ""
     echo "=== emergency-auth gate (console prompt + echo suppression) ==="
@@ -658,7 +731,7 @@ else
     # something PID 1 can actually verify.
     KDF_INITRD="${SCRIPT_DIR}/initramfs-auth-kdf.cpio.gz"
     if [ ! -f "$KDF_INITRD" ]; then
-        echo "  SKIP: argon2id fixture absent (needs openssl 3.2+ with ARGON2ID)"
+        _skip_or_fail "argon2id fixture absent (needs openssl 3.2+ with ARGON2ID)"
     else
         _auth_assert "$KDF_INITRD" "argon2id v1"
 

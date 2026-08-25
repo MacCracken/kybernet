@@ -1,10 +1,10 @@
 # Kybernet Roadmap
 
-**Current: v1.6.0** — [CHANGELOG.md](../../CHANGELOG.md) is the record of what each
+**Current: v1.6.1** — [CHANGELOG.md](../../CHANGELOG.md) is the record of what each
 release actually did. This file carries only what is **not** done.
 
 Everything below came out of a deliberate sweep of the tree after 1.5.9 shipped;
-v1.6.0 closed the eight items in the first section. Every item names the file that
+v1.6.0 and v1.6.1 closed the first two sections — twenty-two items. Every item names the file that
 proves it. Where a claim was verified by running
 something rather than by reading, it says so.
 
@@ -12,85 +12,8 @@ something rather than by reading, it says so.
 a design decision or is too large to date. The last two sections are blocked on
 something outside this repo.
 
-`cyrius lint` reports **0 untracked deferrals** across all 23 source files as of this
-revision — every deferral comment in the tree now cross-references this file or a
-CHANGELOG entry. Keeping that at zero is a v1.6.1 item, because the linter is advisory
-in CI today.
-
----
-
-## v1.6.1 — gates that cannot fail
-
-The gates are the reason to trust any of the above. Several cannot currently go red.
-
-- [ ] **The bench regression gate is never run by CI.** `grep -rn bench-history
-      .github/` returns nothing; CI runs bare `cyrius bench` under
-      `continue-on-error: true`. Standing rule 6 calls it a release gate that "blocks
-      the cut" — today that is human discipline only, and `release.yml` adds no step.
-      The reason it could not be a CI gate is **fixed as of 1.6.0**: it compared raw
-      absolute ns/op and so flagged dozens of false regressions on any loaded runner.
-      Best-of-N plus calibration normalisation make it noise-tolerant while still
-      failing on a real regression (verified). Wiring it into CI is now just a step.
-- [ ] **The QEMU harness cannot fail the build.** `ci.yml:249` is
-      `continue-on-error: true`, and an unreadable `/dev/kvm` sets `skip=1` so every
-      later step no-ops and the job goes green having executed nothing. The workflow
-      comment carries the standing instruction ("flip it off … once reliably green")
-      with no tracking item. Rule 23 says this is the only gate that executes a reactor
-      iteration.
-- [ ] **28 of the harness's 46 assertions never run in CI.** The qemu job installs
-      `qemu-system-x86 cpio` only — no `cryptsetup-bin`, no OpenSSL 3.2 — so
-      `build-initramfs.sh` drops all three edge/auth fixtures and passes 3, 4a and 4b
-      skip. Rule 26 says both credential formats are gated; in CI neither is. One
-      `apt-get` line fixes the verity half.
-- [ ] **Turn `cyrius lint` into a hard gate — its untracked-deferral detector is the
-      thing that keeps this file honest, and it is disabled.** `ci.yml:72-75` keeps Lint
-      advisory "once the standing dead-code warnings are addressed". Measured across all
-      23 files: **0 dead-code warnings** — the stated blocker does not exist.
-      The 12 untracked deferrals it did find (edge_boot 5, eventloop 4, mount 1,
-      seccomp 1, termios 1) **are now 0**: every one has been cross-referenced to this
-      roadmap or to a CHANGELOG entry, which is what the linter asks for. Note it
-      matches **per line** — the reference has to share the line with the deferral word.
-      What is left before `continue-on-error` can come off: **23 warnings, all
-      over-length lines in `src/test.cyr`.**
-- [ ] **CI's "raw system()" scan is vacuous.** `ci.yml:217` passes `\bsystem\s*\(` to
-      BRE `grep`, an unclosed group; grep exits 2, stderr is discarded, and the check
-      always reports clean. The neighbouring `syscall(59/60)` checks do work.
-- [ ] **The aarch64 build can silently no-op** (`ci.yml:99-102` → `exit 0` + warning),
-      and `release.yml:100-102` then publishes a release with no aarch64 artifact.
-- [ ] **`cyrius test` asserts `0 failed` but not the count**, so a suite that silently
-      shrinks still passes. `bench-history.sh` has the same hole — it never compares
-      the recorded benchmark count against the previous run, and two benches self-skip
-      under root.
-- [ ] **No gate has ever executed `handle_health_tick` or `handle_watchdog_tick`.** No
-      fixture carries a `health_check` block, so both drain empty vecs forever and every
-      1.5.4 restart-on-threshold and watchdog path is unexercised. Corollary worth
-      stating plainly: **with no `health_check` configured there is no watchdog at all.**
-- [ ] **`test_reload_config_is_narrow` never calls `reload_config`**
-      (`test.cyr:743-768`) — it asserts that its own two `store64`s did what stores do.
-      Root cause: `test.cyr` includes `src/lib/*` but not `src/main.cyr`, so **none of
-      main.cyr's 25 functions is under unit test.** The pure helpers (`_read_line_fd`'s
-      new `-2` overflow path, `_emerg_envp`'s 7-slot bound) are trivially extractable.
-
-- [ ] **Bring the TPM, dm-verity-open and aarch64 passes into the harness.** None of
-      these needs hardware (see the silicon section below for the evidence): `swtpm` +
-      `tpm2-tools` give a real TPM 2.0 against QEMU's `tpm-tis`; staging a module loader
-      or the `dm-*` modules lets `veritysetup open` run; `qemu-system-aarch64` is
-      already installed and would execute the aarch64 seccomp table and the whole ARM
-      code path for the first time.
-- [ ] **The edge gate skips on exactly the regression class it exists to catch.** If
-      `veritysetup` is missing on the build host the fixtures are dropped and the pass
-      reports SKIP — which is correct locally and useless as a gate, because a change
-      that breaks verity detection produces the same SKIP as a machine without the tool.
-- [ ] **The structured-logging path has zero coverage and its init failure is invisible
-      for the life of the boot.** `slog_init` failing leaves `g_log_fd` at 0 and nothing
-      says so again.
-- [ ] **There is no Argon2 benchmark on x86_64 either.** 1.5.9's work cap is defended by
-      one-off measurements taken during that release and never re-run; `bench.cyr` has
-      no credential entry, so a parameter or toolchain change that doubles the cost
-      passes every gate silently.
-- [ ] **Two orphaned QEMU scripts.** `boot-crash-test.sh` and `boot-shutdown-test.sh`
-      are busybox-based, run nothing from `build/`, cannot fail, and use less than the
-      512 MB that rule 8 says `alloc_init` needs. Wire them or delete them.
+`cyrius lint` reports **0 untracked deferrals and 0 warnings** across the tree, and as
+of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into fiction.
 
 ---
 
@@ -124,6 +47,24 @@ The gates are the reason to trust any of the above. Several cannot currently go 
       is never loaded. A boot stage can hang indefinitely with its timeout sitting unread
       beside it. Enforcing it under PID 1 needs a real mechanism — the reactor is not
       running at phase 7 — so at minimum say the values are advisory.
+- [ ] **Orphan reaping is correct but completely invisible, and unattributable.**
+      argonaut's `proc_table_reap_orphans()` does `waitpid(-1, WNOHANG)` in a loop and
+      **discards the count it computes**; `init_reap_services` calls it and ignores the
+      return. Since kybernet calls `init_reap_services` before its own `reap_and_log`,
+      argonaut collects every orphan first — so a service leaking children produces no
+      evidence anywhere, and kybernet's own reaper is unreachable on that path. The
+      number already exists; it just needs returning and logging. An argonaut change
+      plus a consumer bump, and then the `kyb-orphan` fixture (added at 1.6.1) becomes
+      assertable instead of merely exercised.
+- [ ] **The cgroup teardown sweep kills and immediately `rmdir`s, without waiting for
+      the processes to actually die.** `remove_all_service_cgroups` calls `kill_cgroup(nm)`
+      then `remove_service_cgroup(nm)` on the next line; a SIGKILL is asynchronous, so the
+      `rmdir` can hit a still-populated cgroup and return EBUSY. Observed at v1.6.1: with
+      a child alive in one service's cgroup at shutdown, `services parsed: 9` but
+      `removed service cgroups: 8`, and the directory is leaked. The count is logged, so
+      the symptom is visible — but nothing acts on it and no gate asserts the two numbers
+      match. Wants a bounded wait on `cgroup.procs` emptying (or a retry) between the two
+      calls, and a harness assertion that created == removed.
 - [ ] **Dead chains to delete or wire.** `cgroup_setup_agent` (zero references anywhere)
       → `move_to_cgroup` + `cgroup_apply_resource_limits`, all superseded at 1.5.5 by the
       child-side `_kyb_join_cgroup`; `any_failures` (`reaper.cyr:69`);
@@ -279,6 +220,20 @@ Moved into the v1.6.1 gate line. Recording why here so the claim is not re-made:
 
 One line per release. Detail lives in [CHANGELOG.md](../../CHANGELOG.md).
 
+- **v1.6.1** — Gates that could not fail, and the kernel panic the first new one found.
+  A fixture with a failing health check made PID 1 SIGSEGV on its first tick: argonaut's
+  `init_enforce_watchdog` passed a cstr to `proc_table_pid`, which takes a boxed `Str` —
+  and the function had never executed in any release of either repo, because nothing had
+  ever configured a `health_check` (so there was no watchdog at all). Fixed in argonaut
+  1.13.3 with a test verified to SIGSEGV on the unfixed source. Six gates made able to go
+  red: the QEMU harness (was `continue-on-error`, and skipped silently without KVM), the
+  bench gate (never run by CI at all), the aarch64 build (no-oped, and release shipped
+  without the artifact), the test count (a shrinking suite passed), CI's `raw system()`
+  scan (BRE vs ERE — always "clean"), and `cyrius lint`, now hard at 0 deferrals and 0
+  warnings. 28 of the harness assertions had never run in CI for want of two apt packages;
+  `HARNESS_STRICT=1` makes a skip a failure there. New coverage for orphan reaping,
+  structured logging, main.cyr's extracted helpers, and the credential path. Retired two
+  broken orphan scripts. 632 tests, 45 harness properties.
 - **v1.6.0** — The confinement path did not confine, and one of the four ways was
   fatal: `"seccomp": "basic"` had no `execve` on its 37-syscall allowlist and denied
   with `KILL_PROCESS`, so it killed every service it was applied to from 1.4.3 onward

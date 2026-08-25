@@ -24,6 +24,7 @@ include "lib/thread_local.cyr"
 include "src/lib/cmdline.cyr"
 include "src/lib/log.cyr"
 include "src/lib/console.cyr"
+include "src/lib/console_io.cyr"
 include "src/lib/termios.cyr"
 include "src/lib/signals.cyr"
 include "src/lib/reaper.cyr"
@@ -242,16 +243,6 @@ fn load_config() {
 
     return cfg;
 }
-
-# Small decimal formatter for log lines — fmt_int_buf writes digits without
-# a NUL, and every cstr logging path here calls strlen.
-fn _u64_str(n) {
-    var b = alloc(24);
-    var l = fmt_int_buf(n, b);
-    store8(b + l, 0);
-    return b;
-}
-
 # SIGHUP config reload.
 #
 # What this can and cannot do, precisely — because the previous version
@@ -391,55 +382,6 @@ fn execute_tmpfiles() {
     }
     return created;
 }
-
-# ================================================================
-# Emergency shell
-# ================================================================
-
-# Read one line from `fd` into `buf`, stripping the trailing newline.
-#
-# Bounded by `deadline_ms` of wall clock. A blocking read here would be an
-# unbounded hang in PID 1: this runs at phase 6c, before the event loop, so
-# nothing else is reaping, nothing is servicing the watchdog, and a board with
-# no operator in front of it would sit at the prompt forever. Bounding it is
-# not a nicety — the alternative failure mode is a machine that looks dead.
-#
-# O_NONBLOCK plus a poll loop rather than a blocking read, because the cyrius
-# stdlib has no poll/select wrapper either (same gap as ioctl). 50 ms between
-# attempts is far below human typing latency and costs nothing.
-#
-# Returns the length, or -1 on error/timeout/EOF.
-fn _read_line_fd(fd, buf, cap, deadline_ms) {
-    var deadline = monotonic_ms() + deadline_ms;
-    var used = 0;
-    while (monotonic_ms() < deadline) {
-        var n = sys_read(fd, buf + used, cap - 1 - used);
-        if (is_err(n) == 0 && n > 0) {
-            used = used + n;
-            # Stop at the first newline — a terminal in canonical mode hands
-            # over a whole line at once, but a pasted string may carry more
-            # than one, and the rest must not be swallowed into the password.
-            var saw_nl = 0;
-            for (var i = 0; i < used; i = i + 1) {
-                var c = load8(buf + i);
-                if (c == 10 || c == 13) { used = i; saw_nl = 1; break; }
-            }
-            if (saw_nl == 1) { break; }
-            # ⚠ OVERFLOW IS AN ERROR, NOT A TRUNCATION. This used to `break`
-            # and return the first `cap - 1` bytes, so a passphrase longer
-            # than the buffer was silently verified as a DIFFERENT password —
-            # denied every time, and a denial halts PID 1 forever. Silently
-            # comparing a prefix is also the shape that could let a shorter
-            # provisioned password be satisfied by a longer typed one.
-            if (used >= cap - 1) { return 0 - 2; }
-        }
-        sleep_ms(50);
-    }
-    if (used <= 0) { return 0 - 1; }
-    store8(buf + used, 0);
-    return used;
-}
-
 # Prompt for the emergency password on a REAL console and return its length,
 # or -1. `fd` must be an interactive descriptor from console_open_rw().
 #
@@ -801,8 +743,19 @@ fn handle_sigchld() {
         }
     }
 
-    # Reap orphaned zombies
-    reap_zombies();
+    # Reap orphaned zombies — children of a process that already exited, now
+    # reparented to PID 1. Reaping them is half of what an init exists to do.
+    #
+    # ⚠ LOGGED, not silent — but note what actually reaches here. argonaut's
+    # `init_reap_services` above calls `proc_table_reap_orphans()`, which
+    # does `waitpid(-1, WNOHANG)` in a loop and discards the count, so in
+    # practice IT collects the orphans and this call finds nothing. That is
+    # why `reap_and_log` rather than the old silent `reap_zombies()`: on the
+    # paths where kybernet does get there first (before `g_init` is set, or
+    # if argonaut's sweep ever stops running) a reaped orphan now leaves a
+    # `reaped pid=N exit=C` line instead of vanishing. Surfacing argonaut's
+    # own count is the real fix and is on the roadmap. 1.6.1.
+    reap_and_log();
     return 0;
 }
 
@@ -1282,7 +1235,7 @@ fn kybernet_run() {
     # booting verified and booting ordinary.
     if (g_config == 0) {
         klog("FATAL CONFIG: unusable /etc/kybernet/config.json — booting on DEFAULTS");
-        kmsg("kybernet: unusable config, booting on defaults (services, boot_mode and edge policy are NOT what the file says)");
+        kmsg("kybernet: unusable config, booting on DEFAULTS — services/boot_mode/edge are NOT as configured");
         g_config = argonaut_config_default();
     }
     g_init = argonaut_init_new(g_config);

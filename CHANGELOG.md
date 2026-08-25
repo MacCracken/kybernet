@@ -7,6 +7,124 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.6.1] — 2026-08-25
+
+**Gates that could not fail, and the kernel panic the first new one found.**
+Suite 608 → 632 assertions. Harness 44 → 45 properties. argonaut 1.13.2 →
+1.13.3; no other dep change.
+
+1.6.0 shipped four defects that had survived three releases, and every one of
+them survived because a gate could not see it or could not go red. This
+release is about that, and it justified itself on the first fixture.
+
+### Fixed — argonaut's watchdog kill path segfaulted PID 1 (argonaut 1.13.3)
+
+Adding a service with a failing health check to the harness produced, on the
+very first run:
+
+```
+Kernel panic - not syncing: Attempted to kill init! exitcode=0x0000000b
+```
+
+`init_enforce_watchdog` took the **cstr** view of the timed-out service name
+and passed it to `proc_table_pid(name)` — but every `proc_table_*` entry point
+does `str_data(name)` internally, because they take a **boxed Str**. It loaded
+the first eight characters of `"kyb-health"` *as a pointer* and handed that to
+`map_get`. Standing rule 3, in the dep.
+
+**Why nothing had ever caught it.** `init_check_watchdog`'s only runtime arm
+is health-check driven and `init_enforce_watchdog` is reachable from nowhere
+else, so with no `health_check` in any argonaut test or any consumer fixture,
+the function had **never executed** — not once, in any release of either repo.
+The corollary is worth stating on its own: **with no `health_check` configured
+there is no watchdog at all.**
+
+argonaut 1.13.3 fixes it and adds `tests/tcyr/watchdog_kill.tcyr`, which
+drives the path with a real proc-table entry and is **verified to fail on the
+unfixed source with exit 139 (SIGSEGV)** — it cannot fail an assertion there,
+because a wild dereference has no other way to present.
+
+### Fixed — six gates that could not turn the build red
+
+- **The QEMU harness could not fail CI.** `continue-on-error: true`, and an
+  unreadable `/dev/kvm` set `skip=1` so every later step no-oped and the job
+  went green having executed nothing. It is a hard gate now; a genuinely
+  unavailable prerequisite **fails** with a reason instead of passing
+  silently (`ALLOW_HARNESS_SKIP=1` to override).
+- **28 of the harness assertions never ran in CI.** The job installed
+  `qemu-system-x86 cpio` only, so `build-initramfs.sh` dropped all three edge
+  and auth fixtures and passes 3, 4a and 4b skipped — including both
+  credential formats CLAUDE.md rule 26 says are gated. Now installs
+  `cryptsetup-bin` and `busybox-static`.
+- **A skip and a pass looked the same.** New `HARNESS_STRICT=1`, which CI
+  sets: a missing fixture there means fixture *generation* broke, which is
+  exactly the regression class a silent SKIP hides.
+- **The bench regression gate was never run by CI at all.** `grep -rn
+  bench-history .github/` returned nothing. It could not have been a gate
+  before 1.6.0 made it load-tolerant; now it runs with `RUNS=5`, advisory on
+  pull requests and enforced on the release path.
+- **The aarch64 build silently no-oped** on a toolchain without the backend,
+  and `release.yml` then published with no aarch64 artifact — while README
+  and CLAUDE.md both say both architectures are release-gated. Both now fail,
+  and the release additionally checks the artifact really is an aarch64 ELF.
+- **`cyrius test` asserted `0 failed` but not the count**, so a suite that
+  silently shrank passed trivially. The floor now comes from CLAUDE.md.
+
+### Fixed — CI's security scan was decoration
+
+`scan "raw system()" '\bsystem\s*\('` passed an ERE pattern to BRE `grep`,
+where `\(` **opens a group**. grep exited 2 with "Unmatched ( or \(", stderr
+was discarded and the status was swallowed into an `awk` pipe, so `hits` was
+always empty and the check always reported clean. It was the helper's only
+caller. Verified both ways: the old pattern finds nothing in a file containing
+a literal `system(` call; the new one finds it.
+
+### Changed — `cyrius lint` is a hard gate
+
+It has an untracked-deferral detector, and that is precisely the thing that
+would have flagged 1.6.0's defects — every one of them was described in a
+comment nobody tracked. It was advisory "once the standing dead-code warnings
+are addressed"; there were none. The real blocker was 24 over-length lines,
+all of them 1.5.9's credential vectors. Those are now assembled from parts, so
+each assertion reads as the property it tests (`_rec("1", "8191", "1")` is
+"one KiB below the memory floor") instead of a 140-character literal. **Tree is
+at 0 untracked deferrals and 0 warnings**, and CI fails on either.
+
+### Added — coverage for three things that had none
+
+- **`kyb-health`**, the fixture that found the panic above. Also the first
+  execution of 1.5.4's restart-on-threshold path in any gate.
+- **`kyb-orphan`**, which backgrounds a child and exits so PID 1 must reap
+  something it did not start — `reap_and_log`'s path, distinct from
+  argonaut's `init_reap_services`.
+- **`src/lib/console_io.cyr`** — `_read_line_fd` and `_u64_str` extracted from
+  main.cyr, which `src/test.cyr` does not include, so **none of main's 25
+  functions had ever been unit tested**. `_read_line_fd`'s overflow answer is
+  now a contract rather than a comment: an over-long line is `-2`, never a
+  truncated prefix. (1.6.0 fixed the behaviour; this makes it testable.)
+- **Structured logging** had zero coverage. `slog`/`slog2` run on every klog,
+  write into a static 1 KiB buffer and hand-roll JSON escaping — a service
+  name containing a quote or a control byte would otherwise produce a line no
+  parser can read. Also: a failed `slog_init` left `g_log_fd` at 0 and said
+  nothing, disabling structured logging for the life of the boot with the
+  explanation in the log that was not being written. It now reports on console
+  and dmesg and returns the verdict.
+- **Credential benchmarks**, on x86_64. 1.5.9 chose its work cap from one-off
+  measurements never re-run; `emerg_cred_parse` (1,513 ns/op) and
+  `emerg_verify argon2id` at the m=8192 floor (54.7 ms/op) are under the
+  regression gate now.
+
+### Removed
+
+`qemu/boot-crash-test.sh` and `qemu/boot-shutdown-test.sh`. Both were
+referenced by nothing, both booted with `-m 256M` — which audit rule 8 says
+fails `alloc_init`'s mmap outright, so they would have panicked before testing
+anything — and both headers described a kybernet without service management.
+The one property they uniquely covered, reaping an unmanaged child, is now
+`kyb-orphan` in the real harness.
+
+---
+
 ## [1.6.0] — 2026-08-25
 
 **The confinement path did not confine, and one of the four ways it failed was

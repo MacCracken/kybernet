@@ -9,6 +9,7 @@ include "lib/thread_local.cyr"
 include "src/lib/cmdline.cyr"
 include "src/lib/log.cyr"
 include "src/lib/console.cyr"
+include "src/lib/console_io.cyr"
 include "src/lib/termios.cyr"
 include "src/lib/signals.cyr"
 include "src/lib/reaper.cyr"
@@ -285,6 +286,59 @@ fn bench_knotify_classify_status() {
 # ================================================================
 # Seccomp filter building (cold path — once per service start)
 # ================================================================
+
+# 1.6.1 — the emergency credential had NO benchmark on any architecture.
+#
+# 1.5.9 chose its work cap (m*t <= 131072) from one-off measurements taken
+# during that release and never re-run, so a parameter change or a toolchain
+# regression that doubled the cost would pass every gate silently. These two
+# put the cheap end and the shipped default under the regression gate.
+#
+# The parse is the hot half in practice: it runs at config LOAD on every
+# boot, while the KDF runs at most once and only on a boot that already
+# failed. Both are measured because the cap is about the KDF and the boot
+# budget is about the parse.
+fn bench_emerg_cred_parse() {
+    var rb = str_builder_new();
+    str_builder_add_cstr(rb, "v1$2$19456$1$6b796265726e65742d746573742d3031$");
+    str_builder_add_cstr(rb, "2b314f63f14b4817f38b55e7c5c53e55a4973ce07");
+    str_builder_add_cstr(rb, "5d7a95ad2da3a4aa7c57c5e");
+    var rec = str_builder_build(rb);
+    var prm = alloc(40);
+    var iters = 20000;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        emerg_cred_parse(rec, prm);
+        k = k + 1;
+    }
+    report("emerg_cred_parse (v1 record)", now_ns() - start, iters);
+    return 0;
+}
+
+# The cheapest record kybernet will accept: m=8192 KiB (the memory floor),
+# t=1. Deliberately NOT the m=19456/t=2 default — at ~230 ms/op that would
+# add minutes to every bench run for no extra signal, since cost scales with
+# m*t and this measures the same code.
+fn bench_emerg_cred_verify_floor() {
+    var esc = emergency_shell_default();
+    store64(esc + 24, 1);
+    var vb = str_builder_new();
+    str_builder_add_cstr(vb, "v1$1$8192$1$6b796265726e65742d746573742d3031$");
+    str_builder_add_cstr(vb, "ec828a05303abe80988a455c9ed2e4b07a0d5f08");
+    str_builder_add_cstr(vb, "9b1a375c105e96aa9a310640");
+    store64(esc + 32, str_builder_build(vb));
+    var pw = str_from("hunter2");
+    var iters = 20;
+    var start = now_ns();
+    var k = 0;
+    while (k < iters) {
+        kyb_verify_emergency_auth(esc, pw);
+        k = k + 1;
+    }
+    report("emerg_verify argon2id (m=8192 t=1)", now_ns() - start, iters);
+    return 0;
+}
 
 fn bench_seccomp_build_basic() {
     var iters = 5000;
@@ -1103,6 +1157,8 @@ fn main() {
     bench_seccomp_build_small();
     arena_reset_clean();
     bench_seccomp_build_basic();
+    bench_emerg_cred_parse();
+    bench_emerg_cred_verify_floor();
     arena_reset_clean();
     bench_sandbox_build();
     println("");

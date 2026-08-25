@@ -1,0 +1,69 @@
+# kybernet/console_io.cyr — the pure helpers main.cyr could not test (1.6.1)
+#
+# `src/test.cyr` includes `src/lib/*.cyr` but NOT `src/main.cyr`, so none of
+# main's 25 functions was ever under unit test — and one of them,
+# `test_reload_config_is_narrow`, "tested" reload_config by hand-writing the
+# two stores it expected and asserting those, which is structurally incapable
+# of failing if reload_config regresses.
+#
+# The genuinely I/O-bound parts of main (the boot sequence, the reactor,
+# drop_to_emergency) stay harness-only; that is the right split. These two are
+# pure enough to test directly, and one of them carries a bound that a 1.6.0
+# defect turned out to depend on — `_read_line_fd`'s overflow answer.
+
+# Small decimal formatter for log lines — fmt_int_buf writes digits without
+# a NUL, and every cstr logging path here calls strlen.
+fn _u64_str(n) {
+    var b = alloc(24);
+    var l = fmt_int_buf(n, b);
+    store8(b + l, 0);
+    return b;
+}
+
+# ================================================================
+# Emergency shell
+# ================================================================
+
+# Read one line from `fd` into `buf`, stripping the trailing newline.
+#
+# Bounded by `deadline_ms` of wall clock. A blocking read here would be an
+# unbounded hang in PID 1: this runs at phase 6c, before the event loop, so
+# nothing else is reaping, nothing is servicing the watchdog, and a board with
+# no operator in front of it would sit at the prompt forever. Bounding it is
+# not a nicety — the alternative failure mode is a machine that looks dead.
+#
+# O_NONBLOCK plus a poll loop rather than a blocking read, because the cyrius
+# stdlib has no poll/select wrapper either (same gap as ioctl). 50 ms between
+# attempts is far below human typing latency and costs nothing.
+#
+# Returns the length, or -1 on error/timeout/EOF.
+fn _read_line_fd(fd, buf, cap, deadline_ms) {
+    var deadline = monotonic_ms() + deadline_ms;
+    var used = 0;
+    while (monotonic_ms() < deadline) {
+        var n = sys_read(fd, buf + used, cap - 1 - used);
+        if (is_err(n) == 0 && n > 0) {
+            used = used + n;
+            # Stop at the first newline — a terminal in canonical mode hands
+            # over a whole line at once, but a pasted string may carry more
+            # than one, and the rest must not be swallowed into the password.
+            var saw_nl = 0;
+            for (var i = 0; i < used; i = i + 1) {
+                var c = load8(buf + i);
+                if (c == 10 || c == 13) { used = i; saw_nl = 1; break; }
+            }
+            if (saw_nl == 1) { break; }
+            # ⚠ OVERFLOW IS AN ERROR, NOT A TRUNCATION. This used to `break`
+            # and return the first `cap - 1` bytes, so a passphrase longer
+            # than the buffer was silently verified as a DIFFERENT password —
+            # denied every time, and a denial halts PID 1 forever. Silently
+            # comparing a prefix is also the shape that could let a shorter
+            # provisioned password be satisfied by a longer typed one.
+            if (used >= cap - 1) { return 0 - 2; }
+        }
+        sleep_ms(50);
+    }
+    if (used <= 0) { return 0 - 1; }
+    store8(buf + used, 0);
+    return used;
+}

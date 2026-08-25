@@ -8,6 +8,7 @@ include "lib/thread_local.cyr"
 include "src/lib/cmdline.cyr"
 include "src/lib/log.cyr"
 include "src/lib/console.cyr"
+include "src/lib/console_io.cyr"
 include "src/lib/termios.cyr"
 include "src/lib/signals.cyr"
 include "src/lib/reaper.cyr"
@@ -595,7 +596,11 @@ fn test_security_profile_parse() {
 # and which an operator must be able to override deliberately.
 fn test_landlock_optional_optin() {
     println("--- landlock_optional opt-in (1.6.0) ---");
-    var j = "{\"services\":[{\"name\":\"lax\",\"binary\":\"/bin/true\",\"security\":{\"landlock_optional\":true,\"landlock\":[{\"path\":\"/usr\",\"access\":\"read\"}]}}]}";
+    var jb = str_builder_new();
+    str_builder_add_cstr(jb, "{\"services\":[{\"name\":\"lax\",\"binary\":\"/bin/true\",");
+    str_builder_add_cstr(jb, "\"security\":{\"landlock_optional\":true,");
+    str_builder_add_cstr(jb, "\"landlock\":[{\"path\":\"/usr\",\"access\":\"read\"}]}}]}");
+    var j = str_data(str_builder_build(jb));
     var root = json_v_parse_buf(j, strlen(j));
     assert(root != 0, "ll-opt: config parses");
     var defs = svc_defs_from_json(root);
@@ -877,6 +882,125 @@ fn test_restart_queue_scans_whole_queue() {
 # Terminal attribute control (1.5.8). The unit suite has no tty, so what is
 # assertable here is the ABI and the not-a-terminal path — the one that must
 # never be treated as an error, because a redirected stdin is normal.
+# 1.6.1 — the structured-logging path had ZERO coverage.
+#
+# slog/slog2 run on every klog and klog2, they write into a static 1 KiB
+# buffer, and they hand-roll JSON escaping — three properties that want a
+# test and had none. The escaper is the part that matters: a service name or
+# an error string containing a quote or a control byte would otherwise
+# produce a log line no JSON parser can read, and structured logs exist to
+# be parsed.
+# 1.6.1 — the first unit coverage main.cyr's helpers have ever had.
+#
+# `_read_line_fd`'s overflow answer is the one that matters: until 1.6.0 it
+# returned the TRUNCATED prefix, so a password longer than the buffer was
+# verified as a different password, denied, and a denial halts PID 1. It now
+# answers -2, and that is a contract worth a test rather than a comment.
+fn test_console_io_helpers() {
+    println("--- console_io helpers (1.6.1) ---");
+
+    # _u64_str: NUL-terminated, because every cstr logging path calls strlen.
+    assert_eq(strlen(_u64_str(0)), 1, "u64_str: 0 is one char");
+    assert(streq(_u64_str(0), "0") == 1, "u64_str: 0");
+    assert(streq(_u64_str(7), "7") == 1, "u64_str: 7");
+    assert(streq(_u64_str(608), "608") == 1, "u64_str: 608");
+    assert(streq(_u64_str(4294967296), "4294967296") == 1, "u64_str: past 32 bits");
+
+    # --- _read_line_fd, driven through a real pipe ---------------------
+    var fds = alloc(16);
+    assert_eq(sys_pipe(fds), 0, "readline: pipe created");
+    var rfd = load32(fds);
+    var wfd = load32(fds + 4);
+
+    # A whole line: the newline terminates and is not included.
+    sys_write(wfd, "hunter2\n", 8);
+    var buf = alloc(64);
+    assert_eq(_read_line_fd(rfd, buf, 64, 2000), 7, "readline: returns the length without the newline");
+    assert(streq(buf, "hunter2") == 1, "readline: NUL-terminates at the newline");
+
+    # A CR terminates too — a serial console sends them.
+    sys_write(wfd, "abc\r", 4);
+    assert_eq(_read_line_fd(rfd, buf, 64, 2000), 3, "readline: CR also terminates");
+    assert(streq(buf, "abc") == 1, "readline: CR content");
+
+    # ⚠ OVERFLOW IS -2, NOT A TRUNCATED PREFIX. cap=8 leaves 7 usable bytes.
+    sys_write(wfd, "0123456789abcdef\n", 17);
+    assert_eq(_read_line_fd(rfd, buf, 8, 2000), 0 - 2,
+      "readline: an over-long line is an ERROR, never a silent truncation");
+
+    sys_close(wfd);
+    sys_close(rfd);
+
+    # EOF is -1, distinct from the -2 above. A FRESH pipe, because the
+    # overflow case above deliberately left its tail unread.
+    var fds2 = alloc(16);
+    assert_eq(sys_pipe(fds2), 0, "readline: second pipe created");
+    var rfd2 = load32(fds2);
+    var wfd2 = load32(fds2 + 4);
+    sys_close(wfd2);
+    assert_eq(_read_line_fd(rfd2, buf, 64, 200), 0 - 1, "readline: EOF with nothing buffered is -1");
+    sys_close(rfd2);
+    return 0;
+}
+
+fn test_slog_json() {
+    println("--- structured logging (1.6.1) ---");
+
+    # Disabled by default: every entry point short-circuits on g_log_fd <= 0,
+    # which is the state a board is in when /var/log is unavailable.
+    g_log_fd = 0;
+    assert_eq(slog("info", "ignored"), 0, "slog: no-ops when the log fd is closed");
+    assert_eq(slog2("info", "a", "b"), 0, "slog2: no-ops when the log fd is closed");
+
+    # Point it at a real file and read back what it wrote.
+    var path = "/tmp/kyb-slog-test.jsonl";
+    sys_unlink(path);
+    g_log_fd = sys_open(path, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);
+    assert(g_log_fd > 0, "slog: test log opened");
+
+    slog("error", "plain");
+    slog2("warn", "two-", "parts");
+    # The escaping cases, all in one line: a quote, a backslash, a newline,
+    # a tab, and a control byte that must become \u00XX.
+    slog("info", "q\"b\\n\tc\x01d");
+    sys_close(g_log_fd);
+    g_log_fd = 0;
+
+    # ⚠ strstr returns an INDEX, and -1 on a miss — NOT a C-style pointer
+    # (string.cyr:154). A match at position 0 therefore returns 0, so the
+    # test is `>= 0`; `!= 0` silently treats a match at the very start of the
+    # buffer as a failure, which is exactly the first assertion below.
+    var buf = alloc(2048);
+    var n = file_read_all(path, buf, 2047);
+    assert(n > 0, "slog: wrote something");
+    store8(buf + n, 0);
+
+    # Line 1: level and msg land in the right fields.
+    assert(strstr(buf, "{\"level\":\"error\",\"msg\":\"plain\"}") >= 0,
+      "slog: level and msg are separate JSON fields");
+    # Line 2: slog2 concatenates its two parts into ONE msg value.
+    assert(strstr(buf, "{\"level\":\"warn\",\"msg\":\"two-parts\"}") >= 0,
+      "slog2: both parts land in one msg value");
+    # Line 3: every metacharacter is escaped, so the line stays parseable.
+    assert(strstr(buf, "q\\\"b") >= 0, "slog: a quote is backslash-escaped");
+    assert(strstr(buf, "\\n") >= 0, "slog: a newline becomes \\n");
+    assert(strstr(buf, "\\t") >= 0, "slog: a tab becomes \\t");
+    assert(strstr(buf, "\\u0001") >= 0, "slog: a control byte becomes \\u00XX");
+    # A raw newline inside the value would split the record in two.
+    assert_eq(_count_lines(buf, n), 3, "slog: exactly three records, none split by a raw newline");
+
+    sys_unlink(path);
+    return 0;
+}
+
+fn _count_lines(buf, n) {
+    var c = 0;
+    for (var i = 0; i < n; i = i + 1) {
+        if (load8(buf + i) == 10) { c = c + 1; }
+    }
+    return c;
+}
+
 fn test_termios() {
     println("--- termios (1.5.8) ---");
 
@@ -981,10 +1105,70 @@ var TV_SALT_HEX = "6b796265726e65742d746573742d3031";
 # m=8192 KiB, t=1 — the cheap vector (~55 ms), so the suite does not pay
 # the 230 ms default cost on every negative case. 8192 is the FLOOR: sigil
 # would accept m=8, which fits in a GPU SM and buys nothing.
-var TV_CHEAP = "v1$1$8192$1$6b796265726e65742d746573742d3031$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640";
+var TV_TAG_8192 = "ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640";
 # m=19456 KiB, t=2, p=1 — the real default. RFC 9106's memory-constrained
 # option as OWASP states it, and what Rust's Argon2::default() emits.
-var TV_REAL = "v1$2$19456$1$6b796265726e65742d746573742d3031$2b314f63f14b4817f38b55e7c5c53e55a4973ce075d7a95ad2da3a4aa7c57c5e";
+# A 16-byte tag: satisfies sigil's 4-byte floor, not RFC 9106 §4's 32.
+var TV_TAG_16B = "182bc4a43ebb6d009ccafa43450d0bf9";
+# The top of both accepted length ranges — 32-byte salt, 64-byte tag.
+var TV_SALT_32B = "abababababababababababababababababababababababababababababababab";
+# One nibble short of a 64-char tag — hex that cannot become whole bytes.
+# ⚠ Built as its own cstr rather than str_sub()'d from another: str_sub
+# ALIASES its parent without a NUL (str.cyr:42-52), so handing str_data() of
+# a substring to str_builder_add_cstr reads straight past the end. That is
+# the exact invariant src/lib/emergency_auth.cyr documents, and this test
+# tripped over it.
+fn TV_TAG_ODD() {
+    var b = str_builder_new();
+    str_builder_add_cstr(b, "182bc4a43ebb6d009ccafa43450d0bf9");
+    str_builder_add_cstr(b, "34f584ab185e714d3d506538fb35399");
+    return str_data(str_builder_build(b));
+}
+
+fn TV_TAG_64B() {
+    var b = str_builder_new();
+    str_builder_add_cstr(b, "8f01f7179b97bc3ed0b46c3f0da2c1810685d31f86bcc69463de89c1e");
+    str_builder_add_cstr(b, "2b9281ef2ba2d57355ae00099c14617fa71b7251ecedf62d45f5c9d2");
+    str_builder_add_cstr(b, "4201cdccdae1527");
+    return str_data(str_builder_build(b));
+}
+# t=4, m=16384 — non-default costs, to prove parameters come from the record.
+var TV_TAG_T4M16384 = "bf3417d3d08ca2fd02f0d7a91e2e3a61bc9fec792ac6e498842cddb8315e3373";
+var TV_TAG_19456 = "2b314f63f14b4817f38b55e7c5c53e55a4973ce075d7a95ad2da3a4aa7c57c5e";
+
+# Build a v1 record from its parts.
+#
+# The negative cases below used to be 140-character string literals in which
+# the ONE field under test was buried — and they were the only thing keeping
+# `cyrius lint` advisory in CI, since all 24 over-length warnings in the tree
+# were these. Assembling them means each assertion now reads as the property
+# it checks (`_rec("1", "8191", "1")` is "one KiB below the memory floor"),
+# and the lint gate can become a hard one. 1.6.1.
+fn _rec5(t, m, p, salt, tag) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "v1$");
+    str_builder_add_cstr(sb, t);
+    str_builder_add_cstr(sb, "$");
+    str_builder_add_cstr(sb, m);
+    str_builder_add_cstr(sb, "$");
+    str_builder_add_cstr(sb, p);
+    str_builder_add_cstr(sb, "$");
+    str_builder_add_cstr(sb, salt);
+    str_builder_add_cstr(sb, "$");
+    str_builder_add_cstr(sb, tag);
+    return str_builder_build(sb);
+}
+
+# The common shape: canonical salt, the cheap m=8192 tag.
+fn _rec(t, m, p) { return _rec5(t, m, p, TV_SALT_HEX, TV_TAG_8192); }
+
+fn _kind(rec) { return emerg_cred_kind(rec); }
+
+# The two vectors the verify tests use, assembled the same way. Both were
+# generated by OpenSSL 3.6.3's `openssl kdf ... ARGON2ID` — see
+# test_emergency_cred_verify for why that matters.
+fn TV_CHEAP() { return _rec("1", "8192", "1"); }
+fn TV_REAL()  { return _rec5("2", "19456", "1", TV_SALT_HEX, TV_TAG_19456); }
 
 fn _cred_kind_of(cs) {
     return emerg_cred_kind(str_from(cs));
@@ -996,8 +1180,8 @@ fn test_emergency_cred_format() {
     # --- classification -------------------------------------------------
     assert_eq(emerg_cred_kind(0), EMERG_CRED_NONE, "cred: null is NONE");
     assert_eq(_cred_kind_of(""), EMERG_CRED_NONE, "cred: empty is NONE");
-    assert_eq(_cred_kind_of(TV_CHEAP), EMERG_CRED_ARGON2ID, "cred: v1 record is ARGON2ID");
-    assert_eq(_cred_kind_of(TV_REAL), EMERG_CRED_ARGON2ID, "cred: default-param record is ARGON2ID");
+    assert_eq(_kind(TV_CHEAP()), EMERG_CRED_ARGON2ID, "cred: v1 record is ARGON2ID");
+    assert_eq(_kind(TV_REAL()), EMERG_CRED_ARGON2ID, "cred: default-param record is ARGON2ID");
 
     # The 1.5.8 credential — sha256("hunter2"). This exact string is what
     # qemu/build-initramfs.sh has written since 1.5.8.
@@ -1009,8 +1193,8 @@ fn test_emergency_cred_format() {
     # and 'v', neither of which is a hex digit, and it is far longer than
     # 64 characters. Asserted from both directions so a future edit to
     # either predicate has to argue with a test.
-    assert_eq(edge_is_hex64_str(str_from(TV_CHEAP)), 0, "cred: v1 record is NOT hex64");
-    assert_eq(edge_is_hex64_str(str_from(TV_REAL)), 0, "cred: default record is NOT hex64");
+    assert_eq(edge_is_hex64_str(TV_CHEAP()), 0, "cred: v1 record is NOT hex64");
+    assert_eq(edge_is_hex64_str(TV_REAL()), 0, "cred: default record is NOT hex64");
     assert_eq(emerg_cred_parse(str_from(legacy), 0), 0, "cred: legacy digest does not parse as v1");
 
     # --- malformed records are refused, never downgraded ----------------
@@ -1021,7 +1205,9 @@ fn test_emergency_cred_format() {
     assert_eq(_cred_kind_of("v1$2$19456$1"), EMERG_CRED_INVALID, "cred: truncated before salt is INVALID");
     assert_eq(_cred_kind_of("v1$2$19456$1$6b796265726e65742d746573742d3031"), EMERG_CRED_INVALID,
       "cred: missing tag field is INVALID");
-    assert_eq(_cred_kind_of("v9$2$19456$1$6b796265726e65742d746573742d3031$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640"),
+    var v9 = _rec5("2", "19456", "1", TV_SALT_HEX, TV_TAG_8192);
+    store8(str_data(v9) + 1, 57);      # "v1$..." -> "v9$...": an unknown version
+    assert_eq(_kind(v9),
       EMERG_CRED_INVALID, "cred: unknown version is INVALID");
     assert_eq(_cred_kind_of("nonsense"), EMERG_CRED_INVALID, "cred: garbage is INVALID");
     # 63 hex chars — one short of legacy, and not v1 either.
@@ -1029,15 +1215,15 @@ fn test_emergency_cred_format() {
       EMERG_CRED_INVALID, "cred: 63 hex chars is INVALID, not LEGACY");
     # A seventh field means the record carries something this version does
     # not understand. Guessing is how a format grows a silent second meaning.
-    assert_eq(_cred_kind_of("v1$1$8192$1$6b796265726e65742d746573742d3031$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640$extra"),
+    assert_eq(_kind(str_cat(_rec("1", "8192", "1"), str_from("$extra"))),
       EMERG_CRED_INVALID, "cred: a seventh field is INVALID");
     # Non-hex in the salt / tag.
-    assert_eq(_cred_kind_of("v1$1$8192$1$zz796265726e65742d746573742d3031$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640"),
+    assert_eq(_kind(_rec5("1", "8192", "1", "zz796265726e65742d746573742d3031", TV_TAG_8192)),
       EMERG_CRED_INVALID, "cred: non-hex salt is INVALID");
     # Odd-length hex cannot be decoded into bytes.
-    assert_eq(_cred_kind_of("v1$1$8192$1$6b796265726e65742d746573742d303$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640"),
+    assert_eq(_kind(_rec5("1", "8192", "1", "6b796265726e65742d746573742d303", TV_TAG_8192)),
       EMERG_CRED_INVALID, "cred: odd-length salt hex is INVALID");
-    assert_eq(_cred_kind_of("v1$1$8192$1$6b796265726e65742d746573742d3031$182bc4a43ebb6d009ccafa43450d0bf934f584ab185e714d3d506538fb35399"),
+    assert_eq(_kind(_rec5("1", "8192", "1", TV_SALT_HEX, TV_TAG_ODD())),
       EMERG_CRED_INVALID, "cred: odd-length tag hex is INVALID");
 
     # --- parameter bounds (the roadmap's ceiling item) ------------------
@@ -1047,54 +1233,54 @@ fn test_emergency_cred_format() {
     # alloc() succeeds and the fill then runs far out of bounds. Inside
     # PID 1 that is a wild write. The bound is enforced during decimal
     # accumulation, so a long digit run is refused before it can wrap.
-    assert_eq(_cred_kind_of("v1$2$18014398509482928$1$6b796265726e65742d746573742d3031$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640"),
+    assert_eq(_kind(_rec("2", "18014398509482928", "1")),
       EMERG_CRED_INVALID, "cred: m_cost 2^54+1024 refused (the wrap-to-1MiB wild write)");
-    assert_eq(_cred_kind_of("v1$2$99999999999999999999$1$6b796265726e65742d746573742d3031$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640"),
+    assert_eq(_kind(_rec("2", "99999999999999999999", "1")),
       EMERG_CRED_INVALID, "cred: 20-digit m_cost refused before overflow");
-    assert_eq(_cred_kind_of("v1$2$65537$1$6b796265726e65742d746573742d3031$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640"),
+    assert_eq(_kind(_rec("2", "65537", "1")),
       EMERG_CRED_INVALID, "cred: m_cost one above the 64 MiB ceiling refused");
-    assert_eq(_cred_kind_of("v1$9$8192$1$6b796265726e65742d746573742d3031$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640"),
+    assert_eq(_kind(_rec("9", "8192", "1")),
       EMERG_CRED_INVALID, "cred: t_cost above ceiling refused");
     # The floor sigil does NOT provide: it accepts m >= 8*p, i.e. 8 KiB at
     # p=1, which fits inside one GPU streaming multiprocessor's shared memory
     # and surrenders the entire memory-hardness argument.
-    assert_eq(_cred_kind_of("v1$1$64$1$6b796265726e65742d746573742d3031$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640"),
+    assert_eq(_kind(_rec("1", "64", "1")),
       EMERG_CRED_INVALID, "cred: m_cost 64 KiB refused (sigil would accept it)");
-    assert_eq(_cred_kind_of("v1$1$8191$1$6b796265726e65742d746573742d3031$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640"),
+    assert_eq(_kind(_rec("1", "8191", "1")),
       EMERG_CRED_INVALID, "cred: m_cost one below the 8 MiB floor refused");
     # parallelism > 1: sigil fills lanes serially, so p>1 is free for the
     # attacker and worth nothing to the defender.
-    assert_eq(_cred_kind_of("v1$1$8192$4$6b796265726e65742d746573742d3031$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640"),
+    assert_eq(_kind(_rec("1", "8192", "4")),
       EMERG_CRED_INVALID, "cred: parallelism 4 refused (serial fill, no defender gain)");
     # The work cap. Both factors are individually legal here; the product is
     # not — without it phase 6c could stall for tens of seconds on ARM.
-    assert_eq(_cred_kind_of("v1$8$65536$1$6b796265726e65742d746573742d3031$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640"),
+    assert_eq(_kind(_rec("8", "65536", "1")),
       EMERG_CRED_INVALID, "cred: m*t above the work cap refused (65536 x 8)");
-    assert_eq(_cred_kind_of("v1$2$65536$1$6b796265726e65742d746573742d3031$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640"),
+    assert_eq(_kind(_rec("2", "65536", "1")),
       EMERG_CRED_ARGON2ID, "cred: m*t exactly at the work cap accepted");
     # A 16-byte tag satisfies sigil (floor 4) but not RFC 9106 §4's 256 bits.
-    assert_eq(_cred_kind_of("v1$1$8192$1$6b796265726e65742d746573742d3031$182bc4a43ebb6d009ccafa43450d0bf9"),
+    assert_eq(_kind(_rec5("1", "8192", "1", TV_SALT_HEX, TV_TAG_16B)),
       EMERG_CRED_INVALID, "cred: 16-byte tag refused (RFC 9106 §4 wants 32)");
     # An 8-byte salt satisfies sigil (floor 8) but not RFC 9106 §4's 128 bits.
-    assert_eq(_cred_kind_of("v1$1$8192$1$6b796265726e6574$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640"),
+    assert_eq(_kind(_rec5("1", "8192", "1", "6b796265726e6574", TV_TAG_8192)),
       EMERG_CRED_INVALID, "cred: 8-byte salt refused (RFC 9106 §4 wants 16)");
-    assert_eq(_cred_kind_of("v1$0$8192$1$6b796265726e65742d746573742d3031$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640"),
+    assert_eq(_kind(_rec("0", "8192", "1")),
       EMERG_CRED_INVALID, "cred: t_cost 0 refused (RFC floor)");
-    assert_eq(_cred_kind_of("v1$1$8192$0$6b796265726e65742d746573742d3031$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640"),
+    assert_eq(_kind(_rec("1", "8192", "0")),
       EMERG_CRED_INVALID, "cred: parallelism 0 refused");
-    assert_eq(_cred_kind_of("v1$1$-64$1$6b796265726e65742d746573742d3031$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640"),
+    assert_eq(_kind(_rec("1", "-64", "1")),
       EMERG_CRED_INVALID, "cred: negative m_cost refused (no sign accepted)");
     # m < 8*p is sigil's own floor; catching it here turns an unexplained
     # denial at phase 6c into a config error at load.
-    assert_eq(_cred_kind_of("v1$1$16$4$6b796265726e65742d746573742d3031$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640"),
+    assert_eq(_kind(_rec("1", "16", "4")),
       EMERG_CRED_INVALID, "cred: m_cost < 8*parallelism refused");
     # A salt below RFC 9106's 8-byte floor.
-    assert_eq(_cred_kind_of("v1$1$8192$1$6b79626572$ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640"),
+    assert_eq(_kind(_rec5("1", "8192", "1", "6b79626572", TV_TAG_8192)),
       EMERG_CRED_INVALID, "cred: 5-byte salt refused");
 
     # --- the parsed values are the record's, not the defaults -----------
     var prm = alloc(40);
-    assert_eq(emerg_cred_parse(str_from(TV_REAL), prm), 1, "cred: default record parses");
+    assert_eq(emerg_cred_parse(TV_REAL(), prm), 1, "cred: default record parses");
     assert_eq(load64(prm), 2, "cred: t_cost read from the record");
     assert_eq(load64(prm + 8), 19456, "cred: m_cost read from the record");
     assert_eq(load64(prm + 16), 1, "cred: parallelism read from the record");
@@ -1114,15 +1300,15 @@ fn test_emergency_cred_format() {
     # config produce two different pointers to identical bytes. A pointer
     # compare would announce a credential rotation on every SIGHUP.
     assert_eq(emerg_cred_same(0, 0), 1, "cred: absent equals absent");
-    assert_eq(emerg_cred_same(0, str_from(TV_CHEAP)), 0, "cred: absent differs from present");
-    assert_eq(emerg_cred_same(str_from(TV_CHEAP), 0), 0, "cred: present differs from absent");
-    assert_eq(emerg_cred_same(str_from(TV_CHEAP), str_from(TV_CHEAP)), 1,
+    assert_eq(emerg_cred_same(0, TV_CHEAP()), 0, "cred: absent differs from present");
+    assert_eq(emerg_cred_same(TV_CHEAP(), 0), 0, "cred: present differs from absent");
+    assert_eq(emerg_cred_same(TV_CHEAP(), TV_CHEAP()), 1,
       "cred: identical records compare EQUAL across separate Str boxes");
-    assert_eq(emerg_cred_same(str_from(TV_CHEAP), str_from(TV_REAL)), 0,
+    assert_eq(emerg_cred_same(TV_CHEAP(), TV_REAL()), 0,
       "cred: different records compare unequal");
 
     # --- usability gate feeding load_config -----------------------------
-    assert_eq(emerg_cred_usable(str_from(TV_CHEAP)), 1, "cred: v1 is usable");
+    assert_eq(emerg_cred_usable(TV_CHEAP()), 1, "cred: v1 is usable");
     assert_eq(emerg_cred_usable(str_from(legacy)), 1, "cred: legacy is usable");
     assert_eq(emerg_cred_usable(str_from("v1$bogus")), 0, "cred: malformed is NOT usable");
     assert_eq(emerg_cred_usable(0), 0, "cred: absent is NOT usable");
@@ -1136,7 +1322,7 @@ fn test_emergency_cred_verify() {
     # require_auth off short-circuits before any KDF work — the path every
     # existing deployment takes, and it must not have grown a 230 ms cost.
     store64(esc + 24, 0);
-    store64(esc + 32, str_from(TV_CHEAP));
+    store64(esc + 32, TV_CHEAP());
     assert_eq(kyb_verify_emergency_auth(esc, str_from("anything")), 1,
       "verify: no auth required -> granted without hashing");
 
@@ -1148,7 +1334,7 @@ fn test_emergency_cred_verify() {
       "verify: require_auth with no credential -> DENIED");
 
     # --- the v1 path, against an OpenSSL-generated vector ---------------
-    store64(esc + 32, str_from(TV_CHEAP));
+    store64(esc + 32, TV_CHEAP());
     assert_eq(kyb_verify_emergency_auth(esc, str_from("hunter2")), 1,
       "verify: correct password against OpenSSL-generated v1 record");
     assert_eq(kyb_verify_emergency_auth(esc, str_from("hunter3")), 0,
@@ -1164,7 +1350,7 @@ fn test_emergency_cred_verify() {
     # roadmap's fl_alloc item is about: it comes from alloc(), sized by
     # argon2_mem_bytes, and it is the only place the suite proves the
     # default-cost path actually runs inside kybernet.
-    store64(esc + 32, str_from(TV_REAL));
+    store64(esc + 32, TV_REAL());
     assert_eq(kyb_verify_emergency_auth(esc, str_from("hunter2")), 1,
       "verify: m=19456 t=2 p=1 record verifies (19 MiB arena via alloc)");
     assert_eq(kyb_verify_emergency_auth(esc, str_from("hunter3")), 0,
@@ -1176,7 +1362,7 @@ fn test_emergency_cred_verify() {
     # every credential already deployed — and the operator sees "wrong
     # password" on a password that is right. Both of these were generated by
     # OpenSSL at costs the module's own defaults do not use.
-    store64(esc + 32, str_from("v1$4$16384$1$6b796265726e65742d746573742d3031$bf3417d3d08ca2fd02f0d7a91e2e3a61bc9fec792ac6e498842cddb8315e3373"));
+    store64(esc + 32, _rec5("4", "16384", "1", TV_SALT_HEX, TV_TAG_T4M16384));
     assert_eq(kyb_verify_emergency_auth(esc, str_from("hunter2")), 1,
       "verify: t=4 m=16384 record verifies (parameters read from the record)");
     assert_eq(kyb_verify_emergency_auth(esc, str_from("hunter3")), 0,
@@ -1184,7 +1370,7 @@ fn test_emergency_cred_verify() {
 
     # A 32-byte salt and a 64-byte tag — the top of both accepted ranges.
     # Sizing is driven by the record's own field lengths, not by a constant.
-    store64(esc + 32, str_from("v1$1$8192$1$abababababababababababababababababababababababababababababababab$8f01f7179b97bc3ed0b46c3f0da2c1810685d31f86bcc69463de89c1e2b9281ef2ba2d57355ae00099c14617fa71b7251ecedf62d45f5c9d24201cdccdae1527"));
+    store64(esc + 32, _rec5("1", "8192", "1", TV_SALT_32B, TV_TAG_64B()));
     assert_eq(kyb_verify_emergency_auth(esc, str_from("hunter2")), 1,
       "verify: 32-byte salt + 64-byte tag record verifies");
     assert_eq(kyb_verify_emergency_auth(esc, str_from("hunter3")), 0,
@@ -1237,7 +1423,7 @@ fn test_emergency_cred_verify() {
     # Nor a null password, on EITHER arm. The guard used to be on the argon2id
     # arm only; the legacy arm reached argonaut, which does
     # `str_data(password_input)` — load64(0), a kernel panic in PID 1.
-    store64(esc + 32, str_from(TV_CHEAP));
+    store64(esc + 32, TV_CHEAP());
     assert_eq(kyb_verify_emergency_auth(esc, 0), 0,
       "verify: null password denied on the argon2id arm");
     store64(esc + 32, password_hash("hunter2", 7));
@@ -2300,6 +2486,8 @@ fn main() {
     test_restart_queue();
     test_restart_queue_scans_whole_queue();
     test_restart_queue_bounds();
+    test_console_io_helpers();
+    test_slog_json();
     test_termios();
     test_emergency_auth();
     test_emergency_cred_format();

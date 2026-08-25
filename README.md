@@ -45,7 +45,7 @@ Requires Cyrius 6.5.35 (`cyriusly install 6.5.35 && cyriusly use 6.5.35`).
 ```sh
 cyrius deps                                # Resolve deps from cyrius.cyml into lib/
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet   # Build (DCE recommended)
-cyrius test src/test.cyr                   # Run 608 tests
+cyrius test src/test.cyr                   # Run 632 tests
 cyrius bench src/bench.cyr                 # Run benchmarks
 ```
 
@@ -131,7 +131,7 @@ cyrius bench src/bench.cyr                 # Run benchmarks
 - **Data-driven mount table** — not hardcoded per-mount calls
 - **sd_notify compatible** — READY, STOPPING, WATCHDOG, STATUS, RELOADING messages via epoll
 - **String builder** for path construction and logging
-- **608 tests**, 55 benchmarks
+- **632 tests**, 57 benchmarks
 
 ## Dependencies
 
@@ -142,7 +142,7 @@ Resolved via `cyrius.cyml` (locked in `cyrius.lock`):
 | sigil | 3.12.10 | TPM / crypto trust surface + Argon2id (thin sub-bundles only; toolchain brought to 6.5.35 at this tag) |
 | agnostik | 1.5.1 | Shared AGNOS types (security, agent, error) |
 | libro | 2.8.12 | Cryptographic audit chain |
-| argonaut | 1.13.2 | Service lifecycle, boot stages, health, audit, pre-exec + extra-env hooks |
+| argonaut | 1.13.3 | Service lifecycle, boot stages, health, audit, pre-exec + extra-env hooks |
 
 `patra` and `sakshi` are **not** declared as git deps — cyrius 6.5.20+ ships
 them in the stdlib snapshot, and a git pin would silently downgrade the
@@ -170,13 +170,13 @@ boot. With the working lane moved onto the caller's arena it costs +25 KB.
 ## Testing
 
 ```sh
-cyrius test src/test.cyr            # 608 assertions
+cyrius test src/test.cyr            # 632 assertions
 bash scripts/bench-history.sh       # 55 benchmarks, load-tolerant regression gate
 bash qemu/boot-test.sh              # PID-1 boot harness (needs KVM)
 ```
 
 The QEMU harness is the gate that matters: it boots kybernet as real PID 1 and
-asserts 44 properties across four passes — the boot sequence, the reactor
+asserts 45 properties across four passes — the boot sequence, the reactor
 (that it sleeps rather than spins), dm-verity verification against a real
 image pair on virtio disks, and the emergency-auth prompt with a password fed
 over the serial line. Pass 4 runs against **both** credential formats: the

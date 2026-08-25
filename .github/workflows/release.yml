@@ -98,12 +98,21 @@ jobs:
         run: |
           TAG="${GITHUB_REF_NAME#v}"
           git archive --format=tar.gz --prefix="kybernet-${TAG}/" -o "kybernet-${TAG}-src.tar.gz" HEAD
-          if [ -f build/kybernet ]; then
-            cp build/kybernet "kybernet-${TAG}-x86_64-linux"
-          fi
-          if [ -f build/kybernet-aarch64 ]; then
-            cp build/kybernet-aarch64 "kybernet-${TAG}-aarch64-linux"
-          fi
+          # ⚠ BOTH BINARIES ARE REQUIRED. These were `if [ -f ... ]`, so a
+          # release could publish with no aarch64 artifact and say nothing —
+          # while README and CLAUDE.md both state that both architectures are
+          # release-gated. Missing either one is a broken release, not a
+          # smaller one. 1.6.1.
+          for pair in "build/kybernet:x86_64-linux" "build/kybernet-aarch64:aarch64-linux"; do
+            src="${pair%%:*}"; suffix="${pair##*:}"
+            if [ ! -f "$src" ]; then
+              echo "::error::$src missing — kybernet release-gates both architectures"
+              exit 1
+            fi
+            cp "$src" "kybernet-${TAG}-${suffix}"
+          done
+          file "kybernet-${TAG}-aarch64-linux" | grep -q "aarch64" || {
+            echo "::error::the aarch64 artifact is not an aarch64 ELF"; exit 1; }
           sha256sum kybernet-*.tar.gz kybernet-*-linux 2>/dev/null > SHA256SUMS
 
       - uses: actions/upload-artifact@v4

@@ -96,7 +96,19 @@ fn slog_init() {
     # lifetime) and would leak into every spawned service without
     # O_CLOEXEC.
     g_log_fd = sys_open("/var/log/kybernet.log", O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0x1A4);
-    return 0;
+    # ⚠ SAY SO WHEN IT FAILS. Every slog/slog2 short-circuits on
+    # `g_log_fd <= 0`, so a failed open silently disables structured logging
+    # for the entire life of the boot — and the one place an operator would
+    # look for the reason is the log that is not being written. Report it on
+    # the console and in dmesg, once, and return the verdict so a caller can
+    # act on it. 1.6.1.
+    if (g_log_fd <= 0) {
+        g_log_fd = 0;
+        klog("WARNING: /var/log/kybernet.log unopenable — structured logging DISABLED for this boot");
+        kmsg("kybernet: structured logging disabled, /var/log/kybernet.log unopenable");
+        return 0;
+    }
+    return 1;
 }
 
 # Structured-log line buffer. Static for the same reason the reactor
