@@ -7,6 +7,174 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.5.5] — 2026-08-24
+
+**Per-service cgroup limits are configured, applied, and proven.** Suite
+409 → 440 assertions, 0 failures. Requires **argonaut 1.13.0** and
+**agnostik 1.5.1**.
+
+`cgroup_apply_limits`, `cgroup_apply_resource_limits` and
+`cgroup_setup_agent` had sat with no production call site since the port.
+Wiring them up turned out to need two things the roadmap item did not know
+about, either of which alone would have made the feature silently do
+nothing.
+
+### Fixed — the limit files did not exist
+
+A cgroup v2 controller's interface files appear in a cgroup **only if its
+parent lists that controller in `cgroup.subtree_control`.** Nothing in
+kybernet ever wrote it. Verified in the QEMU PID-1 boot before any code was
+written:
+
+```
+cgroup.controllers     = cpuset cpu io memory hugetlb pids rdma misc dmem
+cgroup.subtree_control =                      <- empty, at root AND on the slice
+kybernet.slice/kyb-live/memory.max -> No such file or directory
+```
+
+Every controller was available; nothing enabled them downward. So a freshly
+`mkdir`'d service cgroup held only the core `cgroup.*` files, and every
+write `cgroup_apply_limits` would have done returned ENOENT. That is why it
+could sit unwired for four releases without anything failing.
+
+`cgroup_enable_controllers()` runs at phase 3a — after the cgroup2 mount,
+before any service — and enables memory/pids/cpu at **both** levels: root,
+so `kybernet.slice` gets the files, and the slice, so each service does.
+Controllers are enabled **one per write**: the kernel parses the buffer
+atomically and rejects the whole thing on an unrecognised name, so
+`+memory +pids` against a kernel without `pids` would lose `memory` too.
+Non-fatal throughout — a kernel with no memory controller should run
+services uncapped, not refuse to boot.
+
+This also explains why the 1.5.3 teardown gate never noticed: `cgroup.kill`
+is a **core** file, present regardless of subtree_control, so
+"removed service cgroups: N" proved directories were created and removed
+and nothing about controllers.
+
+### Fixed — `ResourceLimits` is a silent struct collision
+
+The roadmap said to call `cgroup_apply_resource_limits` with
+`svc_def_rlimits`. **Doing that literally would have OOM-killed services.**
+
+argonaut defines `struct ResourceLimits { nofile, address_space, nproc,
+core }` (32 B). agnostik independently defines a *different* struct with the
+*same name* — `{ max_memory, max_cpu_time, max_fds, max_procs, max_disk,
+net_bw }` (48 B) — and ships the only `rlim_*` accessors. kybernet links
+both. cyrius warns about duplicate fns and duplicate symbols; **duplicate
+structs are silent.** A probe on 6.5.35 gives `sizeof(ResourceLimits) == 48`
+— agnostik's wins — while `svc_def_rlimits` returns a pointer argonaut
+filled to its own layout:
+
+```
+rlim_max_memory(r) = load64(r + 0)  -> argonaut's nofile
+rlim_max_procs(r)  = load64(r + 24) -> argonaut's core (-1 when unset)
+```
+
+A service configured for 1024 open files would have had `memory.max` set to
+**1024 bytes** and been OOM-killed on its first page fault.
+
+Limits therefore use agnostik's `cgroup_limits`, which has no twin and whose
+five fields are all real cgroup v2 control files, stored on argonaut
+1.13.0's separate `cgroup_limits` field (+168). Recorded as standing rule 14
+in CLAUDE.md.
+
+### Fixed — the process was placed in its cgroup too late, or never
+
+Placement moved into the child, as step 0 of `kyb_pre_exec`. The parent
+cannot do it without a race: argonaut owns fork+exec, so kybernet only
+learns the pid after `init_start_service` returns — and for a `simple`
+service with a ready_check, that is after the entire readiness poll.
+
+Worse than late. cgroup v2 charges memory on **first touch and does not
+migrate charges on move**, so every page the service faulted in before the
+move stayed charged to the root cgroup for the life of that memory. And a
+**oneshot was never placed at all** — argonaut waits for it inside
+`init_start_service` and returns 0, so there was no surviving pid to move.
+
+The child writes the literal `"0"` to `cgroup.procs` — the kernel's "move
+the writer" form, so no getpid and no integer formatting. It runs **before**
+no_new_privs, capabilities, Landlock and seccomp, because every one of those
+can take away the ability to write cgroupfs. The parent creates the cgroup
+and writes its limits before calling `init_start_service`.
+
+Placement fails closed only when limits were actually configured: a service
+that asked to be capped and would instead run uncapped is a policy
+violation. A service with no limits gets best-effort placement — losing its
+cgroup costs accounting and the shutdown sweep, not containment.
+
+### Fixed — `cgroup_apply_limits` was fail-fast across independent controllers
+
+It returned on the first error, and the write order is
+memory.max → memory.high → cpu.weight → pids.max. On a kernel without the
+cpu controller, a service configured for both `cpu_weight` and `pids_max`
+got **neither** — cpu.weight returned ENOENT and pids.max was never
+attempted. These are independent controllers. Every configured limit is now
+attempted and the last failure is returned, so the caller still learns
+something did not apply.
+
+### Added — the `limits` config block
+
+```json
+{ "name": "svc", "binary": "/bin/svc",
+  "limits": { "memory_max": 67108864, "memory_high": 50331648,
+              "cpu_weight": 250, "pids_max": 32 } }
+```
+
+Same contract as the 1.5.2 `security` block: absent is fine, present but
+malformed **rejects the service**. Validated at parse time rather than
+discovered at write time — a negative would be formatted as `"-1"` and
+rejected by the kernel with EINVAL, silently leaving the service unlimited;
+`cpu_weight` outside 1..10000 is EINVAL; `memory_high` above `memory_max`
+can never take effect. Plain integers only — no `"64M"` suffixes. `cpu_max`
+is deliberately not exposed: the file also takes the literal `max`, and
+"quota with an implicit period" is a confusing thing to hand an operator.
+
+### Harness
+
+`kyb-limited` reads its own cgroup back from **inside the service** and the
+gate asserts what the kernel accepted, not what kybernet logged:
+
+```
+LIMIT-cgroup=/kybernet.slice/kyb-limited     <- a ONESHOT, placed before exec
+LIMIT-memmax=67108864   LIMIT-memhigh=50331648
+LIMIT-cpuweight=250     LIMIT-pidsmax=32
+LIMIT-ctrl=memory pids
+LIMIT-unlimited=max                          <- kyb-live, no limits block
+```
+
+The oneshot line is the placement proof — it is impossible under the old
+post-start create→move. The unlimited control separates "kybernet wrote the
+value" from "the file already contained it". cpu.weight and memory.high
+together are the regression test for the fail-fast bug: pids.max asserting
+alongside cpu.weight means all four writes were attempted.
+
+Every service now gets a cgroup rather than only the long-lived ones, so the
+teardown marker moves 2 → 6.
+
+### Benchmarks
+
+54 benchmarks; none added — nothing in this release is on a hot path.
+**No regressions** against 1.5.4. The only ≥15% movement in the whole suite
+is `cgroup_file (best case, same pair)` 3 → 4 ns/op, one nanosecond.
+
+Worth recording, because the gate did flag something mid-development and the
+diagnosis is reusable: an intermediate tree measured
+`strlen(52 chars)` at **38 ns/op against a 27 ns baseline (+41%)**, and it
+reproduced — clean re-run on an idle machine gave 38 again, and stashing the
+1.5.5 source gave back 27. Nothing here touches `strlen` or anything it
+calls. Bisecting by file, reverting *either* `cgroup.cyr` *or*
+`svc_config.cyr` restored 26–27: a code-size threshold, not a culprit. The
+final tree, which adds three further hardening changes, measures 27 again.
+
+The series reads `26, 26, 27, 38, 38, 27`. Sub-30 ns microbenchmarks in this
+suite are sensitive to binary layout at the 10 ns scale, and movement is
+bidirectional — the same intermediate tree showed `cgroup_file` 5 → 3
+(−40%) and `restart_queue_pop_due_empty` 6 → 2 (−67%) alongside the strlen
+rise. Treat a single flagged sub-30 ns bench as layout until bisection says
+otherwise.
+
+---
+
 ## [1.5.4] — 2026-08-24
 
 **The Rust port is complete; `rust-old/` is deleted.** Suite 309 → 409
@@ -99,7 +267,7 @@ an unsalted single-pass SHA-256, so the digest is trivially brute-forced
 offline by anyone who can read `config.json`; and PID 1 has no termios
 layer here, so the typed password **echoes to the console**. Both are
 acceptable against the threat this addresses — a drive-by operator at a
-physical console — and both are tracked for v1.5.7.
+physical console — and both are tracked for v1.5.8.
 
 ### Fixed — two smaller port gaps
 

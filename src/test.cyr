@@ -281,6 +281,96 @@ fn test_svc_config_parse() {
     return 0;
 }
 
+# Per-service cgroup limits (1.5.5).
+fn test_svc_config_limits() {
+    println("--- svc config limits (1.5.5) ---");
+
+    # No limits block -> field stays 0 ("no limits"), service still valid.
+    var d0 = _doc3("{\"services\":[{\"name\":\"n\",\"binary\":\"/bin/n\"}", "]}", "");
+    var r0 = json_v_parse(d0);
+    var f0 = svc_defs_from_json(r0);
+    assert_eq(vec_len(f0), 1, "lim: no-limits service parses");
+    assert_eq(svc_def_cgroup_limits(vec_get(f0, 0)), 0, "lim: absent block -> 0");
+
+    # A full block lands on the right fields. Distinct values so a wrong
+    # offset shows as a collision rather than passing.
+    var d1 = _doc3(
+      "{\"services\":[{\"name\":\"c\",\"binary\":\"/bin/c\",\"limits\":{",
+      "\"memory_max\":67108864,\"memory_high\":50331648,",
+      "\"cpu_weight\":250,\"pids_max\":32}}]}");
+    var r1 = json_v_parse(d1);
+    var f1 = svc_defs_from_json(r1);
+    assert_eq(vec_len(f1), 1, "lim: limited service parses");
+    var cl = svc_def_cgroup_limits(vec_get(f1, 0));
+    assert(cl != 0, "lim: cgroup_limits attached");
+    assert_eq(cglim_memory_max(cl), 67108864, "lim: memory_max");
+    assert_eq(cglim_memory_high(cl), 50331648, "lim: memory_high");
+    assert_eq(cglim_cpu_weight(cl), 250, "lim: cpu_weight");
+    assert_eq(cglim_pids_max(cl), 32, "lim: pids_max");
+    # cpu_max is deliberately NOT settable from config yet. A single integer
+    # to cpu.max is accepted by the kernel (cpu_max_write keeps the cgroup's
+    # existing period and sets only the quota), so this is a scope choice,
+    # not a technical block: "quota with an implicit period" is a confusing
+    # thing to expose, and the file also takes the literal "max", which
+    # _cgroup_write_u64 cannot emit. cpu_weight covers proportional sharing,
+    # which is what a service config usually wants.
+    assert_eq(cglim_cpu_max(cl), 0, "lim: cpu_max left unset");
+
+    # An all-zero block carries no policy — leave the field null so the
+    # start path sees "no limits" rather than "limits, none set".
+    var d2 = _doc3("{\"services\":[{\"name\":\"z\",\"binary\":\"/bin/z\",",
+      "\"limits\":{\"memory_max\":0,\"pids_max\":0}}]}", "");
+    var f2 = svc_defs_from_json(json_v_parse(d2));
+    assert_eq(vec_len(f2), 1, "lim: all-zero block still valid");
+    assert_eq(svc_def_cgroup_limits(vec_get(f2, 0)), 0, "lim: all-zero -> no limits");
+    return 0;
+}
+
+# Malformed limits must REJECT the service, not start it unlimited — the
+# same contract the security block uses. An operator who configured a
+# memory cap and silently got none is in the position 1.5.2 refused to
+# leave them in for capabilities.
+fn test_svc_config_limits_rejects() {
+    println("--- svc config limits rejection (1.5.5) ---");
+
+    # Not an object.
+    var a = svc_defs_from_json(json_v_parse(_doc3(
+          "{\"services\":[{\"name\":\"a\",\"binary\":\"/bin/a\",\"limits\":7}]}", "", "")));
+    assert_eq(vec_len(a), 0, "lim: non-object block rejected");
+
+    # Non-integer value.
+    var b = svc_defs_from_json(json_v_parse(_doc3(
+          "{\"services\":[{\"name\":\"b\",\"binary\":\"/bin/b\",",
+          "\"limits\":{\"memory_max\":\"64M\"}}]}", "")));
+    assert_eq(vec_len(b), 0, "lim: string value rejected (no suffix parsing)");
+
+    # Negative. fmt_int_buf would write "-1", which the kernel rejects with
+    # EINVAL — leaving the service silently unlimited. Catch it at parse.
+    var c = svc_defs_from_json(json_v_parse(_doc3(
+          "{\"services\":[{\"name\":\"c\",\"binary\":\"/bin/c\",",
+          "\"limits\":{\"pids_max\":-1}}]}", "")));
+    assert_eq(vec_len(c), 0, "lim: negative rejected");
+
+    # cpu.weight is 1..10000 in cgroup v2; outside that the kernel EINVALs.
+    var d = svc_defs_from_json(json_v_parse(_doc3(
+          "{\"services\":[{\"name\":\"d\",\"binary\":\"/bin/d\",",
+          "\"limits\":{\"cpu_weight\":20000}}]}", "")));
+    assert_eq(vec_len(d), 0, "lim: cpu_weight above 10000 rejected");
+
+    # memory.high above memory.max can never take effect.
+    var e = svc_defs_from_json(json_v_parse(_doc3(
+          "{\"services\":[{\"name\":\"e\",\"binary\":\"/bin/e\",\"limits\":{",
+          "\"memory_max\":1000,\"memory_high\":2000}}]}", "")));
+    assert_eq(vec_len(e), 0, "lim: memory_high above memory_max rejected");
+
+    # And the boundary values that must be ACCEPTED.
+    var ok = svc_defs_from_json(json_v_parse(_doc3(
+          "{\"services\":[{\"name\":\"o\",\"binary\":\"/bin/o\",\"limits\":{",
+          "\"cpu_weight\":1,\"memory_max\":2000,\"memory_high\":2000}}]}", "")));
+    assert_eq(vec_len(ok), 1, "lim: cpu_weight 1 and high==max accepted");
+    return 0;
+}
+
 fn test_svc_config_health_check() {
     println("--- svc config health check (1.5.0) ---");
     var doc = json_v_parse(_doc3(
@@ -573,6 +663,58 @@ fn test_capability_numbers_are_kernel() {
 
 # ---------------------------------------------------------------------
 # v1.5.3 — lifecycle cleanup and observability.
+# _cg_have_controller is the guard that stops kybernet writing "+memory" to
+# a kernel that has no memory controller (which returns EINVAL). It is a
+# whole-token match, and the substring cases below are the ones that matter:
+# "mem" must not match "memory", and "memory" must not match "memory_foo".
+fn test_cgroup_controller_probe() {
+    println("--- cgroup controller probe (1.5.5) ---");
+    var hay = "cpuset cpu io memory hugetlb pids rdma misc dmem";
+    var hl = strlen(hay);
+
+    assert_eq(_cg_have_controller(hay, hl, "memory", 6), 1, "ctrl: memory found");
+    assert_eq(_cg_have_controller(hay, hl, "pids", 4), 1, "ctrl: pids found");
+    assert_eq(_cg_have_controller(hay, hl, "cpuset", 6), 1, "ctrl: first token found");
+    assert_eq(_cg_have_controller(hay, hl, "dmem", 4), 1, "ctrl: last token found");
+    assert_eq(_cg_have_controller(hay, hl, "cpu", 3), 1, "ctrl: cpu found as its own token");
+
+    # Substring hazards — "mem" is a prefix of "memory" and a suffix of
+    # "dmem", and neither may count as a match.
+    assert_eq(_cg_have_controller(hay, hl, "mem", 3), 0, "ctrl: prefix does not match");
+    assert_eq(_cg_have_controller(hay, hl, "emory", 5), 0, "ctrl: suffix does not match");
+    assert_eq(_cg_have_controller(hay, hl, "memoryx", 7), 0, "ctrl: longer does not match");
+    assert_eq(_cg_have_controller(hay, hl, "freezer", 7), 0, "ctrl: absent controller");
+
+    # A real cgroup.controllers read ends in a newline; the tokenizer has
+    # to treat that as a separator or the last controller is never found.
+    var nl = "cpu memory pids\n";
+    assert_eq(_cg_have_controller(nl, strlen(nl), "pids", 4), 1, "ctrl: trailing newline ok");
+
+    # Empty contents — a kernel with no controllers at all.
+    assert_eq(_cg_have_controller("", 0, "memory", 6), 0, "ctrl: empty haystack");
+    return 0;
+}
+
+# 1.5.5 hardening. Both of these are reachable from PID 1, where a null
+# dereference is a kernel panic rather than a crash report.
+fn test_cgroup_apply_null_guard() {
+    println("--- cgroup apply null guard (1.5.5) ---");
+    # cglim_memory_max(0) would be a load64(0). The live call site guards,
+    # but the function must not depend on that.
+    var r = cgroup_apply_limits("kyb-null-t", 0);
+    assert(is_err_result(r) == 0, "apply: null limits is Ok, not a fault");
+    var r2 = cgroup_apply_resource_limits("kyb-null-t", 0);
+    assert(is_err_result(r2) == 0, "apply: null rlimits is Ok, not a fault");
+
+    # An all-zero cgroup_limits writes nothing — every field's 0 is the
+    # "unset" sentinel, so this must succeed without touching the
+    # filesystem (the cgroup does not exist here, so any write would fail).
+    var cl = cgroup_limits_new();
+    assert(is_err_result(cgroup_apply_limits("kyb-null-t", cl)) == 0,
+      "apply: all-zero limits writes nothing");
+    return 0;
+}
+
 fn test_cgroup_teardown() {
     println("--- cgroup teardown (1.5.3) ---");
     # remove_service_cgroup must go through the SAME cached path builder as
@@ -1508,6 +1650,8 @@ fn main() {
     test_pre_exec_hook();
     test_sandbox_from_config_fail_closed();
     test_svc_config_parse();
+    test_svc_config_limits();
+    test_svc_config_limits_rejects();
     test_svc_config_health_check();
     test_config_services_reach_argonaut();
     test_boot_stage_results();
@@ -1517,6 +1661,8 @@ fn main() {
     test_security_profile_parse();
     test_security_profile_defaults_and_rejection();
     test_capability_numbers_are_kernel();
+    test_cgroup_controller_probe();
+    test_cgroup_apply_null_guard();
     test_cgroup_teardown();
     test_reload_config_is_narrow();
     test_edge_budget_predicate();

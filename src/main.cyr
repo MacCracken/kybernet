@@ -52,6 +52,41 @@ var g_log_fd = 0;
 # `kybernet.harness=loop` — set once at phase 5 so the timer intervals and
 # the reactor's epoll timeout agree. See kybernet_harness_loop_requested().
 var g_loop_harness = 0;
+# Create a service's cgroup and write whatever limits its config carried,
+# BEFORE argonaut forks it. The child then joins itself in kyb_pre_exec.
+#
+# Best-effort and deliberately quiet on the common path: a service with no
+# limits block still gets a cgroup (accounting, and the shutdown sweep needs
+# the directory), and a kernel with no memory controller should run services
+# uncapped rather than refuse to boot. A limit that was configured and could
+# not be written IS logged — that is the case an operator needs to see.
+# 1.5.5.
+fn _prepare_service_cgroup(name_cs) {
+    if (is_err_result(create_service_cgroup(name_cs)) == 1) {
+        klog2("  WARNING: could not create cgroup: ", name_cs);
+        return 0;
+    }
+    # Pre-warm the path the CHILD will look up. The cgroup caches are keyed
+    # by content (hash_str / streq), and the arena is COW-shared across the
+    # fork, so warming it here turns _kyb_join_cgroup's lookup into a pure
+    # map hit on a pre-built Str — no map_new, no str_builder, no allocation
+    # between fork and exec. create_service_cgroup only warms the prefix
+    # cache, and the limit writes warm "memory.max"/"pids.max"; nothing
+    # warms "cgroup.procs".
+    cgroup_file(name_cs, "cgroup.procs");
+    if (g_init == 0) { return 0; }
+    var ms = init_get_service(g_init, name_cs);
+    if (ms == 0) { return 0; }
+    var cl = svc_def_cgroup_limits(managed_svc_def(ms));
+    if (cl == 0) { return 0; }
+    if (is_err_result(cgroup_apply_limits(name_cs, cl)) == 1) {
+        klog2("  WARNING: could not apply cgroup limits: ", name_cs);
+        return 0;
+    }
+    klog2("  limits applied: ", name_cs);
+    return 1;
+}
+
 # Guards start_services against a second run. Service-group boot stages
 # trigger startup on demand (see run_boot_stages), and phase 8 then covers
 # any mode whose sequence has no service stage at all — so the call can
@@ -729,12 +764,22 @@ fn start_services() {
             # "FAILED to start". Found the first time this loop body ever
             # executed in a real boot — it was unreachable before 1.5.0
             # because the wave list was always empty. 1.5.0.
+            # Cgroup FIRST, limits SECOND, start THIRD. 1.5.5.
+            #
+            # Everything here used to happen after init_start_service, which
+            # made it both racy and incomplete: cgroup v2 charges memory on
+            # first touch and does NOT migrate charges on move, so pages
+            # faulted in before the move stay charged to the root cgroup
+            # forever; and a oneshot has already exited by the time
+            # init_start_service returns 0, so it never got a cgroup at all.
+            # The child now joins itself in kyb_pre_exec, so the cgroup and
+            # its limits must already exist when argonaut forks.
+            _prepare_service_cgroup(name_cs);
+
             var pid = init_start_service(g_init, name_cs);
             if (pid > 0) {
                 klog2("  started: ", name_cs);
                 started = started + 1;
-                create_service_cgroup(name_cs);
-                move_to_cgroup(name_cs, pid);
             } elif (pid == 0) {
                 klog2("  completed (oneshot): ", name_cs);
                 started = started + 1;
@@ -847,14 +892,15 @@ fn handle_restart_tick() {
         if (name == 0) { break; }
 
         klog2("  restarting: ", name);
+        # Re-prepare the cgroup BEFORE the relaunch — the old one was torn
+        # down when the service exited (1.4.2 audit MEDIUM-5), and the new
+        # child joins itself in kyb_pre_exec, so it has to exist and carry
+        # its limits by the time argonaut forks. 1.5.5.
+        _prepare_service_cgroup(name);
         # 5 s is a real STOP timeout here, which is what this parameter
         # actually is. Pre-1.5.4 the backoff was passed in this slot.
         var rpid = init_restart_service(g_init, name, 5000);
         if (rpid > 0) {
-            # Re-place the new PID in its cgroup — the old one was torn
-            # down when the service exited. 1.4.2 audit MEDIUM-5.
-            create_service_cgroup(name);
-            move_to_cgroup(name, rpid);
             klog2("  restarted: ", name);
         } elif (rpid == 0) {
             klog2("  restarted (oneshot completed): ", name);
@@ -924,6 +970,25 @@ fn kybernet_run() {
     # to read /proc/self/mounts. Boot continues either way.
     for (var smi = 0; smi < mount_skipped_count(); smi = smi + 1) {
         klog2("skipped optional mount: ", mount_skipped_target(smi));
+    }
+
+    # Phase 3a: Enable cgroup v2 controllers (1.5.5). Must come after the
+    # cgroup2 mount in phase 3 and before any service starts.
+    #
+    # Without this, per-service limit files do not EXIST. A cgroup v2
+    # controller's interface files appear in a cgroup only if its PARENT
+    # lists that controller in cgroup.subtree_control, and kybernet never
+    # wrote it — so kybernet.slice/<svc>/memory.max was always ENOENT.
+    # Confirmed in the QEMU PID-1 harness before this was written; see
+    # cgroup_enable_controllers in src/lib/cgroup.cyr.
+    #
+    # Non-fatal. A kernel built without the memory controller should run
+    # services uncapped, not fail to boot.
+    var cg_en = cgroup_enable_controllers();
+    if (cg_en > 0) {
+        klog2("cgroup controllers enabled: ", _u64_str(cg_en));
+    } else {
+        klog("cgroup controllers: none enabled (limits will not apply)");
     }
 
     # Phase 3b: Initialize structured logging (needs /var/log)

@@ -149,7 +149,88 @@ fn svc_def_from_json(obj) {
     # starting it. 1.5.2.
     if (svc_apply_security_json(sd, obj) == 0) { return 0; }
 
+    # Same contract for resource limits — an operator who configured a
+    # memory cap and got a service without one is in the same position as
+    # one whose capability drop silently vanished. 1.5.5.
+    if (svc_apply_resources_json(sd, obj) == 0) { return 0; }
+
     return sd;
+}
+
+# Read a non-negative limit value for `key`.
+# Returns the value, 0 if absent, or -1 if present but not a non-negative int.
+#
+# Rejecting a negative is not pedantry: cgroup v2 limit files take an
+# unsigned value or the literal "max", and _cgroup_write_u64 formats with
+# fmt_int_buf — so a -1 would be written as the string "-1", which the
+# kernel rejects with EINVAL, silently leaving the limit unset. Catching it
+# at parse time turns a silently-unlimited service into a rejected config.
+fn _cfg_limit(obj, key) {
+    var v = json_v_obj_get(obj, key);
+    if (v == 0) { return 0; }
+    if (json_v_is_int(v) == 0) { return 0 - 1; }
+    var n = json_v_int(v);
+    if (n < 0) { return 0 - 1; }
+    return n;
+}
+
+# Parse a per-service "limits" block into agnostik's cgroup_limits and hang
+# it off the ServiceDefinition (argonaut 1.13.0's cgroup_limits field).
+# Returns 1 on success (including "no block"), 0 if the block is malformed.
+#
+# WHY cgroup_limits AND NOT ResourceLimits. ServiceDefinition also has a
+# `resource_limits` slot, and the roadmap originally said to use it. Doing
+# so would have been a live bug: argonaut's `struct ResourceLimits` is
+# {nofile, address_space, nproc, core} while **agnostik independently
+# defines a different struct with the same name** —
+# {max_memory, max_cpu_time, max_fds, max_procs, max_disk, net_bw} — and
+# ships the only rlim_* accessors. kybernet links both. cyrius warns about
+# duplicate fns and symbols but NOT duplicate structs, so the collision is
+# silent; a probe on 6.5.35 confirms sizeof(ResourceLimits) == 48, agnostik's.
+# Reading an argonaut-built ResourceLimits through rlim_max_memory returns
+# its `nofile` field, so a service configured for 1024 open files would have
+# had memory.max set to 1024 BYTES and been OOM-killed on its first page.
+# cgroup_limits has no such twin, and all five of its fields are real cgroup
+# v2 control files. 1.5.5.
+fn svc_apply_resources_json(sd, obj) {
+    var lim = json_v_obj_get(obj, "limits");
+    if (lim == 0) { return 1; }
+    if (json_v_is_obj(lim) == 0) { return 0; }
+
+    var mem_max   = _cfg_limit(lim, "memory_max");
+    var mem_high  = _cfg_limit(lim, "memory_high");
+    var cpu_wt    = _cfg_limit(lim, "cpu_weight");
+    var pids_max  = _cfg_limit(lim, "pids_max");
+    if (mem_max < 0 || mem_high < 0 || cpu_wt < 0 || pids_max < 0) { return 0; }
+
+    # cpu.weight is 1..10000 in cgroup v2; anything else is EINVAL at the
+    # kernel. 0 stays "unset" — that is the sentinel every field uses.
+    if (cpu_wt != 0) {
+        if (cpu_wt < 1 || cpu_wt > 10000) { return 0; }
+    }
+
+    # An empty or all-zero block carries no policy. Attaching a
+    # cgroup_limits of all zeros would be harmless but misleading — every
+    # write is skipped on the 0 sentinel — so leave the field null and let
+    # the start path see "no limits" rather than "limits, none set".
+    if (mem_max == 0 && mem_high == 0 && cpu_wt == 0 && pids_max == 0) { return 1; }
+
+    # memory.high is a throttling watermark; above memory.max it can never
+    # take effect, which is a config error worth surfacing rather than
+    # quietly writing.
+    if (mem_high != 0 && mem_max != 0) {
+        if (mem_high > mem_max) { return 0; }
+    }
+
+    # cgroup_limits_new is all-zero (verified in agnostik's suite), so every
+    # field left unset stays 0 = "do not write this control file".
+    var cl = cgroup_limits_new();
+    cglim_set_memory_max(cl, mem_max);
+    cglim_set_memory_high(cl, mem_high);
+    cglim_set_cpu_weight(cl, cpu_wt);
+    cglim_set_pids_max(cl, pids_max);
+    svc_def_set_cgroup_limits(sd, cl);
+    return 1;
 }
 
 # Parse the "services" array of an already-parsed config document into a

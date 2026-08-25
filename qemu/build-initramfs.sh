@@ -108,13 +108,39 @@ fi
 # discarded, so a crash-looping service was relaunched as fast as it could
 # die until max_restarts tripped.
 #
-# kyb-live is the 1.5.3 proof. It is the only service here that stays
-# RUNNING, so it is the only one that gets a cgroup at all: start_services
-# creates and populates a cgroup for a live pid, while a completed oneshot
-# correctly gets none. At shutdown the sweep must kill and rmdir it, which
-# boot-test.sh asserts via the "removed service cgroups:" marker. Before
-# 1.5.3 create_service_cgroup and move_to_cgroup were the only cgroup calls
-# with production call sites, so the directory just accumulated.
+# kyb-limited is the 1.5.5 proof, and it proves three things at once that
+# the pre-1.5.5 tree could not have produced:
+#   1. cgroup.subtree_control is enabled, so memory.max EXISTS at all.
+#      Before 1.5.5 a service cgroup held only the core cgroup.* files and
+#      every limit write would have returned ENOENT.
+#   2. The values kybernet wrote are the values the KERNEL accepted —
+#      read back from inside the service, not trusted from a kybernet log.
+#   3. The service is in its cgroup BEFORE it runs. It is a ONESHOT
+#      deliberately: argonaut waits for a oneshot inside init_start_service
+#      and returns 0, so under the old post-start create->move there was no
+#      surviving pid and a oneshot never got a cgroup at all. Its
+#      /proc/self/cgroup resolving to kybernet.slice/kyb-limited is only
+#      possible because the child joins itself in kyb_pre_exec.
+# It also prints kyb-live's memory.max as a control: kyb-live carries no
+# limits block, so that must read "max" while kyb-limited reads 67108864 —
+# which distinguishes "kybernet wrote the value" from "the file happens to
+# contain a default".
+#
+# kyb-live is the 1.5.3 proof: at shutdown the sweep must kill and rmdir
+# every service cgroup, which boot-test.sh asserts via the "removed service
+# cgroups:" marker. Before 1.5.3 create_service_cgroup and move_to_cgroup
+# were the only cgroup calls with production call sites, so the directories
+# just accumulated.
+#
+# NOTE the count changed at 1.5.5. It used to be 2 — only the services that
+# stayed RUNNING got a cgroup, because creation happened after
+# init_start_service returned a live pid and a completed oneshot had no
+# surviving process to move. Now the cgroup is created BEFORE the fork and
+# the child joins itself, so every service gets one and the sweep removes
+# all 6.
+#
+# kyb-live doubles as the 1.5.5 control case: it carries no limits block, so
+# its memory.max must read "max" while kyb-limited's reads 67108864.
 #
 # shutdown_timeout_ms is deliberately short. Now that services actually
 # run, shutdown really does SIGTERM them and poll in 50 ms steps up to the
@@ -160,6 +186,20 @@ if [ -n "$BUSYBOX" ]; then
       "binary": "/bin/false",
       "type": "simple",
       "restart": "on-failure"
+    },
+    {
+      "name": "kyb-limited",
+      "description": "reports its own cgroup limits to the console",
+      "binary": "/bin/sh",
+      "args": ["-c", "C=$(cut -d: -f3 /proc/self/cgroup); D=/sys/fs/cgroup$C; { echo LIMIT-cgroup=$C; echo LIMIT-memmax=$(cat $D/memory.max 2>&1); echo LIMIT-pidsmax=$(cat $D/pids.max 2>&1); echo LIMIT-cpuweight=$(cat $D/cpu.weight 2>&1); echo LIMIT-memhigh=$(cat $D/memory.high 2>&1); echo LIMIT-ctrl=$(cat /sys/fs/cgroup/kybernet.slice/cgroup.subtree_control 2>&1); echo LIMIT-unlimited=$(cat /sys/fs/cgroup/kybernet.slice/kyb-live/memory.max 2>&1); } > /dev/console 2>&1"],
+      "type": "oneshot",
+      "restart": "never",
+      "limits": {
+        "memory_max": 67108864,
+        "memory_high": 50331648,
+        "cpu_weight": 250,
+        "pids_max": 32
+      }
     },
     {
       "name": "kyb-confined",

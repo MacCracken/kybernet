@@ -245,19 +245,72 @@ trivially brute-forced offline by anyone who can read `config.json`; and PID
 1 has no termios layer here, so the typed password **echoes to the console**.
 Both are acceptable against the threat this actually addresses — a drive-by
 operator at a physical console — and both are worth fixing. Tracked in
-v1.5.7 below.
+v1.5.8 below.
 
-### v1.5.5 — cgroup limits actually applied
+### v1.5.5 — cgroup limits actually applied  ✅ SHIPPED
 
-- [ ] Call `cgroup_apply_resource_limits` from `start_services` using
-      `svc_def_rlimits`, and `cgroup_apply_limits` for agnostik
-      `cgroup_limits` where a service carries one
-- [ ] Express limits as config data alongside the `security` block, the way
-      1.5.2 did for capabilities/Landlock/seccomp
-- [ ] Harness assertion that a limit is really in effect (read back
-      `memory.max` / `pids.max` from the service's cgroup)
+All three items closed, plus two prerequisites the item did not know about.
 
-### v1.5.6 — close the remaining edge-boot deferrals
+- [x] Per-service limits are read from config and written to the service's
+      cgroup. **Not** via `cgroup_apply_resource_limits`/`svc_def_rlimits` as
+      this item originally said — that path was a live footgun (see below).
+      `svc_apply_resources_json` parses a `limits` block into agnostik's
+      `cgroup_limits` and hangs it on argonaut 1.13.0's `cgroup_limits` field
+- [x] Limits are config data alongside the `security` block, with the same
+      1.5.2 contract: absent is fine, malformed **rejects the service**
+- [x] Harness reads `memory.max` / `memory.high` / `cpu.weight` / `pids.max`
+      back from inside the service and asserts all four, plus an unlimited
+      control service that must read `max`
+
+**Prerequisite 1 — the limit files did not exist.** Nothing ever wrote
+`cgroup.subtree_control`, and a cgroup v2 controller's interface files appear
+only when the PARENT enables that controller. Confirmed in the QEMU PID-1
+boot before any code was written: controllers `cpuset cpu io memory hugetlb
+pids rdma misc dmem` all available, `subtree_control` empty at both levels,
+`kybernet.slice/kyb-live/memory.max` → ENOENT. `cgroup_enable_controllers()`
+now enables memory/pids/cpu at root and on the slice, one controller per
+write. This is why `cgroup_apply_limits` could sit unwired for four releases
+with nothing failing — and why the 1.5.3 teardown gate passed regardless
+(`cgroup.kill` is a core file, present with no controller enabled).
+
+**Prerequisite 2 — `ResourceLimits` is a silent struct collision.** Doing
+what this item literally said would have set `memory.max` from argonaut's
+`nofile` field. See standing rule 14 in CLAUDE.md.
+
+**Also fixed on the way:**
+- Placement moved into the child (`kyb_pre_exec` step 0). The parent could
+  not place without a race — and for a oneshot could not place at all, since
+  argonaut waits for it inside `init_start_service` and returns 0. cgroup v2
+  also charges memory on first touch and does not migrate charges on move,
+  so a late move leaves everything already faulted in charged to root.
+- `cgroup_apply_limits` was **fail-fast across independent controllers**:
+  the write order is memory.max → memory.high → cpu.weight → pids.max and
+  the first error abandoned the rest, so a kernel without the cpu controller
+  cost a service its pid cap too. Now every configured limit is attempted.
+- Every service gets a cgroup, not just the long-lived ones (harness
+  teardown count 2 → 6).
+
+### v1.5.6 — argonaut's hardcoded x86_64 syscall numbers
+
+Found while wiring 1.5.5's pre-exec placement. argonaut calls
+`syscall(N, ...)` with literal x86_64 numbers in paths kybernet uses on
+every service spawn and shutdown, and kybernet ships an aarch64 binary:
+
+- `src/process_mgmt.cyr:256` `syscall(112)  # SYS_setsid` — x86_64 setsid is
+  112, aarch64 is **157**. Every service argonaut forks fails to get its own
+  session on aarch64.
+- `src/process_mgmt.cyr:422,443,495` and `src/main.cyr:193`
+  `syscall(35, ...)  # SYS_nanosleep` — aarch64 35 is `unlinkat`. These are
+  the service STOP/poll paths.
+- `src/main.cyr:181` `syscall(0, ...)  # read`; `src/notify.cyr:104`
+  `syscall(41, ...)  # socket`; `src/pid1_harness.cyr:125` `syscall(87, ...)`
+
+This is exactly the class standing rule 1 exists to prevent, in a dep rather
+than in kybernet. Fix is per-site: use the stdlib `sys_*` wrapper, or an
+`#ifdef CYRIUS_ARCH_*` gated enum where none exists. Belongs in argonaut,
+not here.
+
+### v1.5.7 — close the remaining edge-boot deferrals
 
 Folds in the long-stalled v1.2.1 scope, which is still the honest state of
 `edge_boot.cyr`: it *detects* TPM and dm-verity but verifies neither. LUKS
@@ -269,7 +322,7 @@ v1.2.1 above; now that argonaut is in scope for edits, that is unblocked.
 - [ ] Re-state the deferrals in `edge_boot.cyr`'s header against real versions
       rather than "1.2.1"
 
-### v1.5.7 — harden the emergency-auth gate
+### v1.5.8 — harden the emergency-auth gate
 
 - [ ] Replace `password_hash`'s unsalted SHA-256 with a salted, iterated KDF
       (argonaut-side; sigil already ships the primitives). Keep the current

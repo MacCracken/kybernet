@@ -24,7 +24,7 @@
 #   "started: kyb-live"              — a LIVE service, so a cgroup is really
 #                                      created and the pid moved into it
 #                                      (a completed oneshot correctly gets none)
-#   "removed service cgroups: 1"     — the shutdown sweep killed and rmdir'd it
+#   "removed service cgroups: 6"     — the shutdown sweep killed and rmdir'd them
 # Before 1.5.3 create_service_cgroup and move_to_cgroup were the only cgroup
 # calls with production call sites, so directories accumulated for the life of
 # the system and CRASH_GIVE_UP left a populated one behind.
@@ -153,12 +153,12 @@ for marker in \
     "kybernet: services started" \
     "kybernet: harness done" \
     "kybernet: shutdown" \
-    "kybernet: config: services parsed: 5" \
+    "kybernet: config: services parsed: 6" \
     "kybernet:   completed (oneshot): kyb-dep" \
     "kybernet:   completed (oneshot): kyb-svc" \
     "kybernet: boot: skipped (not applicable): Start udev device manager" \
     "kybernet:   started: kyb-live" \
-    "kybernet: removed service cgroups: 2"; do
+    "kybernet: removed service cgroups: 6"; do
     if echo "$RUNTIME_OUT" | grep -aqF "$marker"; then
         echo "  OK: $marker"
     else
@@ -198,6 +198,78 @@ if echo "$RUNTIME_OUT" | grep -qE '^NoNewPrivs:[[:space:]]*1'; then
     echo "  OK: kyb-confined has no_new_privs set"
 else
     echo "  FAIL: kyb-confined missing no_new_privs"
+    fail=1
+fi
+
+# 1.5.5: cgroup limits are really in effect.
+#
+# kyb-limited reads its OWN cgroup back from inside the service, so these
+# assert what the KERNEL accepted, not what kybernet logged. Each one is
+# separately load-bearing:
+#
+#  - cgroup=/kybernet.slice/kyb-limited on a ONESHOT is the placement proof.
+#    argonaut waits for a oneshot inside init_start_service and returns 0,
+#    so under the pre-1.5.5 post-start create->move there was no surviving
+#    pid and a oneshot got no cgroup at all. This can only pass because the
+#    child joins itself in kyb_pre_exec, before exec.
+#  - memory.max/pids.max echo the configured values exactly.
+#  - subtree_control proves the controllers were enabled; without it the
+#    limit files would not EXIST and every write would have been ENOENT.
+#  - kyb-live carries no limits block, so its memory.max must read "max".
+#    That control is what separates "kybernet wrote the value" from "the
+#    file happened to already contain it".
+if echo "$RUNTIME_OUT" | grep -aqF "LIMIT-cgroup=/kybernet.slice/kyb-limited"; then
+    echo "  OK: oneshot was in its own cgroup before exec"
+else
+    echo "  FAIL: kyb-limited not placed in its cgroup"
+    echo "$RUNTIME_OUT" | grep -aE '^LIMIT-cgroup' | head -1
+    fail=1
+fi
+if echo "$RUNTIME_OUT" | grep -aqF "LIMIT-memmax=67108864"; then
+    echo "  OK: memory.max applied (64 MiB, read back from kernel)"
+else
+    echo "  FAIL: memory.max not applied"
+    echo "$RUNTIME_OUT" | grep -aE '^LIMIT-memmax' | head -1
+    fail=1
+fi
+if echo "$RUNTIME_OUT" | grep -aqF "LIMIT-pidsmax=32"; then
+    echo "  OK: pids.max applied (32, read back from kernel)"
+else
+    echo "  FAIL: pids.max not applied"
+    echo "$RUNTIME_OUT" | grep -aE '^LIMIT-pidsmax' | head -1
+    fail=1
+fi
+# cpu.weight and memory.high exercise the OTHER controllers, and together
+# they are the regression test for cgroup_apply_limits' fail-fast bug: the
+# write order is memory.max -> memory.high -> cpu.weight -> pids.max, and
+# before 1.5.5 the first Err abandoned every later file. pids.max asserting
+# above while cpu.weight asserts here means all four were attempted.
+if echo "$RUNTIME_OUT" | grep -aqF "LIMIT-cpuweight=250"; then
+    echo "  OK: cpu.weight applied (250, read back from kernel)"
+else
+    echo "  FAIL: cpu.weight not applied"
+    echo "$RUNTIME_OUT" | grep -aE '^LIMIT-cpuweight' | head -1
+    fail=1
+fi
+if echo "$RUNTIME_OUT" | grep -aqF "LIMIT-memhigh=50331648"; then
+    echo "  OK: memory.high applied (48 MiB, read back from kernel)"
+else
+    echo "  FAIL: memory.high not applied"
+    echo "$RUNTIME_OUT" | grep -aE '^LIMIT-memhigh' | head -1
+    fail=1
+fi
+if echo "$RUNTIME_OUT" | grep -aqE '^LIMIT-ctrl=.*memory.*pids'; then
+    echo "  OK: cgroup subtree_control enables memory + pids"
+else
+    echo "  FAIL: cgroup controllers not enabled on the slice"
+    echo "$RUNTIME_OUT" | grep -aE '^LIMIT-ctrl' | head -1
+    fail=1
+fi
+if echo "$RUNTIME_OUT" | grep -aqF "LIMIT-unlimited=max"; then
+    echo "  OK: unlimited service reads memory.max=max (control case)"
+else
+    echo "  FAIL: control case wrong — kyb-live should be unlimited"
+    echo "$RUNTIME_OUT" | grep -aE '^LIMIT-unlimited' | head -1
     fail=1
 fi
 
