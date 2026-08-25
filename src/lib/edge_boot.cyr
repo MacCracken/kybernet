@@ -14,8 +14,12 @@
 #   - Capability detection: tpm_detect (sigil), dm-verity (local probe)
 #   - PCR read per `pcr_bindings` spec ("7+14" → indices 7, 14)
 #   - Honor `tpm_attestation` / `readonly_rootfs` flags as hard
-#     prerequisites — boot aborts to emergency if required-but-missing
-#   - max_boot_ms wall-budget enforcement (warn-only)
+#     prerequisites — boot aborts to emergency if required-but-missing.
+#     Every refusal reason goes to /dev/kmsg as well as klog (1.5.3): on a
+#     headless board dmesg is the only sink an operator still has.
+#   - max_boot_ms wall-budget: checked BEFORE each exec-backed step and
+#     enforced at the end when a hard prerequisite is set (1.5.3; was
+#     warn-only and measured after all the work it bounded)
 #   - LUKS unlock + dm-verity verify stubs that log "config land
 #     in 1.2.1" and skip. Real-device wiring needs argonaut to extend
 #     EdgeBootConfig with `data_device` / `hash_device` / `root_hash` /
@@ -79,6 +83,26 @@ fn _eb_dmverity_supported() {
     return exec_vec(args) == 0;
 }
 
+# Has the wall-clock budget been spent?
+#
+# The pre-1.5.3 budget check ran ONCE, after every step it was meant to
+# bound — a post-mortem, and warn-only besides. It could not prevent
+# anything: by the time it noticed, the two unbounded operations
+# (_eb_dmverity_supported's `veritysetup --version` exec, and tpm_read_pcr's
+# `tpm2_pcrread` exec, both blocking waits on external programs with no
+# timeout of their own) had already run to completion.
+#
+# It still cannot interrupt a call that is already blocked — that needs a
+# timeout inside sigil's exec path, which is not kybernet's to add. What it
+# CAN do is refuse to START the next expensive step once the budget is
+# spent, which is what this gives. Checked before each exec-backed step.
+#
+# Returns 1 when over budget. max_ms <= 0 means no budget configured.
+fn _eb_over_budget(start_ms, max_ms) {
+    if (max_ms <= 0) { return 0; }
+    return (monotonic_ms() - start_ms) > max_ms;
+}
+
 # Run the edge-boot pre-flight. Returns 1 to continue boot, 0 to
 # abort (caller should drop_to_emergency). Caller is responsible for
 # the boot_mode gate — this is a no-op if the config doesn't request
@@ -112,12 +136,27 @@ fn edge_boot_run(config) {
     } else {
         klog("edge boot: TPM not present");
         if (tpm_req == 1) {
+            # kmsg, not just klog. klog reaches stderr and slog; neither
+            # survives on a headless board with no console and no writable
+            # /var. /dev/kmsg lands in dmesg, which is what an operator
+            # actually has after a refused boot. Before 1.5.3 the only kmsg
+            # line on this path was main.cyr's generic "phase 6c: FATAL
+            # edge-boot prerequisite missing" — the operator got the fact of
+            # a refusal but never the reason. 1.4.2 audit MEDIUM.
             klog("FATAL: tpm_attestation required but TPM unavailable");
+            kmsg("edge-boot REFUSED: tpm_attestation required, no TPM present");
             return 0;
         }
     }
 
     # ---- dm-verity capability ----
+    # Budget checkpoint BEFORE the probe: _eb_dmverity_supported may exec
+    # veritysetup and block on it.
+    if (_eb_over_budget(start_ms, max_ms) == 1) {
+        klog("FATAL: edge boot exceeded max_boot_ms before dm-verity probe");
+        kmsg("edge-boot REFUSED: max_boot_ms exceeded before dm-verity probe");
+        return 0;
+    }
     _eb_dmverity_supp = _eb_dmverity_supported();
     if (_eb_dmverity_supp == 1) {
         klog("edge boot: dm-verity supported");
@@ -125,6 +164,7 @@ fn edge_boot_run(config) {
         klog("edge boot: dm-verity not supported");
         if (readonly_req == 1) {
             klog("FATAL: readonly_rootfs required but dm-verity unavailable");
+            kmsg("edge-boot REFUSED: readonly_rootfs required, dm-verity unsupported");
             return 0;
         }
     }
@@ -145,11 +185,20 @@ fn edge_boot_run(config) {
             # Fail closed on a missing binary. 1.4.2 audit MEDIUM-2.
             if (sys_access("/usr/bin/tpm2_pcrread", 0) != 0) {
                 klog("FATAL: tpm_attestation required but /usr/bin/tpm2_pcrread missing");
+                kmsg("edge-boot REFUSED: /usr/bin/tpm2_pcrread missing");
+                return 0;
+            }
+            # Budget checkpoint BEFORE the exec — tpm_read_pcr shells out
+            # to tpm2_pcrread and blocks on it with no timeout.
+            if (_eb_over_budget(start_ms, max_ms) == 1) {
+                klog("FATAL: edge boot exceeded max_boot_ms before PCR read");
+                kmsg("edge-boot REFUSED: max_boot_ms exceeded before PCR read");
                 return 0;
             }
             var pcr_res = tpm_read_pcr(TPM_SHA256, indices);
             if (is_err_result(pcr_res) == 1) {
                 klog("FATAL: tpm_read_pcr failed");
+                kmsg("edge-boot REFUSED: tpm_read_pcr failed");
                 return 0;
             }
             klog("edge boot: PCR read complete");
@@ -171,7 +220,18 @@ fn edge_boot_run(config) {
     # ---- Budget check ----
     _eb_elapsed_ms = monotonic_ms() - start_ms;
     if (max_ms > 0 && _eb_elapsed_ms > max_ms) {
-        klog("WARNING: edge boot exceeded max_boot_ms budget");
+        # Terminal check. Still reached only after the work, so it cannot
+        # prevent the overrun — but on a device that set a boot budget AND
+        # requires attestation, silently continuing past it is the wrong
+        # default: a verified boot that took far longer than the operator
+        # allowed is a signal, not a curiosity. Refuse when verification is
+        # actually required; warn otherwise.
+        klog("edge boot: exceeded max_boot_ms budget");
+        if (tpm_req == 1 || readonly_req == 1) {
+            kmsg("edge-boot REFUSED: max_boot_ms budget exceeded");
+            return 0;
+        }
+        klog("WARNING: over budget, but no hard prerequisite set — continuing");
     }
 
     klog("edge boot: pre-flight complete");

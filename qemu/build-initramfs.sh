@@ -99,6 +99,14 @@ fi
 # so capset(2) really executes instead of short-circuiting on the euid
 # check.
 #
+# kyb-live is the 1.5.3 proof. It is the only service here that stays
+# RUNNING, so it is the only one that gets a cgroup at all: start_services
+# creates and populates a cgroup for a live pid, while a completed oneshot
+# correctly gets none. At shutdown the sweep must kill and rmdir it, which
+# boot-test.sh asserts via the "removed service cgroups:" marker. Before
+# 1.5.3 create_service_cgroup and move_to_cgroup were the only cgroup calls
+# with production call sites, so the directory just accumulated.
+#
 # shutdown_timeout_ms is deliberately short. Now that services actually
 # run, shutdown really does SIGTERM them and poll in 50 ms steps up to the
 # timeout — the mode defaults include a long-lived shell (agnoshi -> busybox
@@ -127,6 +135,14 @@ if [ -n "$BUSYBOX" ]; then
       "description": "harness dependency",
       "binary": "/bin/true",
       "type": "oneshot",
+      "restart": "never"
+    },
+    {
+      "name": "kyb-live",
+      "description": "long-lived service: exercises cgroup create/move/teardown",
+      "binary": "/bin/sleep",
+      "args": ["30"],
+      "type": "simple",
       "restart": "never"
     },
     {

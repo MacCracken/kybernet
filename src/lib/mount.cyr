@@ -98,14 +98,22 @@ fn _init_mount_table() {
     store64(t + 72,  nse);           store64(t + 80,  0);                store64(t + 88,  1);
     # /dev/pts — optional: only matters for tty/console-based services.
     # Headless boards (RPi w/o serial console) can boot without it.
+    # `gid=5` is the tty group: without it allocated ptys get the wrong
+    # group owner. Same port-review finding as /run above.
     store64(t + 96,  "devpts");      store64(t + 104, "/dev/pts");       store64(t + 112, "devpts");
-    store64(t + 120, MS_NOSUID | MS_NOEXEC); store64(t + 128, "mode=0620"); store64(t + 136, 0);
+    store64(t + 120, MS_NOSUID | MS_NOEXEC); store64(t + 128, "gid=5,mode=0620"); store64(t + 136, 0);
     # /dev/shm — optional: POSIX shm. Not used by argonaut or kybernet.
     store64(t + 144, "tmpfs");       store64(t + 152, "/dev/shm");       store64(t + 160, "tmpfs");
     store64(t + 168, ns);            store64(t + 176, "mode=1777");      store64(t + 184, 0);
-    # /run — required: argonaut pid files, notify socket
+    # /run — required: argonaut pid files, notify socket.
+    #
+    # `mode=0755` is NOT optional. tmpfs with no mode= defaults to 01777 —
+    # world-writable and sticky — so before 1.5.3 /run came up world-writable
+    # on every boot, holding the notify socket and argonaut's PID files. The
+    # Rust implementation passed "mode=0755,size=20%"; the port kept the size
+    # and dropped the mode. Found by the rust-old port review at 1.5.3.
     store64(t + 192, "tmpfs");       store64(t + 200, "/run");           store64(t + 208, "tmpfs");
-    store64(t + 216, ns);            store64(t + 224, "size=20%");       store64(t + 232, 1);
+    store64(t + 216, ns);            store64(t + 224, "mode=0755,size=20%"); store64(t + 232, 1);
     # /sys/fs/cgroup — required: service isolation + resource limits
     store64(t + 240, "cgroup2");     store64(t + 248, "/sys/fs/cgroup"); store64(t + 256, "cgroup2");
     store64(t + 264, nse);           store64(t + 272, 0);                store64(t + 280, 1);

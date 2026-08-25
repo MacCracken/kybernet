@@ -36,7 +36,7 @@ Requires Cyrius 6.5.35 (`cyriusly install 6.5.35 && cyriusly use 6.5.35`).
 ```sh
 cyrius deps                                # Resolve deps from cyrius.cyml into lib/
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet   # Build (DCE recommended)
-cyrius test src/test.cyr                   # Run 296 tests
+cyrius test src/test.cyr                   # Run 309 tests
 cyrius bench src/bench.cyr                 # Run benchmarks
 ```
 
@@ -63,7 +63,9 @@ cyrius bench src/bench.cyr                 # Run benchmarks
 ## Features
 
 - **Full argonaut integration** — boot stages, wave-based service startup, health checks, watchdog, crash recovery, coordinated shutdown
-- **cgroup v2 isolation** — per-service slice, PID move, limits, kill
+- **cgroup v2 isolation** — per-service slice, PID move, and teardown at
+  give-up and shutdown. Note resource *limits* are implemented but not yet
+  applied to services (v1.5.5 roadmap item)
 - **Per-service sandbox** — seccomp BPF filters, Landlock filesystem sandbox,
   capability dropping and no_new_privs, applied in the child between fork and
   exec via argonaut 1.9.0's pre-exec hook. Order is no_new_privs → capabilities
@@ -78,7 +80,7 @@ cyrius bench src/bench.cyr                 # Run benchmarks
 - **Data-driven mount table** — not hardcoded per-mount calls
 - **sd_notify compatible** — READY, STOPPING, WATCHDOG, STATUS messages via epoll
 - **String builder** for path construction and logging
-- **296 tests**, 51 benchmarks
+- **309 tests**, 51 benchmarks
 
 ## Dependencies
 

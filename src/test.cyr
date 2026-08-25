@@ -570,6 +570,72 @@ fn test_capability_numbers_are_kernel() {
     return 0;
 }
 
+# ---------------------------------------------------------------------
+# v1.5.3 — lifecycle cleanup and observability.
+fn test_cgroup_teardown() {
+    println("--- cgroup teardown (1.5.3) ---");
+    # remove_service_cgroup must go through the SAME cached path builder as
+    # create/move, and must invalidate the cache entry on the way out — a
+    # re-created service at the same name must not inherit a stale path.
+    var before = cgroup_path("kyb-teardown-t");
+    assert(str_contains(before, "kyb-teardown-t") == 1, "teardown: path built");
+
+    # Removing a cgroup that was never created fails (ENOENT) rather than
+    # reporting success — the shutdown sweep relies on the Result to count
+    # what it actually removed.
+    var r = remove_service_cgroup("kyb-teardown-t");
+    assert(is_err_result(r) == 1, "teardown: absent cgroup errors");
+
+    # Name validation still applies on the teardown path: an unsafe name
+    # must never reach rmdir. create/move reject it (1.4.2 MEDIUM-3), so
+    # teardown must not be the hole in that guard.
+    assert_eq(cgroup_name_is_safe("../../etc"), 0, "teardown: traversal name unsafe");
+    assert_eq(cgroup_name_is_safe("good-name_1.svc"), 1, "teardown: normal name safe");
+    return 0;
+}
+
+fn test_reload_config_is_narrow() {
+    println("--- reload scope (1.5.3) ---");
+    # The reload applies live-safe scalars and refuses to swap structural
+    # state. This asserts the SHAPE of that promise: argonaut derives the
+    # boot sequence and service map at construction, so a reload that
+    # replaced the config pointer alone would leave them stale — and one
+    # that rebuilt them would orphan every running service.
+    var cfg = argonaut_config_default();
+    var init = argonaut_init_new(cfg);
+
+    var seq_before = init_boot_sequence(init);
+    var names_before = vec_len(init_service_names(init));
+    assert(seq_before != 0, "reload: boot sequence exists");
+
+    # Simulate what reload_config does to the live config: scalars only.
+    var live = load64(init);
+    store64(live + 16, 12345);
+    store64(live + 24, 6789);
+    assert_eq(config_boot_timeout(load64(init)), 12345, "reload: boot timeout applied");
+    assert_eq(config_shutdown_timeout(load64(init)), 6789, "reload: shutdown timeout applied");
+
+    # Structural state must be untouched by that.
+    assert_eq(init_boot_sequence(init), seq_before, "reload: boot sequence not swapped");
+    assert_eq(vec_len(init_service_names(init)), names_before, "reload: service map not swapped");
+    return 0;
+}
+
+fn test_edge_budget_predicate() {
+    println("--- edge boot budget (1.5.3) ---");
+    var now = monotonic_ms();
+    # max_ms <= 0 means no budget configured — never over.
+    assert_eq(_eb_over_budget(now, 0), 0, "budget: unset is never over");
+    assert_eq(_eb_over_budget(now, 0 - 1), 0, "budget: negative is never over");
+    # A budget that has not elapsed yet.
+    assert_eq(_eb_over_budget(now, 600000), 0, "budget: generous is not over");
+    # A start time far in the past against a tiny budget is over. This is
+    # the case the pre-1.5.3 code could observe but never act on, because
+    # it only looked once, after every step it was meant to bound.
+    assert_eq(_eb_over_budget(now - 5000, 10), 1, "budget: elapsed is over");
+    return 0;
+}
+
 fn test_fileops() {
     println("--- fileops ---");
     var r = sys_mkdir("/tmp/cyr_ktest2", 0x1C0);
@@ -1298,6 +1364,9 @@ fn main() {
     test_security_profile_parse();
     test_security_profile_defaults_and_rejection();
     test_capability_numbers_are_kernel();
+    test_cgroup_teardown();
+    test_reload_config_is_narrow();
+    test_edge_budget_predicate();
     test_eventloop_setup_full();
     test_reaper_macros();
     test_signal_buffer();

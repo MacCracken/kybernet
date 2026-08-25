@@ -164,33 +164,125 @@ profiles land here.
       aethersafha, ifran) — needs the actual syscall/filesystem surface of
       each, which is a per-service investigation rather than kybernet work
 
-### v1.5.3 — lifecycle cleanup and observability
+### v1.5.3 — lifecycle cleanup and observability ✅ (2026-08-25)
 
-Smaller items with real operational consequences.
+- [x] **Service cgroups now torn down** — `kill_cgroup` + `remove_service_cgroup`
+      wired into `CRASH_GIVE_UP` and a new `remove_all_service_cgroups()` sweep
+      at shutdown. They previously had no production call site at all, so
+      directories accumulated and give-up left a populated one behind
+- [x] **`reload_config` no longer claims more than it does** — applies
+      live-safe scalars, and states plainly that boot-mode and service changes
+      need a reboot. Rebuilding the service map would orphan every running
+      service, which is worse than a stale timeout
+- [x] **Edge-boot refusals reach `/dev/kmsg`** — all four paths, with the
+      specific reason, so `dmesg` has it on a headless board
+- [x] **Edge-boot budget enforces** — checked before each exec-backed step
+      instead of once after all of them, and refuses (not warns) when a hard
+      prerequisite is set
+- [x] ~~cgroup path cache has no production hits~~ — **finding was wrong.**
+      `kill_cgroup` / `_cgroup_write_u64` / `remove_service_cgroup` all go
+      through `cgroup_file`/`cgroup_path`, which *are* the cached accessors.
+      They had no production call site, which the teardown work fixed. No
+      cache change needed
+- [x] Harness exercises create → move → kill → rmdir end-to-end via a
+      long-lived `kyb-live` service; asserts `removed service cgroups: 1`
 
-- [ ] **Service cgroups are never removed.** `create_service_cgroup` mkdirs per
-      service; `remove_service_cgroup` and `kill_cgroup` exist but have no call
-      site outside tests/benches. Cgroup dirs accumulate for the life of the
-      system and `CRASH_GIVE_UP` leaves a populated one behind (1.4.2 audit LOW)
-- [ ] **`reload_config` leaves argonaut half-updated.** SIGHUP does
-      `store64(g_init, new_cfg)`, overwriting only field 0 of `ArgonautInit`;
-      the boot sequence and service map that `argonaut_init_new` derived from
-      the *old* config are never rebuilt, so a reload silently mixes new config
-      with old derived state (1.4.2 audit MEDIUM)
-- [ ] **Edge-boot gate decisions are not auditable.** Both refusal reasons use
-      `klog` only, which reaches stderr and slog but never `/dev/kmsg` — the one
-      sink that survives to `dmesg` on a headless board. The operator gets a
-      generic phase marker, not the reason (1.4.2 audit MEDIUM)
-- [ ] **The edge-boot time budget cannot bound anything.** `max_boot_ms` is
-      measured *after* all the work it is meant to bound, and is warn-only. The
-      work it wraps includes unbounded blocking waits on external programs
-      (`veritysetup`, `tpm2_pcrread`) with no timeout (1.4.2 audit MEDIUM)
-- [ ] **The cgroup path cache has no production hits.** Only two call sites
-      reach it, both in `start_services`; every other consumer
-      (`kill_cgroup`, `_cgroup_write_u64`, `remove_service_cgroup`) bypasses it.
-      Either route them through it or drop the cache (1.4.2 audit MEDIUM)
+**Surfaced while doing this — not in 1.5.3 scope:** cgroups are created and
+populated but **no resource limits are ever applied**.
+`cgroup_apply_limits`, `cgroup_apply_resource_limits` and
+`cgroup_setup_agent` have no production call site, and `svc_def_rlimits`
+is never read. So "cgroup isolation" currently means a directory exists and
+the PID is in it — nothing is bounded. Same shape as the security-stack gap
+that took 1.4.3 + 1.5.2 to close. Tracked below.
 
-### v1.5.4 — close the remaining edge-boot deferrals
+### v1.5.4 — complete the Rust port  ⚠ BLOCKS deleting rust-old/
+
+The 2026-08-25 review of `rust-old/` (asked: "is the port complete, can we
+delete it?") found the answer is **no**. Every module has a Cyrius
+counterpart and Cyrius is a superset almost everywhere — but a set of
+behaviours present in the Rust implementation were dropped in the port and
+are still missing. Two were fixed on the spot at 1.5.3; the rest are here.
+
+`rust-old/` should stay until this list is closed: it is the reference
+implementation for the restart machinery. (It is in git history regardless,
+so deletion is always recoverable — the argument for keeping it is
+convenience while salvaging, not preservation.)
+
+**Fixed at 1.5.3 (security/correctness, verified against both trees):**
+- [x] `/run` mounted without `mode=0755` → tmpfs defaulted to **01777,
+      world-writable**, holding the notify socket and argonaut PID files.
+      Rust passed `mode=0755,size=20%`; the port kept the size, dropped the mode
+- [x] `/dev/pts` mounted without `gid=5` (the tty group) → allocated ptys got
+      the wrong group owner
+
+**Still open — behavioural, each deserves its own change:**
+- [ ] **Deferred restart is dropped — highest-value item.** Rust kept a
+      PendingRestart queue plus a dedicated `TOKEN_RESTART` timerfd: the SIGCHLD
+      handler only *enqueued*, and the reactor relaunched once the exponential
+      backoff had elapsed. kybernet restarts **synchronously** inside
+      `handle_sigchld`, so a crash-looping service is relaunched as fast as it
+      can die until `max_restarts` trips.
+
+      The backoff is not merely ignored, it is passed to the wrong parameter:
+      `init_restart_service(g_init, name_cs, delay)` (`src/main.cyr:472`) against
+      `fn init_restart_service(init, name, stop_timeout_ms)`
+      (`lib/argonaut_init.cyr:579`). argonaut computes `backoff_delay` and returns
+      it in `CrashAction.delay_ms`; grepping every `argonaut_*.cyr` for
+      `delay_ms` finds producers and struct declarations and **zero readers** —
+      nothing anywhere sleeps or schedules on it. The misused argument is inert
+      rather than harmful: `stop_timeout_ms` is only read when the state is
+      RUNNING/STARTING, and on the SIGCHLD path `init_reap_services` has already
+      set STOPPED/FAILED.
+
+      `TOKEN_RESTART = 4` still sits in `eventloop.cyr`'s enum with no timer
+      creating it and no `case 4` in the reactor — a vestige of the intended
+      port. Reference implementation ~35 lines
+      (`rust-old/src/main.rs:391-423,453-460`); note its comment explaining why
+      `process_pending_restarts` scans the WHOLE queue rather than stopping at
+      the first future entry (the queue is not sorted by `restart_at`)
+- [ ] **Health-check failures never act.** Rust compared
+      `HealthTracker::failure_count` against the service's `retries` and queued
+      a restart. Cyrius logs the failure forever and does nothing — which
+      defeats the point of configuring a health check
+- [ ] **A watchdog kill is a one-way door.** Rust queued a 2 s restart for
+      every service `enforce_watchdog()` returned. Cyrius kills and the service
+      stays dead for the life of the system
+- [ ] **`NOTIFY_SOCKET` is never exported.** kybernet binds the socket,
+      registers it with epoll and has a handler — but nothing sets the
+      environment variable, and argonaut's `build_default_envp` sets only PATH.
+      No sd_notify-conformant service can discover it, so the entire
+      readiness/watchdog-ping path is unreachable from the service side.
+      `notify_socket_path()`'s own comment says "for NOTIFY_SOCKET env var"
+- [ ] **`should_drop_to_emergency` is not checked in the service wave loop**, so
+      a boot where every service fails to start still reaches the event loop
+- [ ] **`kill_cgroup`'s fallback is unreachable** when `cgroup.kill` is openable
+      but not writable — Rust checked the write result, Cyrius does not
+- [ ] Emergency-shell `require_auth` — needs a password-verify primitive that
+      does not exist on the Cyrius side; read `rust-old/src/main.rs:550-599`
+      before deleting
+- [ ] `SHUTDOWN_HALT` → `RB_HALT_SYSTEM` is unmapped (latent: no caller
+      produces HALT today)
+
+**Reviewed and deliberately NOT salvaged:** the Rust build/supply-chain
+scaffolding (Cargo, Makefile, deny.toml, codecov.yml — all toolchain-specific;
+deny.toml still allow-lists agnosys, dropped at 1.3.5), the six rust-old qemu
+scripts (none assert anything, and three cargo-build sibling Rust repos by
+absolute path — the current harness is far ahead), 7.7 MB of built artifacts,
+the fd-0 sanity assertion in console (invariant by the open(2) contract given
+the three closes above it), and `KYBERNET_LOG` env-var log levels (PID 1 has
+no inherited environment).
+
+### v1.5.5 — cgroup limits actually applied
+
+- [ ] Call `cgroup_apply_resource_limits` from `start_services` using
+      `svc_def_rlimits`, and `cgroup_apply_limits` for agnostik
+      `cgroup_limits` where a service carries one
+- [ ] Express limits as config data alongside the `security` block, the way
+      1.5.2 did for capabilities/Landlock/seccomp
+- [ ] Harness assertion that a limit is really in effect (read back
+      `memory.max` / `pids.max` from the service's cgroup)
+
+### v1.5.6 — close the remaining edge-boot deferrals
 
 Folds in the long-stalled v1.2.1 scope, which is still the honest state of
 `edge_boot.cyr`: it *detects* TPM and dm-verity but verifies neither. LUKS
@@ -210,6 +302,9 @@ v1.2.1 above; now that argonaut is in scope for edits, that is unblocked.
 - **Binary signing on release** — pinned until libro 2.6+ signing/timestamping is consumer-driven from outside kybernet's tree
 
 ## History
+
+### v1.5.3 — Lifecycle cleanup and observability (2026-08-25)
+cgroup teardown wired in (previously no production call site); reload_config narrowed to what it can honestly apply; edge-boot refusals reach dmesg; edge-boot budget enforces before each exec-backed step. One audit finding corrected as misdiagnosed. 309 tests.
 
 ### v1.5.2 — Per-service security profiles (2026-08-25)
 Profiles as config data; capability numbers corrected across agnostik/argonaut (both disagreed with the kernel, and kybernet's privilege drop fed them to capset(2)); harness proves confinement as root. 296 tests.

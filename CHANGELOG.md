@@ -7,6 +7,167 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.5.3] — 2026-08-25
+
+**Lifecycle cleanup and observability.** Suite 296 → 309 assertions, 0
+failures; both arches; harness green with two new gates. No dep changes.
+
+Five items from the 2026-08-24 audit that each had a real operational
+consequence and no owner. One of the five turned out to be misdiagnosed —
+see below.
+
+### Fixed — service cgroups were never removed
+
+`create_service_cgroup` and `move_to_cgroup` were the **only** cgroup calls
+with a production call site. `kill_cgroup` and `remove_service_cgroup`
+existed and were tested, but nothing outside tests and benches ever called
+them, so cgroup directories accumulated for the life of the system and a
+`CRASH_GIVE_UP` left a **populated** one behind — the main process had
+exited, but anything it forked was still in there and still counted against
+the slice.
+
+Now torn down in both places it matters:
+- **`CRASH_GIVE_UP`** — the service will not be restarted, so its cgroup is
+  killed and removed.
+- **Shutdown** — a new `remove_all_service_cgroups()` sweeps argonaut's
+  registry after `init_stop_all`. `kill_cgroup` first: "stopped" means the
+  tracked PID exited, not that the cgroup is empty, and `rmdir` on a
+  non-empty cgroup fails `EBUSY`. Best-effort throughout — a failed `rmdir`
+  must not stop the shutdown path reaching `sys_reboot`.
+
+### Fixed — `reload_config` claimed more than it did
+
+SIGHUP did `store64(g_init, new_cfg)` under a comment reading "Re-initialize
+argonaut with new config". That overwrites field 0 of `ArgonautInit` and
+nothing else — but `argonaut_init_new` **derives** two further fields from
+the config at construction: the boot sequence and the service map. Neither
+was rebuilt, so a reload left new config values sitting on top of derived
+state built from the old config, with no way for an operator to tell.
+
+Rebuilding them is not the fix: the service map holds live runtime state —
+PIDs, states, restart counts — for processes that are still running.
+Replacing it would orphan every one of them: still executing, no longer
+tracked, never reaped. In PID 1 that is far worse than a stale timeout.
+
+So the reload now applies the values that are safe to change while the
+system is up (boot/shutdown timeouts, console logging) and **says plainly**
+that boot-mode and service-definition changes need a reboot, rather than
+appearing total and not being.
+
+### Fixed — edge-boot refusals never reached `dmesg`
+
+Both refusal reasons used `klog`, which reaches stderr and slog. On a
+headless board with no console and no writable `/var`, neither survives.
+The only `kmsg` line on that path was main.cyr's generic `phase 6c: FATAL
+edge-boot prerequisite missing` — the operator learned a refusal happened
+but never why.
+
+All four refusal paths now also write to `/dev/kmsg` with the specific
+reason (`edge-boot REFUSED: tpm_attestation required, no TPM present`, and
+so on), which is what `dmesg` still has after the fact.
+
+### Fixed — the edge-boot budget could not bound anything
+
+`max_boot_ms` was measured **once, after every step it was meant to bound**
+— a post-mortem, and warn-only. By the time it noticed, both unbounded
+operations had already run: `_eb_dmverity_supported`'s `veritysetup` exec
+and `tpm_read_pcr`'s `tpm2_pcrread` exec, each a blocking wait on an
+external program with no timeout of its own.
+
+It still cannot interrupt a call already blocked — that needs a timeout
+inside sigil's exec path, which is not kybernet's to add. What it can do is
+**refuse to start the next expensive step** once the budget is spent, so
+`_eb_over_budget` is now checked before each exec-backed step. The terminal
+check also stops being advisory: on a device that set a boot budget *and*
+requires attestation, a verified boot that ran far past its allowance is a
+signal, so that combination now refuses rather than warning.
+
+### Corrected — the "cgroup cache has no production hits" finding was wrong
+
+The audit recorded that `kill_cgroup`, `_cgroup_write_u64` and
+`remove_service_cgroup` "bypass" the path cache. They do not: all three go
+through `cgroup_file` / `cgroup_path`, which *are* the cached accessors.
+The real problem was the one above — those functions had no production call
+site at all, so the cache had nothing to serve them. Wiring the teardown in
+gives them one; no cache change was needed or made.
+
+### Changed — the harness exercises the cgroup lifecycle
+
+The staged config gains `kyb-live` (`/bin/sleep 30`), the only service in it
+that stays **running** — so it is the only one that gets a cgroup at all,
+which is correct: a completed oneshot has no surviving process to place. The
+harness now asserts `started: kyb-live` and `removed service cgroups: 1`,
+covering create → move → kill → rmdir end-to-end in a real PID-1 boot.
+
+That path was previously untested end-to-end: every service in the harness
+was a oneshot, so no cgroup was ever created and the new sweep would have
+had nothing to remove.
+
+### Tests
+
+- `test_cgroup_teardown` — removal goes through the cached path builder,
+  an absent cgroup errors rather than reporting success (the shutdown sweep
+  counts on the `Result`), and name validation still guards the teardown
+  path so it is not the hole in the 1.4.2 traversal fix.
+- `test_reload_config_is_narrow` — live scalars apply, and the boot sequence
+  and service map are provably **not** swapped.
+- `test_edge_budget_predicate` — unset/negative budgets never trip, a
+  generous one does not, an elapsed one does.
+
+### Fixed — two mount options dropped in the Rust→Cyrius port
+
+Found by the `rust-old/` port review done alongside this release (see below).
+Both verified against both trees:
+
+- **`/run` was mounted without `mode=0755`.** tmpfs with no `mode=` defaults
+  to **01777 — world-writable and sticky** — and `/run` holds the notify
+  socket and argonaut's PID files. The Rust implementation passed
+  `mode=0755,size=20%`; the port kept the size and dropped the mode, so every
+  boot since has come up with a world-writable `/run`. This undercuts
+  argonaut 1.8.6's PID-file ownership check (CVE-2018-16888 class) among
+  other things.
+- **`/dev/pts` was mounted without `gid=5`** (the tty group), so allocated
+  ptys got the wrong group owner. Rust passed `gid=5,mode=0620`.
+
+### Reviewed — is the Rust port complete? No.
+
+The question was whether `rust-old/` can be deleted. Every Rust module has a
+Cyrius counterpart and Cyrius is a superset almost everywhere — but several
+behaviours were dropped in the port and are still missing. **`rust-old/`
+should stay until they are closed**; it is the reference implementation for
+the restart machinery. Full list in the roadmap under **v1.5.4 — complete the
+Rust port**. The largest:
+
+- **Deferred restart is gone.** Rust kept a PendingRestart queue and a
+  `TOKEN_RESTART` timerfd; SIGCHLD only enqueued. kybernet restarts
+  synchronously, so a crash-looping service is relaunched as fast as it can
+  die until `max_restarts` trips. The backoff is not just ignored — it is
+  passed as `init_restart_service`'s **`stop_timeout_ms`** argument, and
+  nothing in argonaut ever reads `CrashAction.delay_ms` at all.
+  `TOKEN_RESTART = 4` remains in the enum with no timer and no `case 4`.
+- **Health-check failures never act** — logged forever, never restarted.
+- **A watchdog kill is a one-way door** — Rust queued a restart; kybernet
+  kills and the service stays dead.
+- **`NOTIFY_SOCKET` is never exported**, so no service can discover the notify
+  socket and the whole sd_notify path is unreachable from the service side —
+  even though `notify_socket_path()`'s comment says it exists for exactly that.
+
+One finding is worth recording for its own sake: the Rust `eventloop` had
+`drain_timerfd`, called at the top of both `TOKEN_HEALTH` and
+`TOKEN_WATCHDOG`. The port dropped it — and that omission *was* 1.4.2's
+CRITICAL-1, the level-triggered timerfd spin that pinned PID 1 at 100 % CPU
+and eventually panicked the kernel. It was found and fixed independently at
+1.4.2; the port review shows the original had it right.
+
+### Performance
+
+Bench gate: 51 recorded, **0 regressions**. Two entries printed as `noise`
+(`classify_signal` 2→3 ns, `event_token+flags` 4→5 ns) — 1 ns moves under
+the `MIN_DELTA_NS` floor added at 1.5.1, which is exactly the case that
+floor exists for. `sandbox_basic_service` improved 230 → 218 ns (−5%).
+
+---
+
 ## [1.5.2] — 2026-08-25
 
 **Per-service security profiles, as config data — and the capability

@@ -20,6 +20,15 @@
 #   "kybernet: harness done"              — harness mode self-shutdown
 #   "kybernet: shutdown"                  — final marker; clean exit
 #
+# 1.5.3 cgroup-lifecycle markers:
+#   "started: kyb-live"              — a LIVE service, so a cgroup is really
+#                                      created and the pid moved into it
+#                                      (a completed oneshot correctly gets none)
+#   "removed service cgroups: 1"     — the shutdown sweep killed and rmdir'd it
+# Before 1.5.3 create_service_cgroup and move_to_cgroup were the only cgroup
+# calls with production call sites, so directories accumulated for the life of
+# the system and CRASH_GIVE_UP left a populated one behind.
+#
 # 1.5.0 service markers — these are the gate for "services actually come
 # from config". build-initramfs.sh stages /etc/kybernet/config.json with
 # two oneshots where kyb-svc depends_on kyb-dep:
@@ -144,10 +153,12 @@ for marker in \
     "kybernet: services started" \
     "kybernet: harness done" \
     "kybernet: shutdown" \
-    "kybernet: config: services parsed: 3" \
+    "kybernet: config: services parsed: 4" \
     "kybernet:   completed (oneshot): kyb-dep" \
     "kybernet:   completed (oneshot): kyb-svc" \
-    "kybernet: boot: skipped (not applicable): Start udev device manager"; do
+    "kybernet: boot: skipped (not applicable): Start udev device manager" \
+    "kybernet:   started: kyb-live" \
+    "kybernet: removed service cgroups: 1"; do
     if echo "$RUNTIME_OUT" | grep -aqF "$marker"; then
         echo "  OK: $marker"
     else

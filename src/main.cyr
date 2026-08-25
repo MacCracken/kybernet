@@ -136,19 +136,57 @@ fn _u64_str(n) {
     return b;
 }
 
+# SIGHUP config reload.
+#
+# What this can and cannot do, precisely — because the previous version
+# claimed more than it delivered. It did `store64(g_init, new_cfg)`, which
+# overwrites field 0 of ArgonautInit and nothing else, under a comment
+# reading "Re-initialize argonaut with new config". But argonaut_init_new
+# DERIVES two further fields from the config at construction time: the boot
+# sequence (build_boot_sequence(mode)) and the service map (from
+# default_services(mode) plus config services). Neither was rebuilt, so a
+# reload left new config values sitting on top of derived state built from
+# the OLD config — a silent mix, with no way for an operator to tell.
+# 1.4.2 audit MEDIUM.
+#
+# Rebuilding them is not the fix. The service map holds live runtime state —
+# PIDs, states, restart counts — for processes that are still running.
+# Replacing it would orphan every one of them: still executing, no longer
+# tracked, never reaped. In PID 1 that is far worse than a stale timeout.
+#
+# So the reload applies the values that are safe to change while the system
+# is up, and says plainly that the rest needs a reboot. Honest and narrow
+# beats a reload that appears total and is not.
 fn reload_config() {
     var new_cfg = load_config();
     if (new_cfg == 0) { return 0; }
 
-    # Update global config
+    var old_cfg = g_config;
     g_config = new_cfg;
 
-    # Re-initialize argonaut with new config
     if (g_init != 0) {
-        store64(g_init, new_cfg);
+        # Live-applicable scalars only. These are read fresh on each use,
+        # so updating them in place takes effect immediately.
+        var cur = load64(g_init);
+        if (cur != 0) {
+            store64(cur + 16, config_boot_timeout(new_cfg));
+            store64(cur + 24, config_shutdown_timeout(new_cfg));
+            store64(cur + 32, config_log_console(new_cfg));
+        }
+
+        # Anything structural is NOT applied — say so rather than let the
+        # operator believe a reload took.
+        if (old_cfg != 0) {
+            if (config_boot_mode(new_cfg) != config_boot_mode(old_cfg)) {
+                klog("config reload: boot_mode change requires a reboot — NOT applied");
+            }
+        }
+        if (vec_len(config_services(new_cfg)) > 0) {
+            klog("config reload: service definitions require a reboot — NOT applied");
+        }
     }
 
-    klog("config reloaded");
+    klog("config reloaded (timeouts + logging; structural changes need a reboot)");
     return 1;
 }
 
@@ -351,6 +389,7 @@ fn do_shutdown(shutdown_type) {
                 timeout = config_shutdown_timeout(g_config);
             }
             init_stop_all(g_init, timeout);
+            remove_all_service_cgroups();
         }
     }
 
@@ -443,6 +482,15 @@ fn handle_sigchld() {
                 if (reason != 0) {
                     klog2("  reason: ", str_data(reason));
                 }
+                # The service will not be restarted, so its cgroup is dead
+                # weight — and not necessarily EMPTY: the main process
+                # exited, but anything it forked is still in there and still
+                # counted against the slice. Kill the remainder, then remove
+                # the directory. Before 1.5.3 neither call had a production
+                # call site at all, so give-up left a populated cgroup behind
+                # for the life of the system. 1.4.2 audit LOW.
+                kill_cgroup(name_cs);
+                remove_service_cgroup(name_cs);
             } elif (action_type == CRASH_IGNORE) {
                 klog2("  ignoring exit: ", name_cs);
             }
@@ -522,6 +570,37 @@ fn run_boot_stages() {
 # ================================================================
 # Service startup
 # ================================================================
+
+# Tear down every service cgroup argonaut knows about.
+#
+# Called from do_shutdown after init_stop_all. Services have been SIGTERMed
+# and reaped by then, but a cgroup whose last process is gone is still a
+# live directory in the hierarchy — nothing removes it implicitly. Before
+# 1.5.3 nothing removed it explicitly either: create_service_cgroup and
+# move_to_cgroup were the only cgroup calls with production call sites, so
+# directories accumulated for the life of the system across every service
+# restart cycle. 1.4.2 audit LOW.
+#
+# kill_cgroup first, because "stopped" means the tracked PID exited, not
+# that the cgroup is empty — anything the service forked and orphaned is
+# still in it, and rmdir on a non-empty cgroup fails with EBUSY.
+#
+# Best-effort throughout: this runs on the shutdown path, where a failed
+# rmdir must not stop us reaching sys_reboot. Names come from argonaut's
+# registry as cstrs, which is what the cgroup helpers want.
+fn remove_all_service_cgroups() {
+    if (g_init == 0) { return 0; }
+    var names = init_service_names(g_init);
+    var n = vec_len(names);
+    var removed = 0;
+    for (var i = 0; i < n; i = i + 1) {
+        var nm = vec_get(names, i);
+        kill_cgroup(nm);
+        if (is_ok(remove_service_cgroup(nm)) == 1) { removed = removed + 1; }
+    }
+    if (removed > 0) { klog2("removed service cgroups: ", _u64_str(removed)); }
+    return removed;
+}
 
 # Idempotent wrapper — see g_services_started.
 fn ensure_services_started() {
