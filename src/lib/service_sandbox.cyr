@@ -129,11 +129,29 @@ fn kyb_pre_exec(svc_def) {
     # the deliberate opt-out for a board on a pre-5.13 kernel.
     if (ll != 0) {
         var lr = sandbox_from_config(ll);
-        if (is_err_result(lr) == 1) { return 1; }
+        if (is_err_result(lr) == 1) {
+            # ⚠ SAY WHY. Until 1.6.6 this returned 1 silently, so the operator
+            # saw only "FAILED to start: <service>" with nothing naming the
+            # cause. The overwhelmingly common cause is a rule naming a path
+            # that does not exist: `_landlock_add_path` opens each one O_PATH
+            # and returns the errno, which fails the whole ruleset. That cost a
+            # full CI round trip to diagnose when kyb-landlock named /lib64 on
+            # an image that had none.
+            #
+            # kmsg() rather than klog(): this runs in the pre-exec child, whose
+            # stdout/stderr belong to the service, and /dev/kmsg is opened fresh
+            # so it works regardless of what the child inherited.
+            kmsg("kybernet: pre-exec: LANDLOCK FAILED — a rule path is unopenable (does every path exist?)");
+            return 1;
+        }
         if (result_unwrap(lr) == 1) {
             var ll_opt = 0;
             if (sc != 0) { ll_opt = kyb_policy_landlock_optional(sc); }
-            if (ll_opt == 0) { return 1; }
+            if (ll_opt == 0) {
+                kmsg("kybernet: pre-exec: no Landlock in kernel, landlock_optional=false");
+                kmsg("kybernet: pre-exec: refusing to start the service unconfined");
+                return 1;
+            }
         }
     }
 

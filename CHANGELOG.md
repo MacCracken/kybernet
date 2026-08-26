@@ -50,10 +50,40 @@ It sets `"landlock_optional": false`, so on a pre-5.13 kernel the service fails
 closed rather than starting unconfined — which surfaces as a missing line, not a
 false pass. That is rule 29's middle arm, the one that looks like success.
 
-**Getting this wrong was instructive.** The first version granted `/bin` only.
-Landlock is default-deny, so the child could not reach its dynamic loader in
-`/lib64` or open `/dev/console` to report, and failed to start entirely — correctly,
-and loudly, because `landlock_optional` was false.
+**Getting this wrong twice was instructive, and CI caught what local runs could
+not.** The first version granted `/bin` only; Landlock is default-deny, so the
+child could not reach its loader or `/dev/console` and failed to start — correctly
+and loudly, because `landlock_optional` was false. The second version added
+`/lib64` and passed **here** while failing on **the runner**, and the reason is the
+whole point of standing rule 39:
+
+`/lib64` existed in the image only when the build host's busybox was DYNAMIC,
+because the libc-staging branch created it. Arch (dynamic busybox) produced an
+image with it; Ubuntu's `busybox-static`, which CI installs, produced one without.
+Same script, two shapes. Since `_landlock_add_path` opens every rule path `O_PATH`
+and fails the entire ruleset if it cannot, the fixture's rule set was a function of
+the machine that built it.
+
+The fix removes the dependency rather than papering over it: the fixture is now a
+**cyrius binary** (`qemu/landlock-fixture.cyr`), which links no libc and needs no
+loader, so its rule set collapses to `/usr` + `/dev` and holds on any host.
+Verified under CI's shape by emptying `/lib64` and `/usr/lib` locally. `/lib64` is
+still created unconditionally so the two images match, but nothing depends on it.
+
+⚠ A wrong turn worth recording: the first attempt to reproduce the CI failure
+emptied `/lib64` on an image with a DYNAMIC busybox — which breaks the exec itself,
+not Landlock, and so proved nothing about a runner whose busybox is static. A
+reproduction that fails for a different reason than the thing being reproduced is
+worse than no reproduction.
+
+### Fixed — a confinement failure that said nothing
+
+`kyb_pre_exec` returned `1` on a Landlock failure with no diagnostic at all, so the
+operator saw only `FAILED to start: <service>`. That cost a full CI round trip to
+diagnose. It now `kmsg`s which mechanism failed and names the overwhelmingly common
+cause — a rule path that cannot be opened — and separately reports the pre-5.13
+"no Landlock and landlock_optional=false" case. `kmsg` rather than `klog` because
+this runs in the pre-exec child, whose stdout belongs to the service.
 
 ### Fixed — a cgroup control-case assertion that had been passing by luck
 

@@ -46,7 +46,20 @@ fi
 echo "Staging initramfs at ${INITRAMFS_DIR}..."
 
 rm -rf "${INITRAMFS_DIR}"
-mkdir -p "${INITRAMFS_DIR}"/{bin,sbin,dev,proc,sys,run,tmp,etc,usr/bin,var/log}
+# /lib64 is created unconditionally so the dev box and CI build the SAME image
+# shape. It used to appear only when the host's busybox was DYNAMIC, because
+# the libc-staging branch made it — so Arch (dynamic busybox) produced an image
+# with /lib64 and Ubuntu's `busybox-static` produced one without. Same script,
+# two shapes, which is the divergence class the bsdcpio/cpio split caused at
+# 1.6.1. An empty directory costs nothing.
+#
+# ⚠ Nothing should DEPEND on that difference. The 1.6.6 Landlock fixture
+# briefly did — its rule set named /lib64, and since `_landlock_add_path`
+# (sandbox.cyr) opens every rule path O_PATH and fails the whole ruleset if it
+# cannot, the fixture passed here and failed closed on the runner. The fix was
+# not to paper the shape over but to remove the dependency: that fixture is now
+# a cyrius binary, which links no libc and needs no loader (rule 39).
+mkdir -p "${INITRAMFS_DIR}"/{bin,sbin,dev,proc,sys,run,tmp,etc,usr/bin,var/log,lib64}
 
 # Install kybernet as /sbin/init — kernel rdinit hands off here.
 cp "$BINARY" "${INITRAMFS_DIR}/sbin/init"
@@ -265,6 +278,18 @@ if ! (cd "$PROJECT_DIR" && cyrius build qemu/notify-fixture.cyr "$NOTIFY_FIX_BIN
     exit 1
 fi
 cp "$NOTIFY_FIX_BIN" "${INITRAMFS_DIR}/usr/bin/kyb-notify-fixture"
+
+# Landlock probe — a cyrius binary for the same reason as the notify one: it
+# links no libc, so its rule set does not depend on the build host's busybox
+# linkage. See qemu/landlock-fixture.cyr's header.
+LL_FIX_BIN="${PROJECT_DIR}/build/landlock-fixture"
+if ! (cd "$PROJECT_DIR" && cyrius build qemu/landlock-fixture.cyr "$LL_FIX_BIN" >/dev/null); then
+    echo "  ERROR: could not build qemu/landlock-fixture.cyr (compiler output above)"
+    exit 1
+fi
+cp "$LL_FIX_BIN" "${INITRAMFS_DIR}/usr/bin/kyb-landlock-fixture"
+chmod +x "${INITRAMFS_DIR}/usr/bin/kyb-landlock-fixture"
+echo "  staged kyb-landlock-fixture (Landlock probe)"
 chmod +x "${INITRAMFS_DIR}/usr/bin/kyb-notify-fixture"
 echo "  staged kyb-notify-fixture (sd_notify client)"
 
@@ -370,15 +395,12 @@ cat > "${INITRAMFS_DIR}/etc/kybernet/config.json" << 'CFGEOF'
     },
     {
       "name": "kyb-landlock",
-      "description": "granted /bin /lib64 /usr /dev; /etc is deliberately NOT granted",
-      "binary": "/bin/sh",
-      "args": ["-c", "if cat /etc/kybernet/config.json >/dev/null 2>&1; then echo LL-OUTSIDE=ALLOWED > /dev/console; else echo LL-OUTSIDE=DENIED > /dev/console; fi; if cat /bin/busybox >/dev/null 2>&1; then echo LL-INSIDE=ALLOWED > /dev/console; else echo LL-INSIDE=DENIED > /dev/console; fi"],
+      "description": "granted /usr and /dev only; /etc is deliberately NOT granted",
+      "binary": "/usr/bin/kyb-landlock-fixture",
       "type": "oneshot",
       "restart": "never",
       "security": {
-        "landlock": [ {"path": "/bin", "access": "read-exec"},
-                      {"path": "/lib64", "access": "read-exec"},
-                      {"path": "/usr", "access": "read-exec"},
+        "landlock": [ {"path": "/usr", "access": "read-exec"},
                       {"path": "/dev", "access": "read-write"} ],
         "landlock_optional": false,
         "no_new_privs": true

@@ -1,0 +1,82 @@
+# qemu/landlock-fixture.cyr — Landlock confinement probe for the PID-1 harness. (1.6.6)
+#
+# WHY THIS IS A CYRIUS BINARY AND NOT `/bin/sh -c`
+# ------------------------------------------------
+# The first version of this fixture was a busybox shell one-liner, and it
+# passed here while failing on CI. The reason is worth keeping:
+#
+#   - Landlock is DEFAULT-DENY. A confined child can reach only the paths in
+#     its rule set, so a dynamically linked `/bin/sh` also needs its loader
+#     (`/lib64`) and libc granted, on top of whatever it is meant to test.
+#   - `_landlock_add_path` (src/lib/sandbox.cyr) opens every rule path O_PATH
+#     and returns the errno if it cannot. So a rule naming a path that does not
+#     exist fails the WHOLE ruleset, and with `"landlock_optional": false` the
+#     service correctly fails CLOSED.
+#   - `/lib64` existed only when the host's busybox was DYNAMIC, because the
+#     libc-staging branch created it. The dev box (Arch, dynamic busybox) had
+#     it; CI (Ubuntu `busybox-static`) did not. Same script, two image shapes.
+#
+# So the shell fixture's rule set was a function of the build host's busybox
+# linkage — which is standing rule 39 exactly. A cyrius binary links no libc,
+# needs no loader, and reduces the rule set to "the directory it lives in, plus
+# /dev to report through". Any machine that can build kybernet can run it.
+#
+# WHAT IT PROVES
+# --------------
+# ⚠ THE ASSERTION IS THE DENIAL, NOT THE SURVIVAL. A service that merely runs
+# proves nothing — an unconfined one runs too. This opens one path INSIDE the
+# granted set and one OUTSIDE it and reports both, from inside the confined
+# child, so the gate is falsifiable in both directions: an inert sandbox fails
+# the outside check, an over-tight ruleset fails the inside one.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fs.cyr"
+include "lib/process.cyr"
+
+# Deliberately NOT granted by the service's rule set.
+var OUTSIDE_PATH = "/etc/kybernet/config.json";
+# Inside the granted set: this binary's own directory.
+var INSIDE_PATH = "/usr/bin/kyb-landlock-fixture";
+
+var CONSOLE = "/dev/console";
+
+# Report through /dev/console directly rather than stdout: a supervised
+# service's stdout is whatever kybernet gave it, and the harness greps the
+# serial console. /dev is in the rule set precisely so this works.
+fn say(msg) {
+    var fd = sys_open(CONSOLE, O_WRONLY | O_CLOEXEC, 0);
+    if (fd < 0) { return 0 - 1; }
+    sys_write(fd, msg, strlen(msg));
+    sys_write(fd, "\n", 1);
+    sys_close(fd);
+    return 0;
+}
+
+# Can we open it for reading? Under Landlock a denied path returns EACCES.
+fn can_read(path) {
+    var fd = sys_open(path, O_RDONLY | O_CLOEXEC, 0);
+    if (fd < 0) { return 0; }
+    sys_close(fd);
+    return 1;
+}
+
+fn main() {
+    if (can_read(OUTSIDE_PATH) == 1) {
+        say("LL-OUTSIDE=ALLOWED");
+    } else {
+        say("LL-OUTSIDE=DENIED");
+    }
+
+    if (can_read(INSIDE_PATH) == 1) {
+        say("LL-INSIDE=ALLOWED");
+    } else {
+        say("LL-INSIDE=DENIED");
+    }
+    return 0;
+}
