@@ -65,11 +65,7 @@ fn reap_and_log() {
     return len;
 }
 
-# Check if any reaped process had non-zero exit
-fn any_failures(reaped) {
-    var len = vec_len(reaped);
-    for (var fi = 0; fi < len; fi = fi + 1) {
-        if (reaped_code(vec_get(reaped, fi)) != 0) { return 1; }
-    }
-    return 0;
-}
+# ⚠ `any_failures` was removed at 1.6.4 — zero callers since it was written.
+# Reaping outcomes are reported by reap_and_log's own klog lines; a predicate
+# nobody consults is a claim the tree cannot back up.
+

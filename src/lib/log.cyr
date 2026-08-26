@@ -25,6 +25,31 @@
 # prefix ever reaches these fns.
 var _logbuf[256];
 
+# Console-logging gate for `log_to_console` (1.6.4).
+#
+# ⚠ DEFAULTS TO ON, AND THAT IS NOT AN ARBITRARY CHOICE. Everything before
+# phase 5 runs before the config is parsed — mounts, signal setup, the epoll
+# loop — and a board that fails there must still be able to say so. The flag is
+# only ever lowered by an explicit `"log_to_console": false`, so the silent
+# window is exactly the window the operator asked for.
+#
+# What it does NOT gate, deliberately:
+#   - `kmsg()`, which writes /dev/kmsg. dmesg is a different channel with its
+#     own consumer, and suppressing kybernet's console chatter must not also
+#     erase the record an operator reads after the fact.
+#   - `slog`/`slog2`, the structured log at /var/log/kybernet.log.
+#   - the emergency password prompt, which opens its own descriptor via
+#     console_open_rw() and never goes through klog (rule 20).
+# So `false` means "stop writing my log lines to the console", not "go dark".
+var _log_console = 1;
+
+fn log_set_console(on) {
+    if (on == 0) { _log_console = 0; } else { _log_console = 1; }
+    return _log_console;
+}
+
+fn log_console_enabled() { return _log_console; }
+
 fn _log_write(fd, prefix, plen, msg) {
     # Clamp the prefix first. 1.1.5 LOW-1 bounded `msg` but left `plen`
     # unchecked, and `copylen = 254 - plen` goes NEGATIVE once plen > 254
@@ -57,7 +82,7 @@ fn kmsg(msg) {
 }
 
 fn klog(msg) {
-    _log_write(STDERR_FD, "kybernet: ", 10, msg);
+    if (_log_console == 1) { _log_write(STDERR_FD, "kybernet: ", 10, msg); }
     slog("info", msg);
     return 0;
 }
@@ -67,6 +92,11 @@ fn klog2(prefix, msg) {
     var plen = strlen(prefix);
     var mlen = strlen(msg);
     var total = 10 + plen + mlen + 1;
+    if (_log_console == 0) {
+        # Structured logging still runs — see the note on _log_console.
+        if (g_log_fd > 0) { slog2("info", prefix, msg); }
+        return 0;
+    }
     if (total <= 255) {
         memcpy(&_logbuf, "kybernet: ", 10);
         memcpy(&_logbuf + 10, prefix, plen);

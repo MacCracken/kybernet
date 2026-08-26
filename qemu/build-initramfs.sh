@@ -642,6 +642,26 @@ else
     _drop_stale_fixtures "veritysetup not found"
 fi
 
+# A second image identical to the first except `"log_to_console": false`, for
+# the quiet pass in boot-test.sh (1.6.4). Built from the staged tree so the two
+# differ in exactly one config key and nothing else — if they diverged in any
+# other way, the pass would be comparing two unrelated boots.
+QUIET_STAGE="${SCRIPT_DIR}/initramfs-quiet"
+rm -rf "$QUIET_STAGE"
+cp -a "${INITRAMFS_DIR}" "$QUIET_STAGE" 2>/dev/null || {
+    mkdir -p "$QUIET_STAGE"
+    ( cd "${INITRAMFS_DIR}" && tar cf - --exclude=./dev . ) | ( cd "$QUIET_STAGE" && tar xf - )
+}
+python3 - "$QUIET_STAGE" << 'QUIETPY'
+import sys, json, pathlib
+p = pathlib.Path(sys.argv[1]) / 'etc/kybernet/config.json'
+d = json.loads(p.read_text())
+d['log_to_console'] = False
+p.write_text(json.dumps(d, indent=2))
+QUIETPY
+( cd "$QUIET_STAGE" && find . | cpio -o -H newc 2>/dev/null | gzip > "${SCRIPT_DIR}/initramfs-quiet.cpio.gz" )
+echo "  staged quiet fixture (log_to_console=false)"
+
 cd "${INITRAMFS_DIR}"
 # GNU cpio only. This used to prefer bsdcpio (libarchive) where present and
 # fall back to `cpio` — which meant the dev box (libarchive installed) and CI

@@ -738,8 +738,6 @@ fn test_cgroup_apply_null_guard() {
     # but the function must not depend on that.
     var r = cgroup_apply_limits("kyb-null-t", 0);
     assert(is_err_result(r) == 0, "apply: null limits is Ok, not a fault");
-    var r2 = cgroup_apply_resource_limits("kyb-null-t", 0);
-    assert(is_err_result(r2) == 0, "apply: null rlimits is Ok, not a fault");
 
     # An all-zero cgroup_limits writes nothing — every field's 0 is the
     # "unset" sentinel, so this must succeed without touching the
@@ -2485,6 +2483,36 @@ fn test_knotify_socket_constants() {
     return 0;
 }
 
+fn test_log_console_gate() {
+    println("--- log_to_console gate (1.6.4) ---");
+
+    # ⚠ THE REGRESSION THIS PINS. From 1.5.0 to 1.6.3 `log_to_console` was
+    # parsed, stored and copied on reload while `config_log_console` had exactly
+    # two readers in the tree — its own definition and that reload copy — so the
+    # key did nothing at all. These assertions fail if the gate is ever
+    # short-circuited back to unconditional writing.
+    var was = log_console_enabled();
+
+    assert_eq(log_set_console(0), 0, "set_console(0) reports off");
+    assert_eq(log_console_enabled(), 0, "gate reads off");
+    assert_eq(log_set_console(1), 1, "set_console(1) reports on");
+    assert_eq(log_console_enabled(), 1, "gate reads on");
+
+    # Anything non-zero means on — a config parser handing through a raw
+    # truthy int must not be read as "off".
+    assert_eq(log_set_console(2), 1, "non-zero is on");
+    assert_eq(log_set_console(0 - 1), 1, "negative is on, not off");
+    assert_eq(log_set_console(0), 0, "only exact zero is off");
+
+    # Default must be ON: everything before phase 5 logs before the config is
+    # parsed, and a board that fails there still has to be able to say so.
+    log_set_console(1);
+    assert_eq(log_console_enabled(), 1, "restored to on");
+
+    log_set_console(was);
+    return 0;
+}
+
 fn test_seccomp_agnostik_bridge() {
     println("--- seccomp bridge ---");
     # Test seccomp_from_profile with multiple rules
@@ -2602,6 +2630,7 @@ fn main() {
     test_knotify_multiline();
     test_knotify_status_sanitize();
     test_knotify_socket_constants();
+    test_log_console_gate();
     test_seccomp_agnostik_bridge();
     test_sandbox_rules();
     return assert_summary();

@@ -349,26 +349,6 @@ fn create_service_cgroup(service) {
     return Ok(0);
 }
 
-# Move a PID into a service's cgroup
-# Returns: Result
-fn move_to_cgroup(service, pid) {
-    if (cgroup_name_is_safe(service) == 0) { return Err(EINVAL); }
-    var procs = cgroup_file(service, "cgroup.procs");
-    var numbuf = alloc(24);
-    var nlen = fmt_int_buf(pid, numbuf);
-
-    # O_CLOEXEC: cgroup write fds are closed in-frame, but kybernet
-    # is PID 1 — any fork (service spawn, emergency shell) that
-    # interleaves with this call must not inherit the cgroup-control
-    # fd. Same rationale applies to every sys_open in this file.
-    var fd = sys_open(str_data(procs), O_WRONLY | O_CLOEXEC, 0);
-    if (fd < 0) { return Err(0 - fd); }
-    var w = sys_write(fd, numbuf, nlen);
-    sys_close(fd);
-    if (is_err(w) == 1) { return Err(err_code(w)); }
-    return Ok(0);
-}
-
 # Kill all processes in a cgroup
 # Strategy: try cgroup.kill (kernel 5.14+), fallback to individual SIGKILL
 # Returns: Result (Ok(killed_count) or Err(errno))
@@ -492,59 +472,20 @@ fn cgroup_apply_limits(service, limits) {
     return Ok(0);
 }
 
-# Apply agnostik resource_limits to a service cgroup.
-# Maps resource_limits fields to cgroup v2 controllers.
-# Returns: Result
-fn cgroup_apply_resource_limits(service, rlimits) {
-    # See cgroup_apply_limits — same null hazard, same reason.
-    #
-    # ⚠ THIS FUNCTION HAS NO PRODUCTION CALL SITE AND MUST NOT GAIN ONE
-    # NAIVELY. Its rlim_* accessors are agnostik's, for agnostik's
-    # ResourceLimits; argonaut defines a DIFFERENT struct of the same name
-    # and svc_def_rlimits returns a pointer in argonaut's layout. cyrius
-    # does not warn on duplicate structs. Passing svc_def_rlimits here sets
-    # memory.max from argonaut's `nofile`. Per-service limits go through
-    # cgroup_apply_limits and the cgroup_limits field instead. 1.5.5.
-    if (rlimits == 0) { return Ok(0); }
-    var mem = rlim_max_memory(rlimits);
-    var procs = rlim_max_procs(rlimits);
-
-    if (mem > 0) {
-        var r = _cgroup_write_u64(service, "memory.max", mem);
-        if (is_err_result(r) == 1) { return r; }
-    }
-
-    if (procs > 0) {
-        var r = _cgroup_write_u64(service, "pids.max", procs);
-        if (is_err_result(r) == 1) { return r; }
-    }
-
-    return Ok(0);
-}
-
-# Full cgroup setup from agnostik agent_config.
-# Creates cgroup, applies limits, moves pid.
-# Returns: Result
-fn cgroup_setup_agent(service, config, pid) {
-    var cr = create_service_cgroup(service);
-    if (is_err_result(cr) == 1) { return cr; }
-
-    # Apply resource limits from agent config
-    var limits = aconf_limits(config);
-    if (limits != 0) {
-        var lr = cgroup_apply_resource_limits(service, limits);
-        if (is_err_result(lr) == 1) { return lr; }
-    }
-
-    # Apply sandbox cgroup limits if present
-    var sandbox = aconf_sandbox(config);
-    if (sandbox != 0) {
-        # sandbox_config doesn't carry cgroup_limits directly,
-        # but the agent_config's resource_limits covers it
-    }
-
-    return move_to_cgroup(service, pid);
-}
+# ⚠ THREE FUNCTIONS WERE REMOVED HERE AT 1.6.4, AS ONE DEAD CHAIN.
+# `cgroup_setup_agent` had zero callers anywhere, and it was the only caller of
+# `move_to_cgroup` and of `cgroup_apply_resource_limits`. All three were
+# superseded at 1.5.5 by the CHILD-side `_kyb_join_cgroup` (standing rule 16):
+# a parent-side move is unavoidably late, and cgroup v2 charges memory on first
+# touch and does not migrate charges, so pages faulted in before the move stay
+# charged to the root cgroup.
+#
+# `cgroup_apply_resource_limits` was also standing rule 14's hazard in person:
+# it read agnostik's `rlim_*` accessors, while `svc_def_rlimits` hands back a
+# struct argonaut filled to ITS incompatible layout. Keeping a plausible-looking
+# function that reads `nofile` as `max_memory` is an invitation. The live path
+# is `cgroup_apply_limits` above, which uses argonaut's separate `cgroup_limits`
+# field with agnostik's `cglim_*` — the pair that has no twin.
 
 # Remove a service cgroup directory (must be empty)
 fn remove_service_cgroup(service) {

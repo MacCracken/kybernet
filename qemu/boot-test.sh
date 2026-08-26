@@ -219,6 +219,41 @@ echo "=== marker check ==="
 
 fail=0
 
+# ⚠ DEFINED HERE, ABOVE EVERY PASS THAT USES THEM. These lived below the boot
+# and reactor passes until 1.6.4, which meant the veritysetup skip could not
+# reach _skip_or_fail and silently ignored HARNESS_STRICT — and adding the
+# quiet pass put a third caller above the definitions. A shell function used
+# before its definition is not a syntax error; it is an unbound command at
+# runtime, inside a failure branch, under `set -e`. Keep these first.
+ARNESS_STRICT="${HARNESS_STRICT:-0}"
+
+# Assert a captured boot did not panic PID 1.
+#
+# ⚠ THE EDGE AND AUTH PASSES NEVER CHECKED THIS. Pass 1 and the reactor gate
+# both grep for "Attempted to kill init|Kernel panic"; the other EIGHT boots
+# grepped only for the verity/password string they cared about. A PID-1 panic
+# in any of them was therefore invisible unless it also happened to suppress
+# that one string. This is not hypothetical — 1.6.1 found a SIGSEGV in
+# argonaut's watchdog that panicked PID 1, and it was found by a fixture, not
+# by the passes that were already booting through the same code.
+_assert_no_panic() {
+    # $1 = captured output, $2 = label
+    if echo "$1" | grep -aqE "Attempted to kill init|Kernel panic"; then
+        echo "  FAIL: [$2] PID 1 panicked"
+        echo "$1" | grep -aE "Attempted to kill init|Kernel panic" | head -2 || true
+        fail=1
+    fi
+}
+
+_skip_or_fail() {
+    if [ "$HARNESS_STRICT" = "1" ]; then
+        echo "  FAIL: $1 (HARNESS_STRICT=1 — a skip is a failure here)"
+        fail=1
+    else
+        echo "  SKIP: $1"
+    fi
+}
+
 # ⚠ QEMU DOES NOT FAIL ON A CPU FEATURE IT CANNOT PROVIDE — IT WARNS AND BOOTS.
 # `-cpu host,+invtsc` with invtsc unavailable prints
 #   qemu-system-x86_64: warning: host doesn't support requested feature: ...
@@ -656,6 +691,66 @@ fi
 rm -f "$LOOP_LOG"
 
 # ============================================================
+# Quiet gate (1.6.4) — `log_to_console: false` actually suppresses.
+#
+# From 1.5.0 to 1.6.3 this key was parsed, stored and copied on reload, and
+# `config_log_console` had exactly TWO readers in the tree: its own definition
+# and that reload copy. `klog`/`klog2` wrote to STDERR_FD unconditionally, so
+# setting it false did nothing whatsoever. Rule 27: the key reaches a syscall
+# (sys_write), so it needs a fixture.
+#
+# ⚠ THE FALSIFIABILITY GUARD IS THE WHOLE DESIGN HERE. "kybernet printed
+# nothing" is exactly what a board that died before phase 1 also looks like, so
+# an assertion that only counts absent lines cannot fail correctly. This pass
+# therefore requires BOTH: kybernet's own lines collapse, AND a line a SERVICE
+# wrote to /dev/console is still present — proving the boot got all the way
+# through phase 8 while kybernet itself stayed quiet.
+# ============================================================
+QUIET_INITRD="${SCRIPT_DIR}/initramfs-quiet.cpio.gz"
+echo ""
+echo "=== quiet gate (log_to_console=false) ==="
+if [ ! -f "$QUIET_INITRD" ]; then
+    _skip_or_fail "no quiet fixture (log_to_console is ungated)"
+else
+    QUIET_OUT=$(timeout "$TIMEOUT" qemu-system-x86_64 \
+        -kernel "$KERNEL" -initrd "$QUIET_INITRD" \
+        -append "console=ttyS0 panic=5 rdinit=/sbin/init kybernet.harness=1 loglevel=3" \
+        $ACCEL_FLAGS -m 512M -nographic -no-reboot \
+        -serial mon:stdio 2>&1 | cat -v | tr '\r' '\n')
+    _assert_no_panic "$QUIET_OUT" "quiet"
+
+    QN=$(echo "$QUIET_OUT" | grep -acF "kybernet: " || true)
+    # Only the pre-config-load lines may survive: everything up to and including
+    # the announcement that console logging is going off. Measured at 6; the
+    # ceiling of 10 leaves room for a phase marker without letting a regression
+    # that disables the gate entirely slip through.
+    if [ "$QN" -le 10 ]; then
+        echo "  OK: log_to_console=false suppressed kybernet's console output ($QN lines)"
+    else
+        echo "  FAIL: log_to_console=false did not suppress ($QN kybernet lines)"
+        echo "$QUIET_OUT" | grep -aF "kybernet: " | head -5 || true
+        fail=1
+    fi
+
+    # The guard: a SERVICE-written console line proves the boot progressed.
+    if echo "$QUIET_OUT" | grep -aqE '^LIMIT-memmax=67108864'; then
+        echo "  OK: services still reached the console (the boot was quiet, not dead)"
+    else
+        echo "  FAIL: no service output — the quiet boot did not progress, so the"
+        echo "        line count above proves nothing"
+        fail=1
+    fi
+
+    # And the last thing said before the silence must explain it.
+    if echo "$QUIET_OUT" | grep -aqF "console logging OFF"; then
+        echo "  OK: the transition to quiet is announced on the console"
+    else
+        echo "  FAIL: console went quiet with no line explaining why"
+        fail=1
+    fi
+fi
+
+# ============================================================
 # Edge-boot gate (1.5.7)
 #
 # Runs against a SEPARATE initramfs (initramfs-edge.cpio.gz) staged by
@@ -683,35 +778,9 @@ rm -f "$LOOP_LOG"
 # fixture generation produces exactly the same SKIP as a machine that never
 # had the tool, so the regression class the pass exists to catch is the one
 # it cannot see. CI sets HARNESS_STRICT=1 (it installs the tools, so a
-# missing fixture there means something broke).
-HARNESS_STRICT="${HARNESS_STRICT:-0}"
-
-# Assert a captured boot did not panic PID 1.
-#
-# ⚠ THE EDGE AND AUTH PASSES NEVER CHECKED THIS. Pass 1 and the reactor gate
-# both grep for "Attempted to kill init|Kernel panic"; the other EIGHT boots
-# grepped only for the verity/password string they cared about. A PID-1 panic
-# in any of them was therefore invisible unless it also happened to suppress
-# that one string. This is not hypothetical — 1.6.1 found a SIGSEGV in
-# argonaut's watchdog that panicked PID 1, and it was found by a fixture, not
-# by the passes that were already booting through the same code.
-_assert_no_panic() {
-    # $1 = captured output, $2 = label
-    if echo "$1" | grep -aqE "Attempted to kill init|Kernel panic"; then
-        echo "  FAIL: [$2] PID 1 panicked"
-        echo "$1" | grep -aE "Attempted to kill init|Kernel panic" | head -2 || true
-        fail=1
-    fi
-}
-
-_skip_or_fail() {
-    if [ "$HARNESS_STRICT" = "1" ]; then
-        echo "  FAIL: $1 (HARNESS_STRICT=1 — a skip is a failure here)"
-        fail=1
-    else
-        echo "  SKIP: $1"
-    fi
-}
+# missing fixture there means something broke). The strict flag and the two
+# helpers it drives are defined near the top of this script, above every pass
+# that calls them.
 
 EDGE_INITRD="${SCRIPT_DIR}/initramfs-edge.cpio.gz"
 EDGE_DIR="${SCRIPT_DIR}/edge"

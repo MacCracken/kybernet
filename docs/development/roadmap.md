@@ -17,7 +17,7 @@ of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into
 
 ---
 
-## v1.6.3 — code that does nothing, and docs that say it does
+## v1.6.4 — code that does nothing, and docs that say it does
 
 - [ ] **Port `agnos-init.sh`'s `setup_directories()` to a kybernet oneshot service.**
       Replaces the deleted phase 6b (1.6.2), and it is the *real* form of the need
@@ -123,15 +123,13 @@ of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into
       `edge_boot_elapsed_ms` / `edge_boot_verity_ok` / `edge_boot_pcr_mismatches` (zero
       callers, and two comments claim "main reads these … in the boot summary" — there is
       no boot summary); `edge_hash_device` / `edge_luks_device` / `edge_expected_pcrs`.
-- [ ] **Stale comments that mislead about live behaviour.** `seccomp.cyr:228` says the
-      module "is not yet wired into the boot path" — it has been since 1.4.3, and that
-      claim is what let the aarch64 validation lapse. `edge_boot.cyr:218-219` names
-      `_eb_dmverity_supported` as unbounded; 1.5.7 gave it `run_safe_cmd_timeout(cmd,
-      3000)`. `edge_boot.cyr:40,287` point at "roadmap v1.2.2", renumbered twice since.
-      CLAUDE.md rule 9 justifies the `if`-ladder as "the per-service Landlock path"; the
-      live path is `sandbox_from_config` → `_access_to_flags`, and `_ll_access_to_kernel`
-      is reached only from `sandbox_from_ruleset`, which nothing but a benchmark calls.
-
+- [ ] **`sandbox_from_ruleset` and `_ll_access_to_kernel` are benchmark-only.** Verified at
+      1.6.4 while correcting CLAUDE.md rule 9: `_ll_access_to_kernel` has exactly one caller
+      (`sandbox.cyr:254`, inside `sandbox_from_ruleset`), and `sandbox_from_ruleset`'s only
+      caller in the tree is `src/bench.cyr`. So a chunk of the Landlock surface exists solely
+      to be benchmarked. Either give it a production call site or delete it — but note that
+      deleting it lowers the recorded benchmark COUNT, which `bench-history.sh` gates on, so
+      the removal and the count expectation have to land together.
 - [ ] **A standing `duplicate symbol … conflicting value` warning on every build.**
       argonaut's `enum SocketType { SOCK_STREAM; SOCK_DGRAM; SOCK_SEQPACKET; }` is
       unvalued, so cyrius numbers it from **0** while the kernel and

@@ -7,6 +7,95 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.6.4] — 2026-08-26
+
+**Config keys that were parsed and never consulted, and code with no callers.**
+Suite 660 → 667 assertions. Harness 50 → 53 properties. No dep change (argonaut stays 1.13.3).
+
+### Fixed — `log_to_console` was parsed, stored, copied on reload, and ignored
+
+`config_log_console` had exactly **two readers in the whole tree**: its own definition and the
+reload copy. `klog`/`klog2` wrote to `STDERR_FD` unconditionally, so `"log_to_console": false`
+did nothing at all. The 1.5.0 note said the value "was ignored entirely" — only the *spelling*
+was fixed then (a string compare against `"false"`), never the behaviour.
+
+Measured in a real boot: **43 console lines with it on, 6 with it off**, and those six are
+precisely the pre-config-load lines plus a final line announcing that logging is going quiet.
+
+Deliberately NOT gated: `kmsg()` (dmesg is a separate channel with its own consumer, and
+suppressing console chatter must not erase the record read after the fact), the structured log,
+and the emergency password prompt, which opens its own descriptor via `console_open_rw()` and
+never goes through `klog` (rule 20). The flag defaults ON because everything before phase 5 runs
+before the config is parsed, and a board that fails there must still be able to say so.
+
+### Changed — `boot_timeout_ms` is consulted, and honestly labelled a BUDGET not a timeout
+
+`config_boot_timeout` previously had two readers, the reload copy and one unit test. It is
+checked at every boot-stage boundary now, but the code says plainly what it cannot do:
+
+- It **cannot interrupt a hung stage.** Phase 7 runs before the reactor and the signal mask is
+  blocked in favour of signalfd, so there is nothing to deliver an alarm to.
+- It **can** notice at each boundary that the boot has already overrun — the slow board, the
+  retrying dependency, the degrading disk, which are the cases that actually occur.
+
+It logs once and **continues** rather than dropping to the emergency shell: a boot that is
+merely slow is still a boot, and turning a slow disk into an unbootable board would be a worse
+failure than the one being reported.
+
+### Removed — dead chains, after checking which ones were actually dead
+
+⚠ **The roadmap entry overstated this, and deleting from it blind would have broken the build
+twice.** Two named symbols were live:
+
+- `edge_boot_verity_ok` — read by `boot_stages.cyr:89` since 1.5.7.
+- `cgroup_apply_limits` (live, `cglim_*`) sits one word from `cgroup_apply_resource_limits`
+  (dead, agnostik's `rlim_*`). Deleting by name similarity would have removed the limits path
+  the harness asserts.
+
+Actually removed: `cgroup_setup_agent` (zero callers) and the two functions only it reached,
+`move_to_cgroup` and `cgroup_apply_resource_limits` — all superseded at 1.5.5 by the child-side
+`_kyb_join_cgroup` (rule 16), since a parent-side move is unavoidably late and cgroup v2 charges
+memory on first touch without migrating charges. `cgroup_apply_resource_limits` was **standing
+rule 14's hazard in person**: it read agnostik's `rlim_*` accessors, while `svc_def_rlimits`
+returns a struct argonaut fills to its own incompatible layout — a plausible-looking function
+that reads `nofile` as `max_memory`. Also removed `any_failures` and five zero-caller accessors
+(`edge_boot_elapsed_ms`, `edge_boot_pcr_mismatches`, `edge_hash_device`, `edge_luks_device`,
+`edge_expected_pcrs`), two of which carried comments claiming "main reads these … in the boot
+summary". There has never been a boot summary.
+
+### Fixed — standing rule 9 was defended by a false reason
+
+The rule kept the explicit `if`-ladder in `_ll_access_to_kernel` because it was "the per-service
+Landlock path where a miscompile is a PID-1 crash". Verified: `_ll_access_to_kernel` has exactly
+one caller, inside `sandbox_from_ruleset`, and **`sandbox_from_ruleset`'s only caller in the tree
+is `src/bench.cyr`**. The live per-service path is `sandbox_from_config` → `_access_to_flags`,
+which is a `switch` of `case N: return K` bodies — the shape rule 9 itself states was never
+affected by the 6.4.62 miscompile.
+
+So the rule was protecting a benchmark while describing it as guarding PID 1. The ladder stays
+(it is correct and costs nothing) and the rationale is rewritten, because a rule defended by a
+false reason is one bad day from being deleted for the right one. That the Landlock surface is
+benchmark-only is now its own roadmap item.
+
+### Added — the quiet harness pass, with a falsifiability guard
+
+`log_to_console` reaches a syscall, so rule 27 applies. The pass boots a second image identical
+to the first but for that one key.
+
+⚠ **The guard is the whole design.** "kybernet printed nothing" is also exactly what a board
+that died before phase 1 looks like, so an assertion that only counts absent lines cannot fail
+correctly. The pass requires **both** that kybernet's own output collapses **and** that a line a
+*service* wrote to `/dev/console` is still present — proving the boot reached phase 8 while
+kybernet stayed quiet — plus that the transition was announced.
+
+### Fixed — two harness helpers were defined below their callers
+
+`_skip_or_fail` and `_assert_no_panic` lived below the boot and reactor passes. That is why the
+`veritysetup` skip could not reach `_skip_or_fail` and silently ignored `HARNESS_STRICT` (noted
+at 1.6.1), and adding the quiet pass put a third caller above the definitions. A shell function
+used before its definition is not a syntax error — it is an unbound command at runtime, inside a
+failure branch, under `set -e`. Both are now defined above every pass.
+
 ## [1.6.3] — 2026-08-25
 
 **sd_notify was received, classified, logged and discarded — and leaked memory doing it.**

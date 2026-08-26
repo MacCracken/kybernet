@@ -85,10 +85,7 @@ fn edge_set_devices(root_dev, hash_dev, root_hash, luks_dev) {
 
 fn edge_set_expected_pcrs(v) { _eb_expected_pcrs = v; return 0; }
 fn edge_root_device()   { return _eb_root_device; }
-fn edge_hash_device()   { return _eb_hash_device; }
 fn edge_root_hash()     { return _eb_root_hash; }
-fn edge_luks_device()   { return _eb_luks_device; }
-fn edge_expected_pcrs() { return _eb_expected_pcrs; }
 
 # A device path must be absolute, under /dev, traversal-free and drawn from
 # a conservative charset. Reimplemented locally rather than importing
@@ -358,6 +355,17 @@ fn _eb_refuse(klog_msg, kmsg_msg) {
     return 0;
 }
 
+# ⚠ FIVE ACCESSORS WERE REMOVED HERE AT 1.6.4, ALL WITH ZERO CALLERS:
+# edge_boot_elapsed_ms, edge_boot_pcr_mismatches, edge_hash_device,
+# edge_luks_device, edge_expected_pcrs. Two of them carried comments claiming
+# "main reads these ... in the boot summary" — there has never been a boot
+# summary. A getter with no consumer is not an API, it is a promise the code
+# does not keep, and in this file the promises were load-bearing enough to be
+# quoted back as evidence the feature existed.
+#
+# `edge_boot_verity_ok` is NOT in that list and stays: it has been live since
+# 1.5.7, read by boot_stages.cyr's verify arm.
+
 # Run the edge-boot pre-flight. Returns 1 to continue boot, 0 to
 # abort (caller should drop_to_emergency). Caller is responsible for
 # the boot_mode gate — this is a no-op if the config doesn't request
@@ -575,6 +583,4 @@ fn edge_boot_run(config) {
 fn edge_boot_tpm_present()    { return _eb_tpm_present; }
 fn edge_boot_dmverity_supp()  { return _eb_dmverity_supp; }
 fn edge_boot_pcr_count()      { return _eb_pcr_count; }
-fn edge_boot_elapsed_ms()     { return _eb_elapsed_ms; }
 fn edge_boot_verity_ok()      { return _eb_verity_verified; }
-fn edge_boot_pcr_mismatches() { return _eb_pcr_mismatches; }

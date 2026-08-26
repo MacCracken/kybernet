@@ -45,7 +45,7 @@ Requires Cyrius 6.5.35 (`cyriusly install 6.5.35 && cyriusly use 6.5.35`).
 ```sh
 cyrius deps                                # Resolve deps from cyrius.cyml into lib/
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet   # Build (DCE recommended)
-cyrius test src/test.cyr                   # Run 660 tests
+cyrius test src/test.cyr                   # Run 667 tests
 cyrius bench src/bench.cyr                 # Run benchmarks
 ```
 
@@ -131,7 +131,7 @@ cyrius bench src/bench.cyr                 # Run benchmarks
 - **Data-driven mount table** — not hardcoded per-mount calls
 - **sd_notify compatible** — READY, STOPPING, WATCHDOG, STATUS, RELOADING messages via epoll
 - **String builder** for path construction and logging
-- **660 tests**, 57 benchmarks
+- **667 tests**, 57 benchmarks
 
 ## Dependencies
 
@@ -170,13 +170,13 @@ boot. With the working lane moved onto the caller's arena it costs +25 KB.
 ## Testing
 
 ```sh
-cyrius test src/test.cyr            # 660 assertions
+cyrius test src/test.cyr            # 667 assertions
 bash scripts/bench-history.sh       # 57 benchmarks, load-tolerant regression gate
 bash qemu/boot-test.sh              # PID-1 boot harness (needs KVM)
 ```
 
 The QEMU harness is the gate that matters: it boots kybernet as real PID 1 and
-asserts 50 properties across four passes — the boot sequence, the reactor
+asserts 53 properties across five passes — the boot sequence, the reactor
 (that it sleeps rather than spins), dm-verity verification against a real
 image pair on virtio disks, and the emergency-auth prompt with a password fed
 over the serial line. Pass 4 runs against **both** credential formats: the

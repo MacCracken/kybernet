@@ -198,7 +198,20 @@ fn load_config() {
     # log_to_console is a real JSON bool now. The old code compared it
     # against the STRING "false", so `"log_to_console": false` — the
     # spelling any operator would actually write — was ignored entirely.
-    store64(cfg + 32, _cfg_bool(root, "log_to_console", 1));
+    var lc = _cfg_bool(root, "log_to_console", 1);
+    store64(cfg + 32, lc);
+    # ⚠ ACTUALLY APPLY IT. From 1.5.0 to 1.6.3 this value was parsed, stored,
+    # and copied on reload — and `config_log_console` had exactly two readers in
+    # the whole tree: its own definition and that reload copy. `klog`/`klog2`
+    # wrote to STDERR_FD unconditionally, so `"log_to_console": false` did
+    # nothing at all. The 1.5.0 note said the value "was ignored entirely"; only
+    # the SPELLING was fixed then (a string compare against "false"), not the
+    # behaviour. Announce the transition on the way out, so the last console
+    # line explains the silence that follows.
+    if (lc == 0) {
+        klog("log_to_console=false — console logging OFF (dmesg + /var/log/kybernet.log unaffected)");
+    }
+    log_set_console(lc);
 
     # Emergency-shell auth. Both keys must be present for the gate to
     # engage; verify_emergency_auth FAILS CLOSED if require_auth is set
@@ -331,6 +344,9 @@ fn reload_config() {
             store64(cur + 16, config_boot_timeout(new_cfg));
             store64(cur + 24, config_shutdown_timeout(new_cfg));
             store64(cur + 32, config_log_console(new_cfg));
+            # Reload can turn console logging back ON as well as off, so this
+            # is the one reload arm that can restore its own diagnostics.
+            log_set_console(config_log_console(new_cfg));
         }
 
         # Anything structural is NOT applied — say so rather than let the
@@ -754,8 +770,50 @@ fn handle_sighup() {
 # Boot stages
 # ================================================================
 
+# `boot_timeout_ms` — checked at stage boundaries. 1.6.4.
+#
+# ⚠ THIS IS A BUDGET CHECK, NOT A TIMEOUT, AND THE DIFFERENCE IS THE POINT.
+# From 1.5.0 to 1.6.3 `config_boot_timeout` had exactly two readers in the
+# tree — the reload copy and one unit test — so the key was parsed and never
+# consulted. It is consulted now, but honestly:
+#
+#   - It CANNOT interrupt a hung stage. Phase 7 runs before the reactor, the
+#     signal mask is blocked in favour of signalfd, and there is nothing to
+#     deliver an alarm to. A stage that never returns still never returns.
+#   - What it CAN do is notice, at each boundary, that the boot has already
+#     overrun — which catches a slow board, a retrying dependency or a
+#     degrading disk, i.e. the cases that actually show up.
+#
+# It logs and CONTINUES rather than dropping to the emergency shell: a boot
+# that is merely slow is still a boot, and turning a slow disk into an
+# unbootable board would be a worse failure than the one being reported.
+# Logged once, not per stage, so a long boot cannot flood the console.
+var g_boot_deadline = 0;
+var g_boot_overrun_logged = 0;
+
+fn _boot_budget_begin() {
+    g_boot_overrun_logged = 0;
+    g_boot_deadline = 0;
+    if (g_config == 0) { return 0; }
+    var bt = config_boot_timeout(g_config);
+    if (bt <= 0) { return 0; }
+    g_boot_deadline = monotonic_ms() + bt;
+    return g_boot_deadline;
+}
+
+fn _boot_budget_check(desc_cs) {
+    if (g_boot_deadline == 0) { return 0; }
+    if (g_boot_overrun_logged == 1) { return 1; }
+    if (monotonic_ms() <= g_boot_deadline) { return 0; }
+    g_boot_overrun_logged = 1;
+    klog2("boot: OVER BUDGET (boot_timeout_ms) at stage: ", desc_cs);
+    kmsg("kybernet: boot over budget — continuing (advisory, cannot interrupt a hung stage)");
+    return 1;
+}
+
 fn run_boot_stages() {
     if (g_init == 0) { return 0; }
+    _boot_budget_begin();
 
     var step = init_current_stage(g_init);
     while (step != 0) {
@@ -780,6 +838,7 @@ fn run_boot_stages() {
         if (boot_stage_needs_services(stage) == 1) { ensure_services_started(); }
 
         var ok = execute_boot_stage_for(g_init, g_config, stage);
+        _boot_budget_check(desc_cs);
         if (ok == STAGE_OK) {
             init_mark_step_complete(g_init, stage);
         } elif (ok == STAGE_SKIP) {
