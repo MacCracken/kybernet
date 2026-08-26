@@ -349,6 +349,27 @@ else
     echo "$RUNTIME_OUT" | grep -aiE 'seccomp' | head -3 || true
     fail=1
 fi
+# --- health poll interval (1.6.7) --------------------------------------------
+#
+# `health_check.interval_ms` was parsed onto the HealthCheck struct and then
+# ignored: the reactor polled on a hardcoded 30 s timer. That is not merely a
+# slow poll — argonaut sizes the runtime watchdog as `interval * retries +
+# timeout` from the service's OWN configured interval, so a service asking for
+# 5 s and polled at 30 s carried a watchdog sized for a cadence it never got.
+#
+# kyb-health asks for interval_ms: 1000, so a correct kybernet re-arms the
+# timer to 1 s and says so. The assertion is the LOG LINE rather than observed
+# tick spacing: timing an interval inside a 5 s VM window would be asserting
+# the outcome of a race (rule 36), whereas the line proves the config value
+# reached timerfd_settime, which is the property that was missing.
+if echo "$RUNTIME_OUT" | grep -aqF "health poll interval (s): 1"; then
+    echo "  OK: health_check.interval_ms drove the poll timer (1s, from kyb-health)"
+else
+    echo "  FAIL: the health timer was not re-armed from config — interval_ms is ignored again"
+    echo "$RUNTIME_OUT" | grep -aiE 'health poll interval' | head -2 || true
+    fail=1
+fi
+
 # --- Landlock (1.6.6) --------------------------------------------------------
 #
 # ⚠ THE THIRD CONFINEMENT MECHANISM, AND THE LAST ONE WITHOUT A FIXTURE.

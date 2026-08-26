@@ -7,6 +7,75 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.6.7] — 2026-08-26
+
+**A config key that mis-sized a watchdog, and a dep bump that made a test fail correctly.**
+Suite 667 → 676 assertions. argonaut 1.13.4 → **1.13.5**.
+
+### Fixed — `health_check.interval_ms` was parsed, stored, and never reached the timer
+
+The reactor polled on a hardcoded 30 s timer, so a service asking for 5 s got 30.
+`config_log_console` and `boot_timeout_ms` were the same shape at 1.6.4; this is
+the third key in that family.
+
+⚠ **It is not merely a slow poll.** argonaut sizes the runtime watchdog deadline as
+`interval * retries + timeout` from the service's OWN configured interval. A service
+asking for 5 s and polled at 30 s therefore carried a watchdog sized for a cadence
+it never received — **it could be killed for being late when it was the poller that
+was late.** The key was silently load-bearing for something other than latency.
+
+The health timerfd is necessarily created at phase 5, before the config is parsed at
+phase 6, so `eventloop_rearm_health` re-arms the SAME fd afterwards — keeping the
+epoll registration and the level-triggered drain contract (rule 13) untouched.
+
+⚠ **This is a poll FLOOR, not per-service scheduling, and the code says so.**
+argonaut's `init_poll_health` checks every service with a health check on each tick
+and kybernet cannot ask it for a subset. The timer therefore takes the SMALLEST
+interval any service requested:
+
+- no service is polled more slowly than it asked for — the defect being fixed;
+- a service that asked for a LONGER interval is polled more often than requested.
+  Over-polling a health check is wasteful, not wrong.
+
+True per-service scheduling needs argonaut to accept a due-time filter, and is
+roadmapped rather than faked here. Clamped to [1, 30] s: below 1 s the reactor
+spends its life polling, and 30 s is the historical default so a config with no
+health checks behaves exactly as before. Intervals round UP, so 1500 ms polls at
+2 s rather than 1 s.
+
+The computation lives in `src/lib/svc_config.cyr`, not `main.cyr`, so the test
+binary can reach it (standing rule 34) — six unit tests cover the min-selection,
+both clamps, the rounding, and the two no-health-check paths.
+
+### Changed — argonaut 1.13.5
+
+Four fixes, all of which were argonaut discarding information it already had:
+
+- **`enum SocketType` had no values.** cyrius numbered it from 0 against the
+  kernel's 1/2, producing a `duplicate symbol … conflicting value` warning on every
+  build of BOTH repos. Now gone.
+- **The orphan sweep discarded its reaped pids**, so a service exiting between its
+  own probe and the sweep kept a `STATE_RUNNING` entry holding a freed pid forever
+  — and any process recycling that pid was then attributed to that service.
+- **`notify_try_recv_authenticated` collapsed four outcomes into `0`** and threw
+  away the authenticated sender pid. Its drain `break`s on `0`, so one forged
+  datagram per tick starved every legitimate message behind it.
+- **A zero-length datagram ended the drain early** — legal on `AF_UNIX SOCK_DGRAM`,
+  consumed by `recvmsg`, and misread as "queue empty".
+
+### Changed — a 1.6.3 test correctly went red, and that is the point
+
+`test_knotify_socket_constants` asserted `SOCK_DGRAM == 1`, pinning the BROKEN
+state: argonaut's unvalued enum made the bare name resolve to `SOCK_STREAM`'s real
+value. argonaut 1.13.5 fixed it, so the assertion failed on the dep bump — exactly
+what a test that documents a known-wrong value is for.
+
+It now asserts the correct values, with the history in the comment so the change of
+meaning is legible. kybernet's local `SOCK_DGRAM_TYPE = 2` is KEPT even though the
+collision is gone: it costs nothing, states the intended value at the one call site
+that matters, and means a future dep regression cannot silently turn kybernet's
+datagram socket into a stream socket.
+
 ## [1.6.6] — 2026-08-26
 
 **The last confinement mechanism with no fixture, and a gate that had been passing by luck.**

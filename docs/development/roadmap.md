@@ -90,9 +90,13 @@ of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into
       to be benchmarked. Either give it a production call site or delete it — but note that
       deleting it lowers the recorded benchmark COUNT, which `bench-history.sh` gates on, so
       the removal and the count expectation have to land together.
-- [ ] **`health_check.interval_ms` does not control polling frequency.** The key is
-      parsed onto the `HealthCheck` struct, but the reactor polls on its own fixed timer,
-      so a service asking for a 5 s check gets the global interval.
+- [ ] **Per-service health scheduling (argonaut).** 1.6.7 made the poll timer take the
+      SMALLEST configured `interval_ms` so nobody is polled slower than they asked — but
+      `init_poll_health` checks every service with a health_check on each tick, so a
+      service wanting a longer interval is polled more often than it requested. Needs
+      argonaut to accept a due-time filter (or to track `last_hc` per service and skip
+      the not-yet-due ones internally). Over-polling is wasteful rather than wrong, which
+      is why 1.6.7 shipped the floor rather than faking the schedule.
 - [ ] **`audit_log_record` RETAINS 240 bytes per crash event (argonaut).** Found while
       fixing the arena leaks at 1.6.5 and deliberately left open: unlike the others this is
       not un-freeable arena, it is live reachable growth — a probe ended with
