@@ -119,6 +119,7 @@ var g_notify_accepted = 0;
 var g_notify_nocred = 0;        # no/invalid SCM_CREDENTIALS, or truncated
 var g_notify_baduid = 0;        # authenticated, but not uid 0
 var g_notify_unattributed = 0;  # authenticated root, but not a live service pid
+var g_notify_badpid = 0;        # MAINPID malformed, or outside the sender's cgroup
 
 # ================================================================
 # Logging is factored into src/lib/log.cyr (since 1.2.0). klog,
@@ -621,6 +622,7 @@ fn do_shutdown(shutdown_type) {
         klog2("notify: rejected-nocred: ", _u64_str(g_notify_nocred));
         klog2("notify: rejected-baduid: ", _u64_str(g_notify_baduid));
         klog2("notify: rejected-unattributed: ", _u64_str(g_notify_unattributed));
+        klog2("notify: refused-mainpid: ", _u64_str(g_notify_badpid));
     }
 
     if (g_init != 0) {
@@ -1321,7 +1323,7 @@ fn handle_notify_msg() {
         # calls plus a sanitize walked the buffer five times per message, on a
         # path bounded at 32 datagrams per reactor wakeup — the benchmark gate
         # flagged the cost the first time it ran (+758% on the classifier).
-        var sc[48];
+        var sc[64];                # 64 BYTES == NS_SIZE (rule 2) - was 48 until MAINPID added two fields
         knotify_scan(buf, n, &sc);
 
         if (load64(&sc + NS_READY) == 1) {
@@ -1368,6 +1370,46 @@ fn handle_notify_msg() {
             # default and it preserves pre-1.6.8 behaviour exactly.
             init_notify_watchdog(g_init, name);
             klog2("notify: watchdog ping: ", name);
+        }
+
+        # --- MAINPID= (1.6.10) ---
+        #
+        # Honoured only when it survives BOTH checks, and each rejects a
+        # different attack:
+        #
+        #   1. A bounded parse. `str_to_int` would accept "-1" (yielding -1) and
+        #      "1abc" (yielding 1); `process_kill` has no internal pid > 0 guard,
+        #      so from PID 1 a pid of -1 means kill every process on the machine.
+        #      knotify_parse_pid takes plain digits only, bounded during
+        #      accumulation, ceiling PID_MAX_LIMIT.
+        #
+        #   2. ⚠ CGROUP MEMBERSHIP. Authentication proves who SENT the datagram;
+        #      it says nothing about the pid named inside it. A perfectly
+        #      legitimate service can claim another service's pid, and honouring
+        #      that would aim kybernet's supervision — and its kill path — at an
+        #      unrelated process. `cgroup.procs` is the kernel's own membership
+        #      list, which the service cannot forge.
+        #
+        # A rejected claim is counted and logged, not fatal: a service that
+        # reports a pid outside its own cgroup is misconfigured or hostile, and
+        # either way the answer is to ignore the claim rather than kill anything.
+        var mp_off = load64(&sc + NS_MAINPID_OFF);
+        if (mp_off >= 0) {
+            var claimed = knotify_parse_pid(buf, mp_off, load64(&sc + NS_MAINPID_LEN));
+            if (claimed < 0) {
+                g_notify_badpid = g_notify_badpid + 1;
+                klog2("notify: MAINPID malformed - ignored: ", name);
+            } elif (cgroup_has_pid(name, claimed) == 0) {
+                # The pid parsed cleanly but is not in this service's cgroup.
+                g_notify_badpid = g_notify_badpid + 1;
+                klog2("notify: MAINPID not in this service's cgroup - REFUSED: ", name);
+            } else {
+                var mms = init_get_service(g_init, name);
+                if (mms != 0) {
+                    managed_svc_set_pid(mms, claimed);
+                    klog2("notify: MAINPID accepted for ", name);
+                }
+            }
         }
 
         if (load64(&sc + NS_STATUS_OFF) >= 0) {

@@ -487,6 +487,63 @@ fn cgroup_apply_limits(service, limits) {
 # is `cgroup_apply_limits` above, which uses argonaut's separate `cgroup_limits`
 # field with agnostik's `cglim_*` — the pair that has no twin.
 
+# Is `pid` a member of `service`'s own cgroup?
+#
+# ⚠ THIS IS THE AUTHORISATION CHECK FOR sd_notify's `MAINPID=`, AND WITHOUT IT
+# AUTHENTICATION IS NOT ENOUGH. SO_PASSCRED proves which process SENT a
+# datagram; it says nothing about the pid named INSIDE it. A service that is
+# authenticated, attributed and entirely legitimate can still claim
+# `MAINPID=<somebody else's pid>` — and honouring that would point kybernet's
+# supervision, and eventually its kill path, at an unrelated process.
+#
+# cgroup v2 makes the answer cheap and authoritative: `cgroup.procs` is the
+# kernel's own membership list for the service, maintained by the kernel rather
+# than by anything the service can write. A pid the service forked is in it; a
+# pid belonging to another service is not.
+#
+# Returns 1 only on a positive match. Every failure — unreadable file, unsafe
+# name, buffer too small, pid absent — answers 0, because this gates a
+# privileged action and "could not tell" must never read as "yes".
+fn cgroup_has_pid(service, pid) {
+    if (pid <= 0) { return 0; }
+    if (cgroup_name_is_safe(service) == 0) { return 0; }
+
+    var path = cgroup_file(service, "cgroup.procs");
+    if (path == 0) { return 0; }
+
+    # One byte of headroom: file_read_all stops at maxlen and returns maxlen
+    # with no error (rule 30), so without it a full read is indistinguishable
+    # from a truncated one — and a truncated membership list could answer "no"
+    # for a pid that is genuinely present.
+    var cap = 8192;
+    var buf = alloc(cap + 1);
+    if (buf == 0) { return 0; }
+    var n = file_read_all(str_data(path), buf, cap + 1);
+    if (n <= 0) { return 0; }
+    if (n > cap) { return 0; }          # truncated — refuse rather than guess
+
+    # cgroup.procs is one decimal pid per line. Compare whole lines: a
+    # substring match would let pid 42 satisfy a claim for pid 4.
+    var i = 0;
+    while (i < n) {
+        var ls = i;
+        while (i < n && load8(buf + i) != 10) { i = i + 1; }
+        var le = i;
+        if (i < n) { i = i + 1; }
+        var v = 0;
+        var ok = 1;
+        if (le <= ls) { ok = 0; }
+        for (var j = ls; j < le; j = j + 1) {
+            var c = load8(buf + j);
+            if (c < 48 || c > 57) { ok = 0; break; }
+            v = v * 10 + (c - 48);
+            if (v > 4194304) { ok = 0; break; }
+        }
+        if (ok == 1 && v == pid) { return 1; }
+    }
+    return 0;
+}
+
 # Remove a service cgroup directory (must be empty)
 fn remove_service_cgroup(service) {
     # Same predicate as create. The asymmetry was the defect: a name refused

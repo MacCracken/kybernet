@@ -362,13 +362,15 @@ fn knotify_status_sanitize(buf, len, out, outcap) {
 #   +32 status value offset (-1 = absent)     +40 status value length
 # ---------------------------------------------------------------------------
 enum NotifyScan {
-    NS_SIZE = 48;
+    NS_SIZE = 64;
     NS_READY = 0;
     NS_STOPPING = 8;
     NS_WATCHDOG = 16;
     NS_RELOADING = 24;
     NS_STATUS_OFF = 32;
     NS_STATUS_LEN = 40;
+    NS_MAINPID_OFF = 48;      # offset of the MAINPID value (-1 = absent)
+    NS_MAINPID_LEN = 56;
 }
 
 fn _ns_is_one(buf, vs, vlen) {
@@ -389,7 +391,9 @@ fn knotify_scan(buf, len, out) {
     store64(out + NS_WATCHDOG, 0);
     store64(out + NS_RELOADING, 0);
     store64(out + NS_STATUS_LEN, 0);
+    store64(out + NS_MAINPID_LEN, 0);
     store64(out + NS_STATUS_OFF, 0 - 1);
+    store64(out + NS_MAINPID_OFF, 0 - 1);
     if (buf == 0 || len <= 0) { return 0; }
 
     var i = 0;
@@ -416,6 +420,9 @@ fn knotify_scan(buf, len, out) {
         } elif (klen == 6 && memeq(buf + ls, "STATUS", 6) == 1) {
             store64(out + NS_STATUS_OFF, vs);
             store64(out + NS_STATUS_LEN, vlen);
+        } elif (klen == 7 && memeq(buf + ls, "MAINPID", 7) == 1) {
+            store64(out + NS_MAINPID_OFF, vs);
+            store64(out + NS_MAINPID_LEN, vlen);
         } elif (klen == 8 && memeq(buf + ls, "STOPPING", 8) == 1) {
             if (_ns_is_one(buf, vs, vlen) == 1) { store64(out + NS_STOPPING, 1); }
         } elif (klen == 8 && memeq(buf + ls, "WATCHDOG", 8) == 1) {
@@ -427,11 +434,38 @@ fn knotify_scan(buf, len, out) {
     return 1;
 }
 
+# Parse a pid from buf[off..off+len). Returns the pid, or -1 for ANYTHING
+# that is not a plain run of decimal digits in range.
+#
+# ⚠ THIS EXISTS BECAUSE `str_to_int` CANNOT BE USED HERE, AND THE REASON IS A
+# KERNEL PANIC. The stdlib parser honours a leading '-' and silently skips
+# non-digits, so `MAINPID=-1` yields **-1** and `MAINPID=1abc` yields 1. From
+# PID 1, a pid of -1 handed to kill(2) means "every process on the machine" —
+# and `process_kill` has no internal `pid > 0` guard, the check being duplicated
+# across its five call sites.
+#
+# So: no sign accepted, no non-digit tolerated, and the bound is enforced DURING
+# accumulation rather than after (rule 25) — a long digit run would otherwise
+# wrap onto a small value that passes a ceiling test. The ceiling is 4194304,
+# Linux's maximum PID_MAX_LIMIT; anything at or above it is not a pid.
+fn knotify_parse_pid(buf, off, len) {
+    if (off < 0 || len <= 0 || len > 7) { return 0 - 1; }
+    var v = 0;
+    for (var i = 0; i < len; i = i + 1) {
+        var c = load8(buf + off + i);
+        if (c < 48 || c > 57) { return 0 - 1; }
+        v = v * 10 + (c - 48);
+        if (v > 4194304) { return 0 - 1; }
+    }
+    if (v <= 0) { return 0 - 1; }
+    return v;
+}
+
 # Retained as a thin shim so the existing assertions keep their meaning. Order
 # picks a single "primary" verb for reporting; main.cyr checks each flag
 # independently and does not use this.
 fn knotify_classify(msg) {
-    var sc[48];
+    var sc[64];                # 64 BYTES == NS_SIZE (rule 2) - was 48 until MAINPID added two fields
     knotify_scan(msg, strlen(msg), &sc);
     if (load64(&sc + NS_READY) == 1) { return NOTIFY_READY; }
     if (load64(&sc + NS_STOPPING) == 1) { return NOTIFY_STOPPING; }
@@ -446,7 +480,7 @@ fn knotify_classify(msg) {
 # Kept for existing callers/tests. Prefer knotify_status_sanitize for anything
 # that reaches a log — this returns the RAW bytes.
 fn notify_status_value(msg) {
-    var sc[48];
+    var sc[64];                # 64 BYTES == NS_SIZE (rule 2) - was 48 until MAINPID added two fields
     knotify_scan(msg, strlen(msg), &sc);
     var off = load64(&sc + NS_STATUS_OFF);
     if (off < 0) { return 0; }
