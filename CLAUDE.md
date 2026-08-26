@@ -113,7 +113,7 @@ Do **not** add a `path = "../<dep>"` alongside `git`/`tag`. When `path` resolves
 2. Build: `CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet`
 3. Test: `cyrius test src/test.cyr` (676 tests must pass)
 4. Cross-build: `cyrius build --aarch64 src/main.cyr build/kybernet-aarch64` (verify both arches)
-5. Harness (needs KVM): `bash qemu/boot-test.sh` — 56 properties across five passes: boot markers + budget, the reactor gate, dm-verity verification, the emergency-auth prompt against BOTH credential formats, and the quiet gate (log_to_console=false)
+5. Harness (needs KVM): `bash qemu/boot-test.sh` — 58 properties across five passes: boot markers + budget, the reactor gate, dm-verity verification, the emergency-auth prompt against BOTH credential formats, and the quiet gate (log_to_console=false)
 5b. **On a version bump: `bash scripts/bench-history.sh`** — records per-benchmark ns/op to `benches/history.csv` and exits non-zero on a ≥15% regression vs the previous run. Review and explain (or fix) any flagged delta before cutting.
 6. All functions return `Result` or `Option` where failure is possible
 7. Use `str_builder` for path construction

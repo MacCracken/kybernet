@@ -394,6 +394,28 @@ cat > "${INITRAMFS_DIR}/etc/kybernet/config.json" << 'CFGEOF'
       }
     },
     {
+      "name": "kyb-nonroot",
+      "description": "runs as uid/gid 65534 and records its OWN Uid line",
+      "binary": "/bin/sh",
+      "args": ["-c", "grep '^Uid:' /proc/self/status > /dev/shm/nonroot.txt 2>&1; grep '^Gid:' /proc/self/status >> /dev/shm/nonroot.txt 2>&1"],
+      "type": "oneshot",
+      "restart": "never",
+      "security": {
+        "uid": 65534,
+        "gid": 65534,
+        "no_new_privs": true
+      }
+    },
+    {
+      "name": "kyb-nonroot-read",
+      "description": "root reader that surfaces kyb-nonroot's Uid (awk, not sed: sed is not symlinked)",
+      "binary": "/bin/sh",
+      "args": ["-c", "awk '{print \"NONROOT-\" $0}' /dev/shm/nonroot.txt > /dev/console 2>&1"],
+      "type": "oneshot",
+      "restart": "never",
+      "depends_on": ["kyb-nonroot"]
+    },
+    {
       "name": "kyb-landlock",
       "description": "granted /usr and /dev only; /etc is deliberately NOT granted",
       "binary": "/usr/bin/kyb-landlock-fixture",

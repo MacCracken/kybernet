@@ -155,7 +155,43 @@ fn kyb_pre_exec(svc_def) {
         }
     }
 
-    # 4. seccomp — last. `sc` is kybernet's KybSeccompPolicy (argonaut
+    # 4. DROP PRIVILEGES. ⚠ THE POSITION IN THIS SEQUENCE IS LOAD-BEARING.
+    #
+    # AFTER Landlock: building a ruleset and calling landlock_restrict_self is
+    # done by this process, and doing it while still root avoids any question
+    # of whether an unprivileged process can open the rule paths O_PATH — which
+    # is precisely how the 1.6.6 fixture failed when a path was unreadable.
+    #
+    # BEFORE seccomp, and this is the constraint that actually bites: the
+    # `basic` filter is a hand-maintained allowlist that does NOT contain
+    # setgroups/setgid/setuid. Installing it first would make this step fail
+    # EPERM (or, under a future KILL_PROCESS profile, kill the service outright)
+    # — and the service would then run as root having been configured not to.
+    # A privilege drop that silently does not happen is worse than one that was
+    # never asked for.
+    #
+    # FAIL CLOSED. If the drop fails, the child exits rather than exec'ing: a
+    # service configured to run as uid N must never run as root instead. That
+    # is the same reasoning as the Landlock arm above, and the opposite of what
+    # `drop_privileges`' own PRIV_NOT_ROOT arm does when kybernet is run as a
+    # non-root test harness — which cannot happen in PID 1.
+    if (sc != 0) {
+        var want_uid = kyb_policy_uid(sc);
+        var want_gid = kyb_policy_gid(sc);
+        if (want_uid != 0 - 1 || want_gid != 0 - 1) {
+            var du = want_uid;
+            var dg = want_gid;
+            if (du == 0 - 1) { du = 0; }        # gid-only: leave uid alone
+            if (dg == 0 - 1) { dg = 0; }        # uid-only: leave gid alone
+            var pr = drop_privileges(du, dg);
+            if (is_err_result(pr) == 1) {
+                kmsg("kybernet: pre-exec: PRIVILEGE DROP FAILED - refusing to exec as root");
+                return 1;
+            }
+        }
+    }
+
+    # 5. seccomp — last. `sc` is kybernet's KybSeccompPolicy (argonaut
     #    treats the field as opaque), naming a profile rather than carrying
     #    a raw syscall list: a filter is not something to hand-assemble in
     #    a config file, and a wrong one is a service that dies on its first

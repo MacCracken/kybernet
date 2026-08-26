@@ -24,7 +24,7 @@
 #   "started: kyb-live"              — a LIVE service, so a cgroup is really
 #                                      created and the pid moved into it
 #                                      (a completed oneshot correctly gets none)
-#   "removed service cgroups: 11"    — the shutdown sweep killed and rmdir'd them
+#   "removed service cgroups: 13"    — the shutdown sweep killed and rmdir'd them
 #
 #     ⚠ NINE of NINE. This said EIGHT from 1.5.3 to 1.6.1, with a comment
 #     arguing the shortfall was correct: kyb-orphan backgrounds a child, this
@@ -282,12 +282,12 @@ for marker in \
     "kybernet: services started" \
     "kybernet: harness done" \
     "kybernet: shutdown" \
-    "kybernet: config: services parsed: 11" \
+    "kybernet: config: services parsed: 13" \
     "kybernet:   completed (oneshot): kyb-dep" \
     "kybernet:   completed (oneshot): kyb-svc" \
     "kybernet: boot: skipped (not applicable): Start udev device manager" \
     "kybernet:   started: kyb-live" \
-    "kybernet: removed service cgroups: 11"; do
+    "kybernet: removed service cgroups: 13"; do
     if echo "$RUNTIME_OUT" | grep -aqF "$marker"; then
         echo "  OK: $marker"
     else
@@ -367,6 +367,43 @@ if echo "$RUNTIME_OUT" | grep -aqF "health poll interval (s): 1"; then
 else
     echo "  FAIL: the health timer was not re-armed from config — interval_ms is ignored again"
     echo "$RUNTIME_OUT" | grep -aiE 'health poll interval' | head -2 || true
+    fail=1
+fi
+
+# --- non-root services (1.6.9) -----------------------------------------------
+#
+# The whole uid/gid half of privdrop.cyr was unreachable: `drop_privileges` had
+# no caller anywhere, there was no config key, and every service therefore ran
+# as root. That is why the 1.6.3 sd_notify forgery analysis concluded the real
+# exposure was one compromised service forging notifications ABOUT ANOTHER —
+# with no uid separation, SO_PASSCRED's uid check excludes nobody.
+#
+# ⚠ THE ASSERTION IS THE UID, NOT THE SURVIVAL. A service that merely starts
+# proves nothing; a root service starts too. kyb-nonroot reads its OWN
+# /proc/self/status and records the Uid/Gid lines, so the value is observed
+# from inside the dropped child.
+#
+# It cannot report directly: /dev/console is 0600 root, which is exactly the
+# point — a non-root service has genuinely lost that access. It writes to
+# /dev/shm (tmpfs mode=1777) and a root reader with an explicit depends_on
+# surfaces it. The dependency is load-bearing, not decoration: without it the
+# wave order is whatever the resolver produces and the reader can run first
+# (standing rule 36 — the same trap that made kyb-limited pass on luck).
+if echo "$RUNTIME_OUT" | grep -aqE '^NONROOT-Uid:[[:space:]]*65534'; then
+    echo "  OK: service ran as uid 65534 — privilege drop reached the child"
+elif echo "$RUNTIME_OUT" | grep -aqE '^NONROOT-Uid:[[:space:]]*0'; then
+    echo "  FAIL: service ran as ROOT despite security.uid — the drop did not happen"
+    fail=1
+else
+    echo "  FAIL: no NONROOT-Uid line — the service died, or the reader ran first"
+    echo "$RUNTIME_OUT" | grep -aiE 'nonroot' | head -3 || true
+    fail=1
+fi
+
+if echo "$RUNTIME_OUT" | grep -aqE '^NONROOT-Gid:[[:space:]]*65534'; then
+    echo "  OK: gid dropped to 65534 as well"
+else
+    echo "  FAIL: gid was not dropped — setgid must precede setuid or it cannot happen"
     fail=1
 fi
 

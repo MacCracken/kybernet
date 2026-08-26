@@ -176,7 +176,7 @@ bash qemu/boot-test.sh              # PID-1 boot harness (needs KVM)
 ```
 
 The QEMU harness is the gate that matters: it boots kybernet as real PID 1 and
-asserts 56 properties across five passes — the boot sequence, the reactor
+asserts 58 properties across five passes — the boot sequence, the reactor
 (that it sleeps rather than spins), dm-verity verification against a real
 image pair on virtio disks, and the emergency-auth prompt with a password fed
 over the serial line. Pass 4 runs against **both** credential formats: the

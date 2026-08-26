@@ -17,7 +17,7 @@ of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into
 
 ---
 
-## v1.6.8 — code that does nothing, and docs that say it does
+## v1.6.9 — code that does nothing, and docs that say it does
 
 - [ ] **Port `agnos-init.sh`'s `setup_directories()` to a kybernet oneshot service.**
       Replaces the deleted phase 6b (1.6.2), and it is the *real* form of the need
@@ -110,15 +110,15 @@ of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into
 
 ## v1.x.x — real, but needs a decision or is too large to date
 
-- [ ] **No service can run as non-root.** The whole uid/gid half of `privdrop.cyr` is
-      unreachable: `secure_from_context` and `has_cap` have no references anywhere,
-      `privdrop_from_context` is called only by the former, `drop_privileges` only by
-      those two. There is no `user`/`group` key in `svc_apply_security_json`, and
-      argonaut's `ServiceDefinition` has no such field either — the agnostik
-      `security_context` bridge is a bridge to nothing. Wants a config key, numeric-uid
-      resolution (this tree has no `/etc/passwd` reader), a `drop_privileges` call as
-      step 5 of `kyb_pre_exec` — after Landlock, before seccomp — and a fixture that
-      prints its own `Uid:`.
+- [ ] **Give the AGNOS default services a non-root uid.** 1.6.9 made
+      `security.uid` / `security.gid` work and proved it end to end, but nothing in the
+      shipped config or in argonaut's `default_services` actually uses it — so every
+      real service still runs as root. The mechanism exists; the policy does not.
+      Needs a uid allocation per service (aethersafha, daimon, agnoshi...), matching
+      ownership on whatever runtime paths each one writes, and the numeric ids in
+      agnosticos' config. Note the ordering constraint 1.6.9 established: a service
+      with `"seccomp": "basic"` AND a uid works only because the drop precedes the
+      filter, and none of setuid/setgid/setgroups/setresuid are in that allowlist.
 - [ ] **The audit chain never rotates and is never drained.** Measured, not estimated:
       **242 arena bytes per record**, `max_capacity` 0 so `_chain_auto_rotate` returns
       immediately, 2000 records → 2000 retained, 0 rotations. argonaut writes on

@@ -7,6 +7,76 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.6.9] — 2026-08-26
+
+**Services can finally run as something other than root.**
+Suite 676 assertions. Harness 56 → 58 properties. No dep change (argonaut 1.13.7).
+
+### Added — `security.uid` / `security.gid`, and the privilege drop that had no caller
+
+The entire uid/gid half of `privdrop.cyr` was unreachable: `drop_privileges` had **no
+caller anywhere in the tree**, there was no config key, and argonaut's
+`ServiceDefinition` has no such field — so every service ran as root.
+
+That is not a cosmetic gap. It is precisely why the 1.6.3 sd_notify forgery analysis
+concluded the real exposure was **one compromised service forging notifications about
+another**: with no uid separation, `SO_PASSCRED`'s uid check excludes nobody. There is
+now an actual boundary to check against.
+
+Verified from inside the dropped child, reading its own `/proc/self/status`:
+
+```
+NONROOT-Uid:	65534	65534	65534	65534
+NONROOT-Gid:	65534	65534	65534	65534
+```
+
+All four fields — real, effective, saved-set, filesystem. The **saved-set** value is
+the one that matters: had only the effective uid dropped, a compromised service could
+`setuid(0)` straight back.
+
+⚠ **THE POSITION IN `kyb_pre_exec` IS REQUIRED, NOT CONVENTIONAL.** The drop is step 4
+of six: cgroup → no_new_privs → capabilities → Landlock → **privdrop** → seccomp.
+
+- **After Landlock**, so ruleset construction and `landlock_restrict_self` still run
+  as root — no question about whether an unprivileged process can open rule paths
+  `O_PATH`, which is exactly how the 1.6.6 fixture failed.
+- **Before seccomp**, and this is the constraint that bites: verified that **none** of
+  `setuid` / `setgid` / `setgroups` / `setresuid` are in the `basic` allowlist.
+  Installing the filter first would make the drop fail `EPERM` — and the service would
+  then run as ROOT having been explicitly configured not to. A privilege drop that
+  silently does not happen is worse than one never requested, so it also **fails
+  closed**: the child exits rather than exec'ing.
+
+**Numeric uids only.** This tree has no `/etc/passwd` reader and PID 1 is the wrong
+place to gain one — name resolution at boot means parsing a file that may live on a
+filesystem not yet mounted, on the path where failure is unrecoverable.
+
+**`-1` means "not configured", not uid 0.** Conflating them would make an absent key
+indistinguishable from an explicit request to stay root. Values are **refused**
+outside 0..2^31-1 rather than clamped: a uid is an identity, and silently substituting
+a different one is worse than refusing the service (rule 25's principle).
+
+The ids ride on kybernet's own `KybSeccompPolicy`, hung off `svc_def_seccomp`, for the
+same reason `landlock_optional` does — no argonaut change, no dep tag.
+
+### Added — a fixture that proves the uid, not the survival
+
+A service that merely starts proves nothing; a root service starts too. `kyb-nonroot`
+reads its OWN `/proc/self/status`, so the value is observed from inside the child.
+
+It **cannot** write `/dev/console` — that node is 0600 root, which is itself evidence
+the drop worked — so it writes `/dev/shm` (tmpfs `mode=1777`) and a root reader with an
+explicit `depends_on` surfaces it. The dependency is load-bearing, not decoration:
+without it the wave order is whatever the resolver produces and the reader can run
+first, which is the trap that made `kyb-limited` pass on luck from 1.5.5 to 1.6.6
+(rule 36).
+
+⚠ The first version of the reader used `sed`, which is **not** among the busybox
+applets this initramfs symlinks (`sh ls cat mount ps kill sleep echo dmesg true false
+awk cut grep printf`). Fourth fixture this cycle to assume something the environment
+does not supply, after `/lib64`, `mawk` vs gawk, and OpenSSL 3.2's ARGON2ID. **When a
+fixture shells out, the available command set is part of the environment contract.**
+
 ## [1.6.8] — 2026-08-26
 
 **sd_notify READY and WATCHDOG are honoured, not merely observed.**

@@ -455,15 +455,35 @@ enum SeccompKind {
 # `landlock_optional` rides here rather than on the landlock block because
 # that block is a JSON ARRAY of rules with nowhere to hang a scalar, and this
 # object is already the per-service policy kyb_pre_exec reads.
-struct KybSeccompPolicy { kind; no_new_privs; landlock_optional; }
+# ⚠ uid/gid RIDE HERE, on kybernet's own policy struct, rather than on
+# argonaut's ServiceDefinition — which has no such field and would need a dep
+# change and a tag to gain one. This is the same reason `landlock_optional`
+# lives here: the struct is kybernet's, hung off `svc_def_seccomp`, so a new
+# per-service policy field costs nothing outside this repo.
+#
+# -1 means "not configured", NOT uid 0. That distinction is load-bearing: 0 is
+# a legitimate value meaning root, and conflating the two would make an absent
+# key indistinguishable from an explicit request to stay root.
+struct KybSeccompPolicy { kind; no_new_privs; landlock_optional; uid; gid; }
 
 fn kyb_seccomp_policy_new(kind, nnp, ll_opt) {
-    var p = alloc(24);
+    var p = alloc(40);
     store64(p, kind);
     store64(p + 8, nnp);
     store64(p + 16, ll_opt);
+    store64(p + 24, 0 - 1);          # uid: -1 = not configured (0 means root)
+    store64(p + 32, 0 - 1);          # gid: -1 = not configured
     return p;
 }
+
+fn kyb_policy_set_ids(p, uid, gid) {
+    store64(p + 24, uid);
+    store64(p + 32, gid);
+    return p;
+}
+
+fn kyb_policy_uid(p) { return load64(p + 24); }
+fn kyb_policy_gid(p) { return load64(p + 32); }
 
 fn kyb_policy_kind(p)              { return load64(p); }
 fn kyb_policy_no_new_privs(p)      { return load64(p + 8); }
@@ -510,6 +530,34 @@ fn svc_apply_security_json(sd, obj) {
         svc_def_set_capabilities(sd, caps);
     }
 
+    # --- user / group: run the service as a non-root uid ---
+    #
+    # ⚠ NUMERIC ONLY, AND THAT IS DELIBERATE. This tree has no /etc/passwd
+    # reader and PID 1 is the wrong place to acquire one: name resolution at
+    # boot means parsing a file that may live on a filesystem still unmounted
+    # at that point, on the path where a failure is unrecoverable. A numeric uid is
+    # unambiguous and needs nothing outside the config.
+    #
+    # Bounded and REFUSED out of range rather than clamped. A uid is an
+    # identity, and silently substituting a different one is worse than
+    # refusing the service: 0 would silently keep root (the exact thing the key
+    # exists to avoid), and a wrapped or truncated value would run the service
+    # as somebody unrelated. Ceiling is 2^31-1, the kernel's uid_t range;
+    # nobody/nogroup at 65534 is comfortably inside it.
+    var uid_v = _cfg_int(sec, "uid", 0 - 1);
+    var gid_v = _cfg_int(sec, "gid", 0 - 1);
+    if (uid_v != 0 - 1) {
+        if (uid_v < 0 || uid_v > 2147483647) {
+            klog("config: security.uid out of range — service REFUSED");
+            return 0;
+        }
+    }
+    if (gid_v != 0 - 1) {
+        if (gid_v < 0 || gid_v > 2147483647) {
+            klog("config: security.gid out of range — service REFUSED");
+            return 0;
+        }
+    }
     # --- landlock filesystem rules ---
     var llv = json_v_obj_get(sec, "landlock");
     if (llv != 0) {
@@ -556,7 +604,13 @@ fn svc_apply_security_json(sd, obj) {
     # is rule 19's complaint; inheriting a SILENT LOSS OF POLICY is worse,
     # so the default goes the other way here and says so in the log.
     var ll_opt = _cfg_bool(sec, "landlock_optional", 0);
-    svc_def_set_seccomp(sd, kyb_seccomp_policy_new(kind, nnp, ll_opt));
+    var pol = kyb_seccomp_policy_new(kind, nnp, ll_opt);
+    # uid/gid were validated at the top of this function; carry them onto the
+    # policy that is actually stored. (An earlier draft built a second policy
+    # object there and dropped it on the floor — the parse succeeded and the
+    # ids silently never reached kyb_pre_exec.)
+    kyb_policy_set_ids(pol, uid_v, gid_v);
+    svc_def_set_seccomp(sd, pol);
     return 1;
 }
 
