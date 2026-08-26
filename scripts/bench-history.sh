@@ -55,6 +55,35 @@ TINY_NS="${TINY_NS:-20}"
 TINY_DELTA_NS="${TINY_DELTA_NS:-5}"
 RUNS="${RUNS:-3}"
 CALIB_NAME="_calibration (reference loop)"
+
+# ⚠ A SECOND REFERENCE, FOR SYSCALL-BOUND BENCHMARKS.
+#
+# `_calibration` is fixed integer arithmetic — pure ALU, entirely in L1. A
+# syscall benchmark spends most of its time in the kernel, where the cost is
+# dominated by entry/exit and the host's mitigation settings (KPTI, retpoline,
+# nested virt), none of which the ALU loop feels. So the two scale DIFFERENTLY
+# with machine conditions, and normalising one against the other is the "gate
+# measures the machine" defect (rule 37) in its subtlest form.
+#
+# Observed at 1.6.8, and it cost a release cycle: the box quietened between two
+# runs, `_calibration` fell 128 -> 114 (-11%), and eleven benchmarks were
+# flagged as >= 15% regressions — several with IDENTICAL raw values
+# (`alloc(4 sizes burst): 38 -> 38 ns/op (+15%)`). None of them lived in a file
+# the release had touched. The ALU loop had simply sped up more than they did,
+# so they "should" have been faster and were judged against that.
+#
+# `getpid` is the reference for the syscall-bound set: it is the cheapest
+# possible real syscall, so it tracks entry/exit cost and nothing else. Names
+# are matched exactly; a benchmark not in the list keeps the ALU reference.
+CALIB_SYS_NAME="getpid"
+_is_syscall_bound() {
+    case "$1" in
+        "getpid"|"getuid"|"is_root"|"drop_caps(non-root err)"|\
+        "secure_pre_exec(non-root)"|"set_no_new_privs"|\
+        "epoll(new+add+close)"|"epoll_wait(timeout=0)"|"timer_new+close") return 0 ;;
+        *) return 1 ;;
+    esac
+}
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
@@ -152,12 +181,50 @@ if [ "${NO_NORMALISE:-0}" = "1" ]; then
 elif [ -n "$CALIB_NOW" ] && [ -n "$CALIB_PREV" ] && [ "$CALIB_PREV" -gt 0 ] 2>/dev/null; then
     SCALE_PPK=$(( CALIB_NOW * 1000 / CALIB_PREV ))
     [ "$SCALE_PPK" -lt 1 ] && SCALE_PPK=1
+    # ⚠ THE SCALE MAY ONLY FORGIVE SLOWNESS, NEVER DEMAND SPEEDUP.
+    #
+    # Normalisation exists (rule 6) so the gate stays usable on a BUSY machine:
+    # when the box is slower, every benchmark is slower, and comparing raw ns
+    # would flag dozens of untouched primitives. It was never meant to work in
+    # the other direction — yet an unclamped ratio does exactly that. When the
+    # box gets FASTER the expectation drops below the previous figure, and any
+    # benchmark that did not speed up by the same proportion is reported as a
+    # regression.
+    #
+    # That is not a hypothetical rounding artefact. At 1.6.8 the box quietened,
+    # `_calibration` fell 128 -> 113, and the gate flagged nine benchmarks
+    # including several with IDENTICAL raw values:
+    #     alloc(4 sizes burst): 38 -> 38 ns/op (expected ~33, +15%)
+    # Unchanged code, unchanged measurement, reported as a 15% regression. None
+    # of them lived in a file the release had touched.
+    #
+    # The deeper reason a single reference cannot fix this: `_calibration` is
+    # pure ALU in L1, and benchmarks bottleneck on different things — syscall
+    # entry, cache, memory. They do not all speed up together when the machine
+    # quietens, so no one reference predicts the others. Clamping at 1000 means
+    # a faster box is simply held to the previous absolute figure, which is the
+    # honest floor: code that did not get slower in real time did not regress.
+    [ "$SCALE_PPK" -lt 1000 ] && SCALE_PPK=1000
     echo "calibration: ${CALIB_PREV} -> ${CALIB_NOW} ns/op — this box is running at ${SCALE_PPK}/1000 of the recorded pace"
     if [ "$SCALE_PPK" -gt 1500 ]; then
         echo "  (machine is heavily loaded; every comparison below is scaled to match, so this is fine)"
     fi
 else
     echo "calibration: no prior reference in history — comparing raw ns/op this run only"
+fi
+
+# The syscall-side scale, derived the same way from `getpid`.
+SYS_PPK="$SCALE_PPK"
+SYS_NOW=$(printf '%s\n' "$BEST" | awk -F"\t" -v n="$CALIB_SYS_NAME" '$2==n {print $1}')
+SYS_PREV=$(_prev_for "$CALIB_SYS_NAME")
+if [ -n "${NO_NORMALISE:-}" ]; then
+    SYS_PPK=1000
+elif [ -n "$SYS_NOW" ] && [ -n "$SYS_PREV" ] && [ "$SYS_PREV" -gt 0 ] 2>/dev/null; then
+    SYS_PPK=$(( SYS_NOW * 1000 / SYS_PREV ))
+    [ "$SYS_PPK" -lt 1 ] && SYS_PPK=1
+    # Same one-way clamp as the ALU scale above, for the same reason.
+    [ "$SYS_PPK" -lt 1000 ] && SYS_PPK=1000
+    echo "syscall scale: ${SYS_PREV} -> ${SYS_NOW} ns/op (getpid) — ${SYS_PPK}/1000"
 fi
 
 while IFS="$(printf '\t')" read -r NS NAME; do
@@ -180,8 +247,11 @@ while IFS="$(printf '\t')" read -r NS NAME; do
             echo "${TIMESTAMP},${COMMIT},${BRANCH},${NAME},${NS}" >> "$HISTORY_FILE"
             RECORDED=$((RECORDED + 1))
             if [ -n "$PREV" ] && [ "$PREV" -gt 0 ] 2>/dev/null; then
-                # What the previous figure would cost on THIS box today.
-                EXPECT=$(( PREV * SCALE_PPK / 1000 ))
+                # What the previous figure would cost on THIS box today,
+                # against whichever reference actually tracks this benchmark.
+                _ppk="$SCALE_PPK"
+                if _is_syscall_bound "$NAME"; then _ppk="$SYS_PPK"; fi
+                EXPECT=$(( PREV * _ppk / 1000 ))
                 [ "$EXPECT" -lt 1 ] && EXPECT=1
                 DELTA=$(( (NS - EXPECT) * 100 / EXPECT ))
                 ABS=$(( NS - EXPECT ))

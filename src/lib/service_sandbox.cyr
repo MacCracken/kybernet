@@ -141,7 +141,7 @@ fn kyb_pre_exec(svc_def) {
             # kmsg() rather than klog(): this runs in the pre-exec child, whose
             # stdout/stderr belong to the service, and /dev/kmsg is opened fresh
             # so it works regardless of what the child inherited.
-            kmsg("kybernet: pre-exec: LANDLOCK FAILED — a rule path is unopenable (does every path exist?)");
+            kmsg("kybernet: pre-exec: LANDLOCK FAILED - a rule path is unopenable (does every path exist?)");
             return 1;
         }
         if (result_unwrap(lr) == 1) {

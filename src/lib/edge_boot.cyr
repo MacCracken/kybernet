@@ -316,7 +316,7 @@ fn _eb_compare_pcrs(values) {
             if (edge_is_all_zero_hex(got) == 1) {
                 # Never a match. sigil zero-fills a PCR it could not parse,
                 # so all-zero means "unread", not "read as zero".
-                klog("edge boot: PCR read back all-zero — UNREADABLE, not a match");
+                klog("edge boot: PCR read back all-zero - UNREADABLE, not a match");
                 mismatches = mismatches + 1;
             } elif (str_eq(got, want) == 0) {
                 klog("edge boot: PCR MISMATCH vs configured baseline");
@@ -349,7 +349,7 @@ fn _eb_refuse(klog_msg, kmsg_msg) {
     klog(klog_msg);
     kmsg(kmsg_msg);
     if (_eb_mode_permissive == 1) {
-        klog("edge boot: PERMISSIVE — continuing despite the above");
+        klog("edge boot: PERMISSIVE - continuing despite the above");
         return 1;
     }
     return 0;
@@ -379,7 +379,7 @@ fn edge_boot_run(config) {
 
     var ec = config_edge(config);
     if (ec == 0) {
-        klog("edge boot: no EdgeBootConfig — skipping");
+        klog("edge boot: no EdgeBootConfig - skipping");
         return 1;
     }
 
@@ -401,19 +401,19 @@ fn edge_boot_run(config) {
         # On a board with no root_hash configured there is nothing to
         # bypass, so `off` is honoured as written.
         if (_eb_root_hash != 0) {
-            klog("edge boot: kybernet.edge=off DOWNGRADED to permissive — root_hash is configured");
+            klog("edge boot: kybernet.edge=off DOWNGRADED to permissive - root_hash is configured");
             kmsg("kybernet: edge boot: cmdline off downgraded to permissive, checks still run");
             _eb_mode_off = 0;
             _eb_mode_permissive = 1;
         } else {
-            klog("edge boot: DISABLED by kybernet.edge=off — skipping");
+            klog("edge boot: DISABLED by kybernet.edge=off - skipping");
             kmsg("kybernet: edge boot disabled by cmdline");
             return 1;
         }
     }
     if (_eb_mode_permissive == 1) {
-        klog("edge boot: PERMISSIVE (kybernet.edge=permissive) — checks run, refusals suppressed");
-        kmsg("kybernet: edge boot PERMISSIVE — refusals suppressed");
+        klog("edge boot: PERMISSIVE (kybernet.edge=permissive) - checks run, refusals suppressed");
+        kmsg("kybernet: edge boot PERMISSIVE - refusals suppressed");
     }
 
     var start_ms = monotonic_ms();
@@ -499,7 +499,7 @@ fn edge_boot_run(config) {
             klog("edge boot: PCR read complete");
             _eb_pcr_mismatches = _eb_compare_pcrs(result_unwrap(pcr_res));
         } else {
-            klog("edge boot: pcr_bindings empty — skipping PCR read");
+            klog("edge boot: pcr_bindings empty - skipping PCR read");
         }
     }
 
@@ -549,7 +549,7 @@ fn edge_boot_run(config) {
                 return _eb_refuse("FATAL: dm-verity requested but veritysetup could not run",
                   "edge-boot REFUSED: veritysetup missing or unrunnable");
             }
-            klog("edge boot: veritysetup unavailable — integrity NOT verified");
+            klog("edge boot: veritysetup unavailable - integrity NOT verified");
         }
     } elif (readonly_req == 1) {
         klog("edge boot: readonly_rootfs set but no verity device config");
@@ -571,7 +571,7 @@ fn edge_boot_run(config) {
             return _eb_refuse("FATAL: edge boot over max_boot_ms budget",
               "edge-boot REFUSED: max_boot_ms budget exceeded");
         }
-        klog("WARNING: over budget, but no hard prerequisite set — continuing");
+        klog("WARNING: over budget, but no hard prerequisite set - continuing");
     }
 
     klog("edge boot: pre-flight complete");

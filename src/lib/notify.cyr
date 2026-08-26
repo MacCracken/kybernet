@@ -100,7 +100,7 @@ fn notify_socket_create() {
     store32(&one, 1);
     var so = sys_setsockopt(fd, KYB_SOL_SOCKET, KYB_SO_PASSCRED, &one, 4);
     if (so < 0) {
-        klog("notify: SO_PASSCRED failed — refusing an unauthenticatable socket");
+        klog("notify: SO_PASSCRED failed - refusing an unauthenticatable socket");
         sys_close(fd);
         return Err(0 - so);
     }

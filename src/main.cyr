@@ -152,7 +152,7 @@ fn load_config() {
         return argonaut_config_default();
     }
     if (n > cap) {
-        klog("config: /etc/kybernet/config.json exceeds 16384 bytes — REFUSING to parse a truncated config");
+        klog("config: /etc/kybernet/config.json exceeds 16384 bytes - REFUSING to parse a truncated config");
         kmsg("kybernet: config exceeds 16384 bytes, refusing to parse a truncated config");
         return 0;
     }
@@ -165,7 +165,7 @@ fn load_config() {
     # has had `json_v_parse` + arr/obj accessors the whole time.
     var root = json_v_parse_buf(buf, n);
     if (root == 0) {
-        klog("config: parse FAILED — the file is present and not valid JSON");
+        klog("config: parse FAILED - the file is present and not valid JSON");
         kmsg("kybernet: config parse failed");
         return 0;
     }
@@ -186,7 +186,7 @@ fn load_config() {
         if (is_ok(mr) == 1) {
             store64(cfg, result_unwrap(mr));
         } else {
-            klog("config: unrecognised boot_mode — keeping default");
+            klog("config: unrecognised boot_mode - keeping default");
         }
     }
 
@@ -209,7 +209,7 @@ fn load_config() {
     # behaviour. Announce the transition on the way out, so the last console
     # line explains the silence that follows.
     if (lc == 0) {
-        klog("log_to_console=false — console logging OFF (dmesg + /var/log/kybernet.log unaffected)");
+        klog("log_to_console=false - console logging OFF (dmesg + /var/log/kybernet.log unaffected)");
     }
     log_set_console(lc);
 
@@ -235,7 +235,7 @@ fn load_config() {
     # match and then halt. Both are closed, but only one is honest.
     if (g_emerg_hash != 0) {
         if (emerg_cred_usable(g_emerg_hash) == 0) {
-            klog("config: emergency_password_hash is malformed — credential REJECTED");
+            klog("config: emergency_password_hash is malformed - credential REJECTED");
             kmsg("kybernet: config: malformed emergency_password_hash, credential rejected");
             g_emerg_hash = 0;
         } else {
@@ -257,7 +257,7 @@ fn load_config() {
     # "edge"` into an un-overridable TPM + dm-verity demand whose refusal
     # path powers the machine off. 1.5.7.
     if (edge_config_from_json(root, config_edge(cfg)) == 0) {
-        klog("config: malformed edge block — edge verification DISABLED");
+        klog("config: malformed edge block - edge verification DISABLED");
         kmsg("kybernet: config: malformed edge block, edge verification disabled");
         edge_apply_defaults(config_edge(cfg));
     }
@@ -314,7 +314,7 @@ fn reload_config() {
         # edge policy and timeouts with defaults — a reload that cannot fail
         # is a reload that can destroy. The old config stays installed and
         # the operator is told, on the console and in dmesg.
-        klog("config reload REFUSED: the file is unusable — keeping the running config");
+        klog("config reload REFUSED: the file is unusable - keeping the running config");
         kmsg("kybernet: config reload refused, keeping the running config");
         return 0;
     }
@@ -353,11 +353,11 @@ fn reload_config() {
         # operator believe a reload took.
         if (old_cfg != 0) {
             if (config_boot_mode(new_cfg) != config_boot_mode(old_cfg)) {
-                klog("config reload: boot_mode change requires a reboot — NOT applied");
+                klog("config reload: boot_mode change requires a reboot - NOT applied");
             }
         }
         if (vec_len(config_services(new_cfg)) > 0) {
-            klog("config reload: service definitions require a reboot — NOT applied");
+            klog("config reload: service definitions require a reboot - NOT applied");
         }
     }
 
@@ -379,7 +379,7 @@ fn _prompt_password(fd, buf, cap) {
     var saved = alloc(TERMIOS_SIZE);
     var quiet = termios_echo_off(fd, saved);
     if (quiet == 0) {
-        klog("emergency shell: could not disable echo — password will be VISIBLE");
+        klog("emergency shell: could not disable echo - password will be VISIBLE");
     }
 
     # The deadline in _read_line_fd is only real if the descriptor is
@@ -462,7 +462,7 @@ fn drop_to_emergency() {
             # with a diagnostic on kmsg can be recovered from the
             # bootloader; one power-cycling every few seconds cannot.
             klog("FATAL: authentication required but /dev/console cannot be opened");
-            kmsg("kybernet: emergency auth impossible — no console; halting rather than reboot-looping");
+            kmsg("kybernet: emergency auth impossible - no console; halting rather than reboot-looping");
             while (1 == 1) { sys_pause(); }
         }
         # 512, not 256: scripts/mkcred.sh recommends a multi-word passphrase
@@ -492,7 +492,7 @@ fn drop_to_emergency() {
             # boot, which re-enters this prompt — the loop 1.5.8 fixes. A
             # wrong password is also the one case where an attacker could
             # otherwise force an endless reboot cycle on demand.
-            kmsg("kybernet: emergency authentication failed — halting");
+            kmsg("kybernet: emergency authentication failed - halting");
             while (1 == 1) { sys_pause(); }
         }
         klog("emergency shell: authenticated");
@@ -675,7 +675,7 @@ fn handle_signal(signum) {
         case 2: klog("received SIGTERM"); do_shutdown(SHUTDOWN_POWEROFF);
         case 3: klog("received SIGINT"); do_shutdown(SHUTDOWN_REBOOT);
         case 4: handle_sighup();
-        case 5: klog("received SIGPWR — power failure"); do_shutdown(SHUTDOWN_POWEROFF);
+        case 5: klog("received SIGPWR - power failure"); do_shutdown(SHUTDOWN_POWEROFF);
         default: return 0;
     }
     return 0;
@@ -756,7 +756,7 @@ fn handle_sigchld() {
 }
 
 fn handle_sighup() {
-    klog("received SIGHUP — reloading config");
+    klog("received SIGHUP - reloading config");
     var ok = reload_config();
     if (ok == 1) {
         klog("config reload successful");
@@ -807,7 +807,7 @@ fn _boot_budget_check(desc_cs) {
     if (monotonic_ms() <= g_boot_deadline) { return 0; }
     g_boot_overrun_logged = 1;
     klog2("boot: OVER BUDGET (boot_timeout_ms) at stage: ", desc_cs);
-    kmsg("kybernet: boot over budget — continuing (advisory, cannot interrupt a hung stage)");
+    kmsg("kybernet: boot over budget - continuing (advisory, cannot interrupt a hung stage)");
     return 1;
 }
 
@@ -1113,7 +1113,7 @@ fn handle_health_tick() {
                         # Flat 1 s, as the Rust original used: this is not a
                         # crash backoff, it is "stop waiting and cycle it".
                         if (restart_queue_push(svc_cs, monotonic_ms() + 1000) == 1) {
-                            klog2("health threshold exceeded — restart scheduled: ", svc_cs);
+                            klog2("health threshold exceeded - restart scheduled: ", svc_cs);
                         }
                     }
                 }
@@ -1337,7 +1337,12 @@ fn handle_notify_msg() {
             # normal, not an error: a `simple` service sending READY is just
             # being polite.
             if (init_notify_ready(g_init, name) == 1) {
-                klog2("notify: READY — service is now running: ", name);
+                # ⚠ ASCII ONLY IN ANYTHING THE HARNESS GREPS. The harness builds
+                # its capture with `cat -v`, which escapes non-ASCII bytes — an
+                # em-dash here became `M-bM-^@M-^T` and the assertion could never
+                # match, reporting a broken feature that worked. Console log lines
+                # go to a serial port; keep them 7-bit.
+                klog2("notify: READY - service is now running: ", name);
             } else {
                 klog2("notify: ready: ", name);
             }
@@ -1452,7 +1457,7 @@ fn kybernet_run() {
     var sfd_r = setup_signals();
     if (is_err_result(sfd_r) == 1) {
         kmsg("phase 4: FATAL signal setup failed");
-        klog("FATAL: signal setup failed — entering shutdown");
+        klog("FATAL: signal setup failed - entering shutdown");
         do_shutdown(SHUTDOWN_POWEROFF);
         sys_pause();
         return 1;
@@ -1474,7 +1479,7 @@ fn kybernet_run() {
     var epfd_r = eventloop_setup(g_sfd, health_iv, wdog_iv, restart_iv);
     if (is_err_result(epfd_r) == 1) {
         kmsg("phase 5: FATAL eventloop setup failed");
-        klog("FATAL: eventloop setup failed — entering shutdown");
+        klog("FATAL: eventloop setup failed - entering shutdown");
         do_shutdown(SHUTDOWN_POWEROFF);
         sys_pause();
         return 1;
@@ -1516,8 +1521,8 @@ fn kybernet_run() {
     # dmesg, because on an edge deployment this is the difference between
     # booting verified and booting ordinary.
     if (g_config == 0) {
-        klog("FATAL CONFIG: unusable /etc/kybernet/config.json — booting on DEFAULTS");
-        kmsg("kybernet: unusable config, booting on DEFAULTS — services/boot_mode/edge are NOT as configured");
+        klog("FATAL CONFIG: unusable /etc/kybernet/config.json - booting on DEFAULTS");
+        kmsg("kybernet: unusable config, booting on DEFAULTS - services/boot_mode/edge are NOT as configured");
         g_config = argonaut_config_default();
     }
     g_init = argonaut_init_new(g_config);
@@ -1540,7 +1545,7 @@ fn kybernet_run() {
             if (eventloop_rearm_health(hiv) == 1) {
                 klog2("health poll interval (s): ", _u64_str(hiv));
             } else {
-                klog("WARNING: could not re-arm the health timer — staying at 30s");
+                klog("WARNING: could not re-arm the health timer - staying at 30s");
             }
         }
     }
@@ -1582,17 +1587,17 @@ fn kybernet_run() {
     var edge_ok = edge_boot_run(g_config);
     if (edge_ok == 0) {
         kmsg("phase 6c: FATAL edge-boot prerequisite missing");
-        klog("FATAL: edge-boot prerequisite missing — emergency shell");
+        klog("FATAL: edge-boot prerequisite missing - emergency shell");
         if (g_emerg_hash != 0) {
             g_emerg_require_auth = 1;
             klog("edge refusal: emergency shell requires authentication");
             drop_to_emergency();
         } else {
-            klog("edge refusal: no emergency_password_hash configured — NOT opening a root shell");
-            kmsg("kybernet: edge refusal, no emergency auth configured — shell suppressed");
+            klog("edge refusal: no emergency_password_hash configured - NOT opening a root shell");
+            kmsg("kybernet: edge refusal, no emergency auth configured - shell suppressed");
         }
         klog("FATAL: refusing to continue boot without edge prerequisites");
-        kmsg("phase 6c: powering off — edge prerequisites unmet");
+        kmsg("phase 6c: powering off - edge prerequisites unmet");
         do_shutdown(SHUTDOWN_POWEROFF);
         sys_pause();
     } else {
@@ -1623,14 +1628,14 @@ fn kybernet_run() {
     # entering the event loop — qemu's `-no-reboot` then terminates
     # the VM cleanly and the test script asserts on the marker set.
     if (kybernet_harness_requested() == 1) {
-        kmsg("phase 9: harness done — shutting down clean");
-        klog("harness done — shutting down clean");
+        kmsg("phase 9: harness done - shutting down clean");
+        klog("harness done - shutting down clean");
         do_shutdown(SHUTDOWN_POWEROFF);
         return 0;
     }
 
-    kmsg("phase 9: ready — entering event loop");
-    klog("ready — entering event loop");
+    kmsg("phase 9: ready - entering event loop");
+    klog("ready - entering event loop");
 
     # 1.4.2 reactor gate — see kybernet_harness_loop_requested(). In loop
     # mode the epoll timeout is bounded so the deadline is actually checked
@@ -1642,7 +1647,7 @@ fn kybernet_run() {
     if (g_loop_harness == 1) {
         loop_deadline = monotonic_ms() + 5000;
         ep_timeout = 250;
-        klog("harness: reactor mode — 5s bounded loop");
+        klog("harness: reactor mode - 5s bounded loop");
     }
 
     # Phase 9: Event loop
@@ -1654,7 +1659,7 @@ fn kybernet_run() {
             store8(wbuf + wlen, 0);
             klog2("harness: reactor wakeups=", wbuf);
             kmsg("phase 9: harness reactor done");
-            klog("harness done — shutting down clean");
+            klog("harness done - shutting down clean");
             do_shutdown(SHUTDOWN_POWEROFF);
             return 0;
         }
@@ -1682,7 +1687,7 @@ fn kybernet_run() {
                     # (PID 1 must NEVER return cleanly). Same class as
                     # 0.95.0's PID-1-exit-path fix; this case was
                     # missed at the time.
-                    klog("WARNING: unknown epoll token — ignoring");
+                    klog("WARNING: unknown epoll token - ignoring");
                 }
             }
         }

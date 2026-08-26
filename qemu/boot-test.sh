@@ -698,7 +698,7 @@ fi
 # left STATE_STARTING and its own authenticated READY=1 is what promotes it.
 # Matching the PROMOTION line rather than the observation line is what makes
 # this prove a state transition instead of a log statement.
-if echo "$LOOP_OUT" | grep -aqF "notify: READY — service is now running: kyb-notify"; then
+if echo "$LOOP_OUT" | grep -aqF "notify: READY - service is now running: kyb-notify"; then
     echo "  OK: READY promoted a type=notify service from STARTING to RUNNING"
 elif echo "$LOOP_OUT" | grep -aqF "notify: ready: kyb-notify"; then
     echo "  FAIL: READY was logged but did NOT promote the service — is the type notify?"
@@ -714,7 +714,13 @@ fi
 #    docs show — silently LOST the readiness notification. The fixture sends
 #    both a plain READY and a STATUS-then-READY datagram; two accepted READY
 #    lines proves the multiline scan works.
-if [ "$(echo "$LOOP_OUT" | grep -acF "notify: ready: kyb-notify")" -ge 2 ]; then
+# ⚠ COUNT BOTH FORMS. The fixture sends two READY datagrams: a plain one and a
+# STATUS-then-READY one. The FIRST promotes the service and logs the promotion
+# line; the second finds it already RUNNING and logs the observation line,
+# because init_notify_ready is idempotent. Counting only the observation string
+# therefore sees 1, not 2 — and would fail on correct behaviour.
+_ready_n=$(echo "$LOOP_OUT" | grep -acE "notify: (READY - service is now running|ready): kyb-notify" || true)
+if [ "$_ready_n" -ge 2 ]; then
     echo "  OK: READY found after a STATUS line (multiline scan)"
 else
     echo "  FAIL: only one READY seen — the STATUS-then-READY datagram lost its READY"

@@ -7,6 +7,123 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.6.8] — 2026-08-26
+
+**sd_notify READY and WATCHDOG are honoured, not merely observed.**
+argonaut 1.13.5 → **1.13.7**.
+
+### Changed — READY=1 now transitions a service, and WATCHDOG=1 refreshes a deadline
+
+1.6.3 built the whole substrate — SO_PASSCRED authentication, pid → service
+attribution, a zero-allocation line scanner, five harness assertions — and then had
+to log the verbs and discard them, because argonaut had nowhere for them to land.
+`init_start_simple` set `STATE_RUNNING` synchronously before returning, so **no
+service was ever awaiting a notification.**
+
+argonaut 1.13.6/1.13.7 added `SVC_NOTIFY`, `last_notify` and `watchdog_ms`. So:
+
+- `READY=1` calls `init_notify_ready`, which promotes a `"type": "notify"` service
+  from STARTING to RUNNING. It is idempotent and **one-way** — a compromised
+  service cannot declare itself un-ready and cascade restarts through everything
+  downstream. A `simple` service sending READY gets 0 back, which is normal rather
+  than an error: it is just being polite.
+- `WATCHDOG=1` calls `init_notify_watchdog`, which refreshes `last_notify` and
+  **nothing else**.
+
+⚠ **`last_health_check` remains untouchable by any ping, and that is the point.**
+It means "a probe argonaut RAN and OBSERVED passing"; `last_notify` means "the
+service SAID it was alive". Letting a self-report satisfy the health deadline would
+let a wedged service silence a failure that was actually observed — and
+authentication does not cure that, since SCM_CREDENTIALS proves the ping came from
+the service, not that the service is honest about its own health.
+
+`MAINPID=` is still parsed, logged and discarded: honouring it needs a bounded parse
+(`str_to_int` accepts a leading `-`, so `MAINPID=-1` yields -1, and `process_kill`
+has no internal `pid > 0` guard — from PID 1 that is `kill(-1, SIGKILL)`) plus proof
+the pid is in the service's own cgroup. Roadmapped rather than half-done.
+
+### Added — `watchdog_ms`, rejected rather than clamped
+
+A per-service sd_notify watchdog deadline, independent of `health_check`. Before
+this, the runtime watchdog arm was gated entirely on a health check existing, so
+most services had no watchdog at all and `WATCHDOG=1` had nothing to refresh.
+
+Bounded 100 ms … 1 hour and **refused** outside that range, not clamped. A watchdog
+is a kill decision: too small and a healthy service is killed for not pinging fast
+enough, too large and it is not a watchdog. Silently clamping a typo would hand an
+operator a board that kills its own services on a schedule they never wrote — the
+same reasoning as the Argon2 parameter bounds at 1.5.9 (rule 25). 0 or absent means
+no notify watchdog, preserving pre-1.6.8 behaviour exactly.
+
+`"type": "notify"` needed no parser change: argonaut extended `service_type_parse`,
+so kybernet picked it up for free.
+
+### Fixed — the benchmark gate demanded speedups the machine happened to provide
+
+The gate flagged **eleven** regressions on this release, several with IDENTICAL raw
+values — `alloc(4 sizes burst): 38 -> 38 ns/op (+15%)`. Not one lived in a file the
+release touched. Two separate defects, both in the gate:
+
+**1. Normalisation ran in both directions when it should only run in one.** It exists
+(rule 6) so the gate survives a BUSY machine: when the box is slower everything is
+slower, and raw comparison would flag dozens of untouched primitives. But an
+unclamped ratio also works in reverse — the box quietened, `_calibration` fell
+128 → 113, expectations dropped ~12%, and anything that did not speed up
+proportionally was called a regression. **The scale may only forgive slowness, never
+demand speedup**; it is clamped at 1000 now, so a faster box simply holds code to its
+previous absolute figure.
+
+**2. One reference cannot predict benchmarks with different bottlenecks.**
+`_calibration` is pure ALU in L1; syscall-bound work is dominated by kernel entry and
+the host's mitigations. They do not accelerate together. `getpid` is now a second
+reference for the syscall-bound set (`getuid`, `is_root`, `drop_caps`,
+`set_no_new_privs`, `secure_pre_exec`, the epoll/timer trio) — the cheapest real
+syscall, so it tracks entry/exit cost and nothing else. This closes the roadmap item
+filed at 1.6.1.
+
+Together: 11 flagged → 1.
+
+### Known — `is_mounted` really is ~13% slower, and it is layout, not logic
+
+⚠ **Recorded rather than dismissed, because it is real.** Paired samples from a clean
+worktree at the 1.6.7 tag versus this tree, same box, back to back:
+
+```
+1.6.7:  4302, 4061, 4029 ns/op
+1.6.8:  4548, 4547, 4926, 4589 ns/op        (~+12.6%)
+```
+
+`mount.cyr` is untouched by this release. The cause is almost certainly layout: this
+release added ~50 lines to `notify.cyr`, a helper to `svc_config.cyr`, and — most
+relevantly — rewrote **52 log string literals** from UTF-8 em-dashes to ASCII, which
+shrinks each by two bytes and shifts `.rodata` for everything after it. `is_mounted`
+scans a 2 KiB table and is the most cache-sensitive benchmark in the suite.
+
+**No product impact:** kybernet's own boot span is 166 ms against 167 ms at 1.6.7 —
+the `KYB_MS` metric that exists precisely because microbenchmarks report properties of
+the binary and the machine rather than of the code (rule 37).
+
+I first leaned toward calling this bimodal noise, because the recorded history does
+oscillate (3941 / 4479 / 4479 / 3942 / 4547) on unchanged code. The paired test
+refuted that: the baseline tree is consistently ~4130 and this one consistently
+~4650. Two modes exist AND the release moved between them. Roadmapped, because a
+benchmark that has now needed three interventions — it read the host's real mount
+table at 1.6.1 (+641% on a runner), got a fixed 2 KiB table, and is still the one
+that moves — is telling us something about its design.
+
+### Changed — the harness now asserts a STATE TRANSITION, not a log line
+
+`kyb-notify` is `"type": "notify"` with `watchdog_ms: 30000`, so it is left
+STARTING and its own authenticated READY=1 is what promotes it.
+
+⚠ The assertion matches the PROMOTION string, with an explicit middle arm: if the
+old observation line appears WITHOUT the promotion, that is a **failure**. Matching
+the old string would have passed against a completely broken feature — which is not
+hypothetical. **argonaut 1.13.6 shipped `SVC_NOTIFY` with no dispatcher arm routing
+to it, so every notify service was marked STATE_FAILED with "unknown svc type", and
+this assertion is what caught it.** argonaut's own test had simulated the start path
+by setting the state directly, so 22 green assertions said the feature worked.
+
 ## [1.6.7] — 2026-08-26
 
 **A config key that mis-sized a watchdog, and a dep bump that made a test fail correctly.**

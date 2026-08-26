@@ -47,36 +47,15 @@ of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into
           `default_services(BOOT_DESKTOP)`, so making it depend on a new `agnos-init`
           needs either an argonaut change or a config that replaces the default set.
 
-- [ ] **Make READY=1 and WATCHDOG=1 mean something (argonaut work + a user-cut tag).**
-      1.6.3 delivered the substrate: datagrams are authenticated via SO_PASSCRED +
-      SCM_CREDENTIALS, attributed pid -> service, parsed by a zero-allocation line
-      scanner, and gated by five harness assertions in the reactor pass. What it could
-      NOT deliver, and why:
-        - **READY=1 cannot change managed state.** `init_start_simple` sets
-          `STATE_RUNNING` synchronously before returning (argonaut `init.cyr:466`) and
-          `enum ServiceType` has no notify type, so no service is ever left awaiting a
-          notification. Needs a `SVC_NOTIFY` type (or a readiness field) so a service can
-          be started and left STARTING until it reports in. Note `init_service_ready` is a
-          read-only predicate over `_dep_satisfied` — it marks nothing, and the previous
-          version of this entry was wrong to name it as the sink.
-        - **WATCHDOG=1 has nothing safe to refresh.** The only refreshable deadline is
-          `managed_svc_last_hc`, which already means "the last health check PASSED".
-          Refreshing it on a self-reported ping lets a wedged service silence a probe
-          kybernet actually ran and saw fail — a safety inversion that authentication does
-          not cure. Needs a separate `last_notify` field on ManagedService AND a watchdog
-          interval on ServiceDefinition independent of `health_check`, since today the
-          runtime watchdog arm is entirely gated on `svc_def_health_check(sd) != 0` (so
-          with no health_check there is no watchdog at all).
-        - **MAINPID= cannot be honoured safely.** `str_to_int` honours a leading '-' and
-          skips non-digits (`MAINPID=-1` -> -1), and `process_kill` has no internal
-          `pid > 0` guard, so from PID 1 that is `kill(-1, SIGKILL)`. Needs a bounded
-          parse (rule 25's shape) plus proof the pid is in the service's own cgroup.
-      ⚠ Do NOT route this through `init_notify_bind`. Verified at 1.13.3: it mkdirs
-      `/run/argonaut` regardless of the path argument, never sets FD_CLOEXEC (so the
-      socket leaks into every forked service, letting any service read every other
-      service's notifications), and arms argonaut's own drain-and-discard loop in
-      `init_poll_health`, which would then race kybernet's reactor for a DGRAM queue that
-      delivers each datagram exactly once. kybernet keeps its own socket.
+- [ ] **`MAINPID=` is still parsed, logged and discarded.** The last unhonoured
+      sd_notify verb, and the one that cannot be done safely by parsing alone.
+      `str_to_int` honours a leading `-` and silently skips non-digits, so
+      `MAINPID=-1` yields -1, and `process_kill` has no internal `pid > 0` guard —
+      from PID 1 that is `kill(-1, SIGKILL)`, i.e. every process on the machine.
+      Needs a bounded parse (rule 25's shape) AND proof the claimed pid is in the
+      sending service's own cgroup, because an authenticated sender can still name
+      somebody else's pid. The cgroup half is kybernet's to write:
+      `/sys/fs/cgroup/kybernet.slice/<svc>/cgroup.procs` is the membership list.
 - [ ] **Log the orphan-reap count and assert it (kybernet half).** argonaut 1.13.5 now
       returns the reaped pids (`proc_table_reap_orphans_into`) and reconciles the service
       table against them, so the information exists. kybernet still discards it:
@@ -105,14 +84,19 @@ of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into
       implications (an audit log you silently truncate is one an attacker can flush by
       generating noise), so it needs a deliberate answer: a cap with explicit rotation, a
       persist-then-trim, or an accepted bound. Not a mechanical fix.
-- [ ] **The syscall-dominated benchmarks are normalised against the wrong reference.**
-      `bench-history.sh` scales everything by the `_calibration` reference loop, which
-      is pure userspace. The `getpid`/`getuid`/`is_root` rows are syscall-bound, so
-      their cost tracks the host's mitigation settings (KPTI, retpoline, nested virt)
-      and moves independently of the calibration loop — a runner change can flag them
-      as a regression with nothing in kybernet having changed. Fix is a second named
-      scale: record `getpid` as `CALIB_SYS_NAME` and normalise the syscall-heavy set
-      against that. Not yet fired; noted before it does. (Standing rule 37.)
+- [ ] **`is_mounted` is the benchmark that keeps moving, and it is layout-sensitive.**
+      Third intervention now. 1.6.1: it scanned the host's REAL mount table and read
+      +641% on a CI runner; fixed with a 2 KiB synthetic table. 1.6.8: measured
+      ~+12.6% (paired against a clean 1.6.7 worktree, same box: ~4130 vs ~4650 ns)
+      from a release that never touched `mount.cyr` — almost certainly `.rodata`
+      shift, since that release rewrote 52 log literals from UTF-8 to ASCII. It also
+      oscillates between two stable modes on unchanged code. It scans 2 KiB and is
+      the most cache-sensitive benchmark in the suite, so it measures binary layout
+      as much as it measures the function. Either make it layout-insensitive (much
+      smaller working set, or report a median across process restarts) or accept it
+      is not a gateable figure and exempt it with the reason stated. The same
+      question applies to `strlen(52 chars)`, which showed the identical shape at
+      1.6.3 and was never explained.
 - [ ] **`seccomp: basic` is measured against a dynamically linked binary only.**
       The dev box stages Arch's dynamic busybox; CI installs `busybox-static`, whose
       glibc start-up issues `readlinkat("/proc/self/exe")` and `prctl` that the

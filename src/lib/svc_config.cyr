@@ -151,8 +151,8 @@ fn svc_def_from_json(obj) {
     var wd_ms = _cfg_int(obj, "watchdog_ms", 0);
     if (wd_ms != 0) {
         if (wd_ms < 100 || wd_ms > 3600000) {
-            klog2("config: watchdog_ms must be 100..3600000 ms — service REFUSED: ",
-                  str_data(svc_def_name(sd)));
+            klog2("config: watchdog_ms must be 100..3600000 ms - service REFUSED: ",
+              str_data(svc_def_name(sd)));
             kmsg("kybernet: config: watchdog_ms out of range, service refused");
             return 0;
         }

@@ -134,7 +134,7 @@ fn slog_init() {
     # act on it. 1.6.1.
     if (g_log_fd <= 0) {
         g_log_fd = 0;
-        klog("WARNING: /var/log/kybernet.log unopenable — structured logging DISABLED for this boot");
+        klog("WARNING: /var/log/kybernet.log unopenable - structured logging DISABLED for this boot");
         kmsg("kybernet: structured logging disabled, /var/log/kybernet.log unopenable");
         return 0;
     }
