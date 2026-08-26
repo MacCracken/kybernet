@@ -17,7 +17,7 @@ of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into
 
 ---
 
-## v1.6.4 — code that does nothing, and docs that say it does
+## v1.6.5 — code that does nothing, and docs that say it does
 
 - [ ] **Port `agnos-init.sh`'s `setup_directories()` to a kybernet oneshot service.**
       Replaces the deleted phase 6b (1.6.2), and it is the *real* form of the need
@@ -99,15 +99,6 @@ of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into
       legitimate message behind it. kybernet wrote its own stricter receive at 1.6.3
       rather than wait for this; fixing it upstream would let the two converge. Rule 29's
       shape, in a dep.
-- [ ] **`log_to_console` is parsed, stored, copied on reload, and never acted upon.**
-      `config_log_console` has two readers in the tree: its definition and the reload
-      copy. `klog`/`klog2` write to `STDERR_FD` unconditionally. The 1.5.0 comment says
-      the value "was ignored entirely" — only the *spelling* was fixed.
-- [ ] **`boot_timeout_ms` and every per-stage `timeout_ms` are parsed and never
-      enforced.** No reader of `config_boot_timeout` outside the reload copy; `step + 24`
-      is never loaded. A boot stage can hang indefinitely with its timeout sitting unread
-      beside it. Enforcing it under PID 1 needs a real mechanism — the reactor is not
-      running at phase 7 — so at minimum say the values are advisory.
 - [ ] **Orphan reaping is correct but completely invisible, and unattributable.**
       argonaut's `proc_table_reap_orphans()` does `waitpid(-1, WNOHANG)` in a loop and
       **discards the count it computes**; `init_reap_services` calls it and ignores the
@@ -117,12 +108,6 @@ of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into
       number already exists; it just needs returning and logging. An argonaut change
       plus a consumer bump, and then the `kyb-orphan` fixture (added at 1.6.1) becomes
       assertable instead of merely exercised.
-- [ ] **Dead chains to delete or wire.** `cgroup_setup_agent` (zero references anywhere)
-      → `move_to_cgroup` + `cgroup_apply_resource_limits`, all superseded at 1.5.5 by the
-      child-side `_kyb_join_cgroup`; `any_failures` (`reaper.cyr:69`);
-      `edge_boot_elapsed_ms` / `edge_boot_verity_ok` / `edge_boot_pcr_mismatches` (zero
-      callers, and two comments claim "main reads these … in the boot summary" — there is
-      no boot summary); `edge_hash_device` / `edge_luks_device` / `edge_expected_pcrs`.
 - [ ] **`sandbox_from_ruleset` and `_ll_access_to_kernel` are benchmark-only.** Verified at
       1.6.4 while correcting CLAUDE.md rule 9: `_ll_access_to_kernel` has exactly one caller
       (`sandbox.cyr:254`, inside `sandbox_from_ruleset`), and `sandbox_from_ruleset`'s only
@@ -142,8 +127,14 @@ of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into
 - [ ] **`health_check.interval_ms` does not control polling frequency.** The key is
       parsed onto the `HealthCheck` struct, but the reactor polls on its own fixed timer,
       so a service asking for a 5 s check gets the global interval.
-- [ ] **Unbounded arena growth on two reactor hot paths** — the 1.4.2 MEDIUM-7 class,
-      reopened. In the one arena rule 8 says PID 1 never resets.
+- [ ] **`audit_log_record` RETAINS 240 bytes per crash event (argonaut).** Found while
+      fixing the arena leaks at 1.6.5 and deliberately left open: unlike the others this is
+      not un-freeable arena, it is live reachable growth — a probe ended with
+      `audit_log_len == 1006`, one entry per event, never trimmed. A crash-looping service
+      appends forever. Trimming an audit chain is a RETENTION-POLICY decision with security
+      implications (an audit log you silently truncate is one an attacker can flush by
+      generating noise), so it needs a deliberate answer: a cap with explicit rotation, a
+      persist-then-trim, or an accepted bound. Not a mechanical fix.
 - [ ] **Landlock has no harness fixture** — standing rule 27's own criterion, unmet.
       `"landlock"` reaches `landlock_restrict_self` through `kyb_pre_exec`, but no
       fixture sets an explicit rule list and nothing asserts from inside the child

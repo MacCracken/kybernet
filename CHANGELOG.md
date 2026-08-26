@@ -7,6 +7,55 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.6.5] — 2026-08-26
+
+**A per-SIGCHLD arena leak that needed no socket, no credentials and no config.**
+Suite 667 assertions. Harness 53 properties. No dep bump — argonaut stays 1.13.3
+here; its own 1.13.4 (two matching per-tick leaks) needs a tag before kybernet
+can consume it.
+
+### Fixed — `reap_zombies` leaked 152 bytes on EVERY SIGCHLD
+
+`var results = vec_new();` sat BEFORE the waitpid loop, so a SIGCHLD that reaped
+nothing still cost a full vec — a 24-byte header plus a 128-byte 16-slot backing
+array. In the one arena PID 1 never resets (standing rule 8) that is permanent
+growth, and `alloc` mmaps a fresh 256 MB chunk on overflow, so the terminal state
+on real hardware is host OOM with an unkillable PID 1.
+
+**It is the most reachable leak found so far.** The 1.6.3 notify leaks at least
+required reaching a 0700 socket. This one needs no socket, no credentials and no
+configuration: any process that forks a child and lets it die delivers a SIGCHLD
+to PID 1, and a double-fork reparents grandchildren here forever.
+
+The idle path now returns a memoized empty vec and allocates lazily — the exact
+treatment argonaut's `proc_table_reap` already carried, commented "The idle path
+now allocates nothing." kybernet's reaper was the same shape without it.
+
+Measured: **152 bytes total across 2000 calls**, down from 304,000. Idle cost is
+now zero; 168 bytes only when a process is genuinely reaped.
+
+⚠ The returned empty vec is SHARED. It is never mutated and callers must not
+mutate it; `reap_and_log` only reads it.
+
+### How it was found, and why nothing caught it
+
+By measurement, not reading — a probe diffing `alloc_used()` across 2000 calls.
+Neither the 667-test suite nor the 53-property harness could see it: fixture-scale
+traffic is a handful of SIGCHLDs, and 152 bytes each is invisible there. That is
+the same blind spot that hid both 1.6.3 leaks.
+
+Three further per-tick leaks were confirmed in argonaut by the same method and
+fixed there (see argonaut 1.13.4): `init_check_watchdog` at 304 B per 10 s tick
+and `init_poll_health` per 30 s tick. Combined with this one, roughly **1.7 MB/day
+of permanent growth on a completely idle board.**
+
+### Deliberately not fixed — `audit_log_record` retains
+
+240 bytes per crash event, and it **retains** rather than merely leaking arena:
+a probe ended with `audit_log_len == 1006`, i.e. live reachable data-structure
+growth. Trimming an audit chain is a retention-policy decision with security
+implications, not a mechanical fix. Roadmapped rather than decided in passing.
+
 ## [1.6.4] — 2026-08-26
 
 **Config keys that were parsed and never consulted, and code with no callers.**

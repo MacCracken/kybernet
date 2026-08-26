@@ -7,10 +7,40 @@
 # Reaped process info
 struct ReapedProcess { pid; exit_code; }
 
+# Memoized empty vec for the idle path.
+#
+# ⚠ NEVER MUTATE THE RETURNED VEC. Every idle reap hands back this same
+# object; a vec_push into it would be visible to every later caller. Callers
+# only ever read it (vec_len / vec_get), which is what makes sharing safe.
+var _reap_empty = 0;
+
+fn _reap_empty_vec() {
+    if (_reap_empty == 0) { _reap_empty = vec_new(); }
+    return _reap_empty;
+}
+
 # Reap all zombie children (non-blocking).
 # Returns a vec of ReapedProcess pointers.
+#
+# ⚠ THE RESULTS VEC IS ALLOCATED LAZILY, AND THAT IS A LEAK FIX, NOT A
+# MICRO-OPTIMISATION. Until 1.6.5 this opened with an unconditional
+# `var results = vec_new();` BEFORE the waitpid loop — so every SIGCHLD cost a
+# full vec (measured: **152 bytes**, a 24-byte header plus a 128-byte 16-slot
+# backing array) even when it reaped nothing at all. In the one arena PID 1
+# never resets (rule 8) that is permanent growth.
+#
+# It is also the most reachable of the three leaks 1.6.5 fixed: driving it
+# needs no socket, no credentials and no configuration — any process that forks
+# a child and lets it die delivers a SIGCHLD to PID 1, and a double-fork
+# reparents grandchildren here forever. The notify leaks at 1.6.3 at least
+# required reaching a 0700 socket.
+#
+# argonaut's `proc_table_reap` already had exactly this treatment
+# (`_reap_empty_vec` + lazy `exited`, "The idle path now allocates nothing.");
+# kybernet's reaper was the same shape without it. Measured after: 0 B/iter
+# idle, 168 B only when a process is genuinely reaped.
 fn reap_zombies() {
-    var results = vec_new();
+    var results = 0;
     # sys_waitpid writes a 4-byte int (Linux `int wstatus`) to the
     # status pointer. The pre-1.1.5 `status_buf[1]` was a 1-byte
     # stack array — the kernel wrote 3 bytes past it, corrupting
@@ -28,11 +58,13 @@ fn reap_zombies() {
         } elif (WIFSIGNALED(status) == 1) {
             code = 128 + WTERMSIG(status);
         }
+        if (results == 0) { results = vec_new(); }
         var rp = alloc(16);
         store64(rp, pid);
         store64(rp + 8, code);
         vec_push(results, rp);
     }
+    if (results == 0) { return _reap_empty_vec(); }
     return results;
 }
 
