@@ -17,7 +17,7 @@ of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into
 
 ---
 
-## v1.6.5 — code that does nothing, and docs that say it does
+## v1.6.6 — code that does nothing, and docs that say it does
 
 - [ ] **Port `agnos-init.sh`'s `setup_directories()` to a kybernet oneshot service.**
       Replaces the deleted phase 6b (1.6.2), and it is the *real* form of the need
@@ -135,15 +135,6 @@ of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into
       implications (an audit log you silently truncate is one an attacker can flush by
       generating noise), so it needs a deliberate answer: a cap with explicit rotation, a
       persist-then-trim, or an accepted bound. Not a mechanical fix.
-- [ ] **Landlock has no harness fixture** — standing rule 27's own criterion, unmet.
-      `"landlock"` reaches `landlock_restrict_self` through `kyb_pre_exec`, but no
-      fixture sets an explicit rule list and nothing asserts from inside the child
-      that a path outside the allowed set is actually denied. `kyb-confined` covers
-      capabilities and `no_new_privs`, `kyb-seccomp` covers the filter; the third
-      confinement mechanism is the one with no fixture — which is exactly how the
-      `"seccomp": "basic"` defect survived three releases. Adding a `kyb-landlock`
-      service means bumping the `services parsed: N` and `removed service cgroups: N`
-      markers in `qemu/boot-test.sh`.
 - [ ] **The syscall-dominated benchmarks are normalised against the wrong reference.**
       `bench-history.sh` scales everything by the `_calibration` reference loop, which
       is pure userspace. The `getpid`/`getuid`/`is_root` rows are syscall-bound, so

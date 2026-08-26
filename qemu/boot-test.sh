@@ -24,7 +24,7 @@
 #   "started: kyb-live"              — a LIVE service, so a cgroup is really
 #                                      created and the pid moved into it
 #                                      (a completed oneshot correctly gets none)
-#   "removed service cgroups: 10"    — the shutdown sweep killed and rmdir'd them
+#   "removed service cgroups: 11"    — the shutdown sweep killed and rmdir'd them
 #
 #     ⚠ NINE of NINE. This said EIGHT from 1.5.3 to 1.6.1, with a comment
 #     arguing the shortfall was correct: kyb-orphan backgrounds a child, this
@@ -282,12 +282,12 @@ for marker in \
     "kybernet: services started" \
     "kybernet: harness done" \
     "kybernet: shutdown" \
-    "kybernet: config: services parsed: 10" \
+    "kybernet: config: services parsed: 11" \
     "kybernet:   completed (oneshot): kyb-dep" \
     "kybernet:   completed (oneshot): kyb-svc" \
     "kybernet: boot: skipped (not applicable): Start udev device manager" \
     "kybernet:   started: kyb-live" \
-    "kybernet: removed service cgroups: 10"; do
+    "kybernet: removed service cgroups: 11"; do
     if echo "$RUNTIME_OUT" | grep -aqF "$marker"; then
         echo "  OK: $marker"
     else
@@ -349,6 +349,46 @@ else
     echo "$RUNTIME_OUT" | grep -aiE 'seccomp' | head -3 || true
     fail=1
 fi
+# --- Landlock (1.6.6) --------------------------------------------------------
+#
+# ⚠ THE THIRD CONFINEMENT MECHANISM, AND THE LAST ONE WITHOUT A FIXTURE.
+# kyb-confined covers capabilities and no_new_privs; kyb-seccomp covers the
+# filter; `"landlock"` reached landlock_restrict_self through kyb_pre_exec with
+# NOTHING asserting it did anything. That is precisely the shape in which
+# `"seccomp": "basic"` shipped for three releases killing every service it was
+# applied to (standing rule 27).
+#
+# ⚠ THE ASSERTION IS THE DENIAL, NOT THE SURVIVAL. kyb-landlock is granted
+# read-exec on /bin ONLY. It then reads a path inside the rule set and a path
+# outside it, reporting both from INSIDE the confined child. "The service ran"
+# proves nothing — an unconfined service also runs. Requiring BOTH outcomes is
+# what makes this falsifiable: if Landlock silently did nothing, the outside
+# read would succeed and this fails; if the ruleset were wrong in the other
+# direction, the inside read would fail and this also fails.
+#
+# Note rule 29: sandbox_apply returns Ok(1) when the kernel has no Landlock
+# (pre-5.13). The fixture sets "landlock_optional": false, so on such a kernel
+# kyb_pre_exec fails the service closed rather than starting it unconfined —
+# which surfaces here as the INSIDE read being absent, not as a false pass.
+if echo "$RUNTIME_OUT" | grep -aqF "LL-OUTSIDE=DENIED"; then
+    echo "  OK: landlock denied a path outside the rule set"
+elif echo "$RUNTIME_OUT" | grep -aqF "LL-OUTSIDE=ALLOWED"; then
+    echo "  FAIL: landlock did NOT deny a path outside its rule set — the sandbox is inert"
+    fail=1
+else
+    echo "  FAIL: kyb-landlock produced no LL-OUTSIDE line — it never ran, or died"
+    echo "$RUNTIME_OUT" | grep -aiE 'landlock|LL-' | head -3 || true
+    fail=1
+fi
+
+if echo "$RUNTIME_OUT" | grep -aqF "LL-INSIDE=ALLOWED"; then
+    echo "  OK: landlock still permitted a path inside the rule set"
+else
+    echo "  FAIL: landlock denied a path it was told to allow (or the child never ran)"
+    echo "$RUNTIME_OUT" | grep -aiE 'LL-' | head -3 || true
+    fail=1
+fi
+
 if echo "$RUNTIME_OUT" | grep -qE '^Seccomp_filters:[[:space:]]*[1-9]'; then
     echo "  OK: kyb-seccomp has at least one filter installed"
 else

@@ -1,7 +1,7 @@
 commit	08e300487dd79db961085a0219aff7f7746638df	sigil	https://github.com/MacCracken/sigil.git	3.12.10
 commit	a09383a32a45353e9741e2871048a7ef7d08266f	agnostik	https://github.com/MacCracken/agnostik.git	1.5.1
 commit	f101d29348ecb0ab7d912c1c578f2e835f68cfbb	libro	https://github.com/MacCracken/libro.git	2.8.12
-commit	f850b2eb0b591ccfad557ee816e965454f29a0fb	argonaut	https://github.com/MacCracken/argonaut.git	1.13.3
+commit	b09fae6f39ba4e621d6fac654a82db36ee6f56cf	argonaut	https://github.com/MacCracken/argonaut.git	1.13.4
 commit	490f8ff5e2914ca6366db5e7a444662e07b9c438	patra	https://github.com/MacCracken/patra.git	1.13.10
 7240760b1260fa06c53c5a139d1a2086fb439e21ac90e53eacd4bf486ac0e9ca  lib/tagged.cyr
 5978751906616997dc497d5ffaa5171c92611c5cb6f6466ada2c6c1dd0b83c79  lib/net.cyr
@@ -23,7 +23,7 @@ c47e903f1950a40cde3bae24a8bdd9171623215c4cbbcbe52e6c60fc7ab31c08  lib/sigil-mlds
 c7b3bf5beebddc082d4fa643a7113deaf26d0fd80dd5cd70ba0e3c21671107d0  lib/fs_win.cyr
 e77b2d5e3744c8f7f2e4bb69710df8888211ca9fb1947cf9408bbc0d66820cd7  lib/freelist.cyr
 a8ae4f1396d23bff31a4c22c53be396b4624dcd763f5a9de81d4933a07beae9e  lib/test.cyr
-71e312db7048f6a426bc9ad8a26e95165408f1c3e3b4f63f1be5c074d8561e93  lib/argonaut_init.cyr
+64060994df9ea60ece474429203ce7ac27f2f805bb534f2f79831400265eddf7  lib/argonaut_init.cyr
 ac55a4ff22d49ccf6c44893be077e1c824825aed845d82c04767f4f87c29d6da  lib/sync_macos.cyr
 585037b71567b54f99d3e2b90565432069fc37e5abe6bdd08d19df2081af7237  lib/sakshi.cyr
 096eabc580c807f3e378fbe56058780a28cdf95b9c70b44672bca0a71cf969f6  lib/ct.cyr

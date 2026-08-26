@@ -7,6 +7,72 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.6.6] — 2026-08-26
+
+**The last confinement mechanism with no fixture, and a gate that had been passing by luck.**
+Suite 667 assertions. Harness 53 → 55 properties. argonaut 1.13.3 → **1.13.4**.
+
+### Changed — argonaut 1.13.4
+
+Picks up two per-tick arena leaks fixed there: `init_check_watchdog` (304 bytes per
+10 s watchdog tick — 2.63 MB/day on a completely idle board) and `init_poll_health`
+(a vec per 30 s health tick). Both now iterate their map in place and allocate
+lazily; measured at 152 bytes total across 2000 calls each, i.e. one memoized vec
+and nothing after. Verified present in the resolved lib rather than assumed from
+the tag.
+
+1.13.4 also repairs argonaut's test runner, which had been compiling and running
+**nothing** since 1.13.0 while reporting success — see that CHANGELOG. Every
+argonaut version kybernet has consumed for the last five releases had no test
+coverage behind it.
+
+⚠ Contract note carried across: argonaut's idle paths now return a SHARED memoized
+empty vec. kybernet only reads it (`vec_len`/`vec_get` in `handle_health_tick` and
+`handle_watchdog_tick`), which is safe; do not mutate a returned result vec.
+
+### Added — `kyb-landlock`, the fixture standing rule 27 required
+
+`grep -rn landlock qemu/` returned **nothing**. `kyb-confined` covered capabilities
+and `no_new_privs`; `kyb-seccomp` covered the filter; the third confinement
+mechanism reached `landlock_restrict_self` through `kyb_pre_exec` with nothing
+asserting it did anything — the exact shape in which `"seccomp": "basic"` shipped
+for three releases killing every service it was applied to.
+
+⚠ **THE ASSERTION IS THE DENIAL, NOT THE SURVIVAL.** The service is granted
+read-exec on `/bin`, `/lib64`, `/usr` and read-write on `/dev`, with `/etc`
+deliberately excluded. It then reads one path inside the rule set and one outside,
+reporting both from INSIDE the confined child. "The service ran" proves nothing —
+an unconfined service also runs. Requiring both outcomes makes it falsifiable in
+both directions: an inert sandbox fails the outside check, a wrong ruleset fails
+the inside one.
+
+It sets `"landlock_optional": false`, so on a pre-5.13 kernel the service fails
+closed rather than starting unconfined — which surfaces as a missing line, not a
+false pass. That is rule 29's middle arm, the one that looks like success.
+
+**Getting this wrong was instructive.** The first version granted `/bin` only.
+Landlock is default-deny, so the child could not reach its dynamic loader in
+`/lib64` or open `/dev/console` to report, and failed to start entirely — correctly,
+and loudly, because `landlock_optional` was false.
+
+### Fixed — a cgroup control-case assertion that had been passing by luck
+
+Adding a service to the fixture set broke `LIMIT-unlimited`, and the cause was not
+the new service. `kyb-limited` reads **another service's** cgroup
+(`/sys/fs/cgroup/kybernet.slice/kyb-live/memory.max`) as its unlimited control case,
+and had **no `depends_on`** — so it only ever worked because the wave resolver
+happened to order `kyb-live` first. Adding an unrelated service reshuffled the waves
+and the file was not there yet.
+
+Standing rule 36 — *a gate must not assert the outcome of a race* — green since
+1.5.5 purely on ordering luck. Fixed with an explicit `depends_on: ["kyb-live"]`
+and a comment saying why it is load-bearing, rather than by re-ordering the config
+so the luck holds.
+
+Worth recording the shape: adding a fixture did not cause a bug, it **revealed**
+one. A gate that passes for accidental reasons is indistinguishable from a gate
+that passes for real reasons, right up until something perturbs it.
+
 ## [1.6.5] — 2026-08-26
 
 **A per-SIGCHLD arena leak that needed no socket, no credentials and no config.**

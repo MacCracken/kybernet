@@ -307,7 +307,8 @@ cat > "${INITRAMFS_DIR}/etc/kybernet/config.json" << 'CFGEOF'
     },
     {
       "name": "kyb-limited",
-      "description": "reports its own cgroup limits to the console",
+      "description": "reports its own cgroup limits; depends_on kyb-live because its control case reads kyb-live's cgroup",
+      "depends_on": ["kyb-live"],
       "binary": "/bin/sh",
       "args": ["-c", "C=$(cut -d: -f3 /proc/self/cgroup); D=/sys/fs/cgroup$C; { echo LIMIT-cgroup=$C; echo LIMIT-memmax=$(cat $D/memory.max 2>&1); echo LIMIT-pidsmax=$(cat $D/pids.max 2>&1); echo LIMIT-cpuweight=$(cat $D/cpu.weight 2>&1); echo LIMIT-memhigh=$(cat $D/memory.high 2>&1); echo LIMIT-ctrl=$(cat /sys/fs/cgroup/kybernet.slice/cgroup.subtree_control 2>&1); echo LIMIT-unlimited=$(cat /sys/fs/cgroup/kybernet.slice/kyb-live/memory.max 2>&1); } > /dev/console 2>&1"],
       "type": "oneshot",
@@ -364,6 +365,22 @@ cat > "${INITRAMFS_DIR}/etc/kybernet/config.json" << 'CFGEOF'
       "restart": "never",
       "security": {
         "seccomp": "basic",
+        "no_new_privs": true
+      }
+    },
+    {
+      "name": "kyb-landlock",
+      "description": "granted /bin /lib64 /usr /dev; /etc is deliberately NOT granted",
+      "binary": "/bin/sh",
+      "args": ["-c", "if cat /etc/kybernet/config.json >/dev/null 2>&1; then echo LL-OUTSIDE=ALLOWED > /dev/console; else echo LL-OUTSIDE=DENIED > /dev/console; fi; if cat /bin/busybox >/dev/null 2>&1; then echo LL-INSIDE=ALLOWED > /dev/console; else echo LL-INSIDE=DENIED > /dev/console; fi"],
+      "type": "oneshot",
+      "restart": "never",
+      "security": {
+        "landlock": [ {"path": "/bin", "access": "read-exec"},
+                      {"path": "/lib64", "access": "read-exec"},
+                      {"path": "/usr", "access": "read-exec"},
+                      {"path": "/dev", "access": "read-write"} ],
+        "landlock_optional": false,
         "no_new_privs": true
       }
     },
