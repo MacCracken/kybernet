@@ -17,7 +17,7 @@ of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into
 
 ---
 
-## v1.6.2 — code that does nothing, and docs that say it does
+## v1.6.3 — code that does nothing, and docs that say it does
 
 - [ ] **Port `agnos-init.sh`'s `setup_directories()` to a kybernet oneshot service.**
       Replaces the deleted phase 6b (1.6.2), and it is the *real* form of the need
@@ -47,16 +47,58 @@ of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into
           `default_services(BOOT_DESKTOP)`, so making it depend on a new `agnos-init`
           needs either an argonaut change or a config that replaces the default set.
 
-- [ ] **sd_notify is received, classified, logged, and discarded.** `handle_notify_msg`
-      (`main.cyr:1080-1099`) is five `klog` calls and a `default: return 0`; nothing
-      reaches `g_init`. `READY=1` marks nothing ready, `WATCHDOG=1` refreshes nothing
-      (a correctly pinging service is still killed on schedule), `MAINPID=` is not
-      parsed, and **any process on the box can forge any message** — `notify_read`
-      passes a NULL `src_addr` and the socket never sets `SO_PASSCRED`. argonaut already
-      ships the finished version (`notify_try_recv_authenticated`, `notify_parse`,
-      `init_notify_bind`); all of it has zero kybernet call sites. README and
-      `overview.md` advertise the feature. argonaut deferred its own half of the
-      propagation, so this is a two-repo item.
+- [ ] **Make READY=1 and WATCHDOG=1 mean something (argonaut work + a user-cut tag).**
+      1.6.3 delivered the substrate: datagrams are authenticated via SO_PASSCRED +
+      SCM_CREDENTIALS, attributed pid -> service, parsed by a zero-allocation line
+      scanner, and gated by five harness assertions in the reactor pass. What it could
+      NOT deliver, and why:
+        - **READY=1 cannot change managed state.** `init_start_simple` sets
+          `STATE_RUNNING` synchronously before returning (argonaut `init.cyr:466`) and
+          `enum ServiceType` has no notify type, so no service is ever left awaiting a
+          notification. Needs a `SVC_NOTIFY` type (or a readiness field) so a service can
+          be started and left STARTING until it reports in. Note `init_service_ready` is a
+          read-only predicate over `_dep_satisfied` — it marks nothing, and the previous
+          version of this entry was wrong to name it as the sink.
+        - **WATCHDOG=1 has nothing safe to refresh.** The only refreshable deadline is
+          `managed_svc_last_hc`, which already means "the last health check PASSED".
+          Refreshing it on a self-reported ping lets a wedged service silence a probe
+          kybernet actually ran and saw fail — a safety inversion that authentication does
+          not cure. Needs a separate `last_notify` field on ManagedService AND a watchdog
+          interval on ServiceDefinition independent of `health_check`, since today the
+          runtime watchdog arm is entirely gated on `svc_def_health_check(sd) != 0` (so
+          with no health_check there is no watchdog at all).
+        - **MAINPID= cannot be honoured safely.** `str_to_int` honours a leading '-' and
+          skips non-digits (`MAINPID=-1` -> -1), and `process_kill` has no internal
+          `pid > 0` guard, so from PID 1 that is `kill(-1, SIGKILL)`. Needs a bounded
+          parse (rule 25's shape) plus proof the pid is in the service's own cgroup.
+      ⚠ Do NOT route this through `init_notify_bind`. Verified at 1.13.3: it mkdirs
+      `/run/argonaut` regardless of the path argument, never sets FD_CLOEXEC (so the
+      socket leaks into every forked service, letting any service read every other
+      service's notifications), and arms argonaut's own drain-and-discard loop in
+      `init_poll_health`, which would then race kybernet's reactor for a DGRAM queue that
+      delivers each datagram exactly once. kybernet keeps its own socket.
+- [ ] **A reaped service keeps STATE_RUNNING and a freed pid, so pid reuse can misattribute.**
+      Confirmed during 1.6.3's review, and it is the reason sd_notify attribution is only as
+      good as the service table. `init_reap_services` probes each tracked pid with
+      `waitpid(pid, WNOHANG)` and only clears the entry when that returns `> 0` — but
+      `proc_table_reap_orphans()` and kybernet's own `reap_and_log()` both run
+      `waitpid(-1, WNOHANG)` sweeps afterwards and **discard the pid they reap**. A tracked
+      service that exits between its per-pid probe and either sweep is collected there; the
+      next probe returns `-ECHILD`, which is not `> 0`, so `managed_svc_set_pid(ms, 0)` never
+      runs and the entry stays RUNNING with a dead pid indefinitely (with no `health_check`
+      there is no watchdog to notice). Any process that then recycles that pid is attributed
+      to that service. Fix is in argonaut: have the orphan sweep RETURN the reaped pids so the
+      consumer can clear the matching entry — which is the same change the orphan-reaping
+      roadmap item above already wants for its own reasons. Until then, kybernet could
+      additionally verify cgroup membership before attributing.
+- [ ] **argonaut's notify receive collapses four outcomes into one return value.**
+      `notify_try_recv_authenticated` returns a bare `0` for "no datagram", "truncated
+      ancillary", "no/wrong SCM_CREDENTIALS" and "sender not in the expected set", and
+      **discards the authenticated sender pid** it just validated. Its own drain loop
+      therefore `break`s on a rejection, so one forged datagram per tick starves every
+      legitimate message behind it. kybernet wrote its own stricter receive at 1.6.3
+      rather than wait for this; fixing it upstream would let the two converge. Rule 29's
+      shape, in a dep.
 - [ ] **`log_to_console` is parsed, stored, copied on reload, and never acted upon.**
       `config_log_console` has two readers in the tree: its definition and the reload
       copy. `klog`/`klog2` write to `STDERR_FD` unconditionally. The 1.5.0 comment says
@@ -90,11 +132,6 @@ of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into
       live path is `sandbox_from_config` → `_access_to_flags`, and `_ll_access_to_kernel`
       is reached only from `sandbox_from_ruleset`, which nothing but a benchmark calls.
 
-- [ ] **`notify.cyr` hand-rolls a socket syscall table whose stated fold-out trigger has
-      fired.** The header promises "fold these out when `sys_socket`/`sys_bind`/
-      `sys_recvfrom` land in the stdlib". **They have landed** —
-      `~/.cyrius/lib/syscalls_linux_common.cyr:470`, `:521`, `:531`. This is no longer
-      an upstream wait; it is deletable code.
 - [ ] **A standing `duplicate symbol … conflicting value` warning on every build.**
       argonaut's `enum SocketType { SOCK_STREAM; SOCK_DGRAM; SOCK_SEQPACKET; }` is
       unvalued, so cyrius numbers it from **0** while the kernel and

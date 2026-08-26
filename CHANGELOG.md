@@ -7,6 +7,190 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.6.3] — 2026-08-25
+
+**sd_notify was received, classified, logged and discarded — and leaked memory doing it.**
+Suite 632 → 660 assertions. Harness 45 → 50 properties. No dep change (argonaut stays 1.13.3).
+
+### Fixed — a root-triggerable memory-exhaustion DoS against PID 1
+
+`notify_read` did `var buf = alloc(512);` on **every datagram**, on the reactor hot path,
+in the one arena PID 1 never resets (standing rule 8). Every service runs as root —
+argonaut's `ServiceDefinition` has no uid field — so any service could send datagrams in
+a loop and permanently consume 512 bytes each until the 256 MB arena was gone, after
+which every other allocation in PID 1 begins failing. It also fed an **unchecked** `alloc`
+return straight into `store8(buf + n, 0)`; `alloc` returns 0 on exhaustion, so the failure
+mode was a write through a null pointer in the one process the kernel will not let die.
+
+One static buffer now, allocated once.
+
+⚠ **The first version of this fix did not fix it, and an adversarial review of this
+release caught that before it shipped.** Removing the 512-byte `alloc` from `notify_read`
+left a *new* per-datagram allocation on the same path: `kyb_notify_service_for_pid` called
+`init_service_names(g_init)` for every message, and that is `map_keys` — a `vec_new()` (24-byte
+header + 128-byte backing array) plus a push per service, **every call, nothing freed**.
+Measured at **152 bytes per datagram** with 8 services, and 408 above 16 once the vec grows.
+Same arena, same root-only actor, same terminal failure; 70% smaller. **A reduction is not a
+fix**, and the heading on this section would have been false.
+
+Service names cannot change without a reboot — `reload_config` explicitly refuses service
+changes — so the list is now built **once**, after services start, and reused. The
+per-datagram path allocates **nothing**: receive buffer, status buffer and scan slot are all
+static, and `klog2` does not allocate.
+
+Also guarded `_u64_str` (`src/lib/console_io.cyr`), which did an **unchecked** `alloc(24)` and
+then wrote through it — the identical shape this release removed from `notify_read`, one file
+over, reached by every `klog2` that formats a number. It degrades to `"?"` instead of faulting.
+
+⚠ **And the obvious fix would have made it worse.** Two of three investigation lanes
+recommended routing through argonaut's `notify_parse`. Measured, that allocates **840
+bytes per datagram** (a `NotifyMessage`, a str-keyed hashmap, then two `str_clone`s and up
+to twelve `str_from`s per line, none freed) — replacing a 512-byte leak with an 840-byte
+one while looking like the principled fix. kybernet scans the buffer in place instead,
+with zero allocation.
+
+### Fixed — any service could forge notifications about any other service
+
+`notify_read` called `recvfrom` with a NULL `src_addr` and nothing anywhere set
+`SO_PASSCRED`, so no datagram carried the sender's identity and every message was believed.
+The roadmap described this as "any process on the box can forge any message"; the real
+shape is narrower and worse. `/run/kybernet` is mode 0700, so non-root cannot reach the
+socket at all — but every service runs as root, so the actual exposure was **one
+compromised service forging notifications about a different service**.
+
+Now: `SO_PASSCRED` at bind (failing closed — a socket that cannot authenticate is refused
+rather than silently dropping 100% of legitimate traffic), and a `recvmsg` that requires
+`SCM_CREDENTIALS`. Attribution is pid → service via the kernel-vouched ucred, never the
+`MAINPID=` field inside the message, which is attacker-controlled by definition.
+
+kybernet's receive is deliberately **stricter than argonaut's**: it checks `MSG_CTRUNC`
+and `cmsg_len`, neither of which argonaut checks, and returns distinct codes for *empty*
+versus *rejected*. That distinction is not cosmetic — argonaut's own drain `break`s on
+rejection because it collapses both into `0`, so one forged datagram per tick would starve
+every legitimate message queued behind it.
+
+### Fixed — the parser could not see a readiness notification a real service sends
+
+`knotify_classify` compared at offset 0 and returned the first match. An sd_notify datagram
+is newline-separated `key=value` lines and carries several at once, so:
+
+```
+"STATUS=starting up\nREADY=1\n"  ->  NOTIFY_STATUS   (READY silently lost)
+"READY=10"                        ->  NOTIFY_READY    (a prefix, not the value)
+```
+
+`STATUS=…\nREADY=1` is the ordering systemd's own documentation shows. Replaced with a
+line-oriented, allocation-free scanner comparing whole values, plus
+`knotify_status_sanitize` — `STATUS=` text reached `klog` **raw** before this, so a service
+could emit terminal escapes or embedded newlines that forge additional log lines on PID 1's
+console.
+
+### Changed — WATCHDOG=1 and MAINPID= are refused, deliberately
+
+Both are parsed, attributed and logged; neither changes state.
+
+**WATCHDOG=1** — the only refreshable deadline is `managed_svc_last_hc`, which already
+means *"the last health check PASSED"*. Refreshing it on a self-reported ping would let a
+wedged service silence a probe kybernet actually ran and observed failing. Authentication
+does not cure that: it proves the ping came from the service, not that the service is
+honest about its own health. Needs a separate `last_notify` field in argonaut; roadmapped.
+
+**MAINPID=** — verified by execution: `str_to_int` honours a leading `-` and silently skips
+non-digits (`MAINPID=-1` parses to `-1`), and `process_kill` has no internal `pid > 0`
+guard. From PID 1 that is `kill(-1, SIGKILL)` — every process on the machine.
+
+Also honest about scope: at argonaut 1.13.3 **READY=1 cannot change managed state**.
+`init_start_simple` sets `STATE_RUNNING` synchronously before returning and there is no
+notify service type, so no service is ever left awaiting a notification. `init_service_ready`
+is a read-only predicate that marks nothing — the roadmap entry's framing of it as a
+readiness sink was wrong. READY is an authenticated, attributed, audited observation here.
+
+### Removed — a hand-rolled per-arch syscall table whose fold-out trigger fired five releases ago
+
+`enum SockSysNr` promised *"fold these out when sys_socket/sys_bind/sys_recvfrom land in the
+stdlib"*. All three had landed, arch-dispatched, with byte-identical numbers — which is why
+the duplication never warned. Closes a second roadmap item.
+
+### Added — the harness pass that did not exist (standing rule 27)
+
+`grep -rn notify qemu/` returned **nothing** before this: kybernet bound the socket,
+registered it with epoll and wrote a handler, and no release gate had ever delivered a
+single datagram to it. Identical shape to `"seccomp": "basic"`, which shipped for three
+releases killing every service it was applied to.
+
+`qemu/notify-fixture.cyr` sends four datagrams as a real supervised service so the kernel
+stamps credentials kybernet can verify. Five assertions, in the **reactor** pass.
+
+### Benchmarks — three notify microbenchmarks regressed, explained (standing rule 6)
+
+The gate flagged these and they are real. Recorded here with numbers rather than waved off,
+because rule 6 permits explaining a regression only if the explanation is evidenced.
+
+```
+knotify_classify(READY)    16 ->  71 ns/op
+knotify_classify+value     52 -> 196 ns/op
+notify_status_value(2)     21 -> 155 ns/op
+```
+
+**The old numbers were the cost of being wrong.** The 16 ns classifier was one 7-byte
+`memcmp` at offset 0, and it silently lost `READY=1` whenever a `STATUS=` line preceded it
+— the ordering systemd's own docs show — and accepted `READY=10` as readiness. Any correct
+implementation has to walk lines. These three functions are also compatibility **shims kept
+for the existing assertions**: the production path (`handle_notify_msg`) calls `knotify_scan`
+once per datagram and never calls `strlen` at all.
+
+⚠ **The first two attempts to close the gap made it worse, both times because I reasoned
+instead of measuring.** Recorded so the next person skips the detour:
+
+- Five separate buffer walks (four `knotify_flag` + one `knotify_field`) where the old code
+  did one `memcmp`. Replaced with a single pass.
+- The single pass came out **slower** (138 ns vs 75). Cause, measured:
+  **`memset(48)` costs 67 ns/op; six explicit `store64`s cost 4** — a 16x difference, and
+  roughly half the total call cost on a 7-byte datagram. `memset` is a length-generic loop
+  with call overhead that loses badly at small fixed sizes. Worth knowing repo-wide.
+
+**On `strlen(52 chars)`, which the same runs flagged at +39% and which this release does not
+touch.** Recorded in full because the investigation refuted five plausible explanations and the
+sixth is uncontrollable — the next person should not repeat the first five.
+
+Reproducible at calibration parity (131 vs 132), and NOT an artefact of benchmark order: with a
+cut-down bench running only the calibration loop and `strlen`, an unmodified worktree measures
+**28 ns** and this tree measures **39 ns** on the same box, back to back. Ruled out by direct
+experiment:
+
+| hypothesis | test | result |
+|---|---|---|
+| branch-predictor state | 1M `strlen(7)` calls before `strlen(52)` | 26 vs 26 — refuted |
+| code size | 60 dead functions added to the baseline | 28 — refuted |
+| string literals / rodata | 5 literals added to the baseline | 27 — refuted |
+| a dynamic `strlen` caller | one added to the baseline | 27 — refuted |
+| `bench.cyr` layout | dead function inserted before the notify benches | still 39 — refuted |
+| benchmark order | strlen-only binary, both trees | 28 vs 39 — **order excluded** |
+
+There is exactly one `strlen` in the link set (`lib/string.cyr:6`), so this is not a duplicate
+symbol winning differently. The same machine code runs at 28 in one binary and 39 in another,
+and the binary is 14.6 KB larger — leaving **code placement/alignment of strlen's hot loop** as
+the remaining class. That is a real microarchitectural effect, not a semantic regression, and it
+may flip back on any unrelated future edit.
+
+**No product impact, measured:** kybernet's own boot span is **156 ms against 153 ms at 1.6.1**
+(the harness's `KYB_MS`, which exists precisely because microbenchmarks report properties of the
+machine and the binary rather than of the code — standing rule 37). Left explained rather than
+"fixed", since there is nothing here to fix; if it moves again it should be re-investigated
+rather than assumed to be this.
+
+### Fixed — a diagnostic that could abort the entire harness run
+
+`boot-test.sh` runs under `set -euo pipefail`. Its failure-branch diagnostics are
+`echo … | grep … | head -N` pipelines, and a grep that matches **nothing** exits 1, which
+under `pipefail` + `set -e` **ends the script**. So the first failing assertion whose
+diagnostic had nothing to print killed the run then and there — skipping every remaining
+assertion, the reactor pass, the edge pass and both auth passes, and reporting one failure
+as though it were the only one. That fired for real while adding the assertions above.
+
+Standing rule 38 in a new form: a gate must not be able to suppress a different gate, and a
+*diagnostic* must never be able to end the run. 21 of these existed; all are guarded now.
+
 ## [1.6.2] — 2026-08-25
 
 **Code that does nothing, and docs that say it does.**

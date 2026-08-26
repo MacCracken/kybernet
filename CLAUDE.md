@@ -21,7 +21,7 @@ The helmsman that steers the Argo. Manages system boot, essential mounts, signal
 ```sh
 cyrius deps                                  # Resolve deps from cyrius.cyml into lib/
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet   # Build (DCE recommended)
-cyrius test src/test.cyr                     # Run 632 tests
+cyrius test src/test.cyr                     # Run 660 tests
 cyrius bench src/bench.cyr                   # Run benchmarks
 bash scripts/bench-history.sh                # Record bench history + ≥15% regression gate (MANDATORY on every release)
 cyrius build --aarch64 src/main.cyr build/kybernet-aarch64   # Cross-build aarch64
@@ -37,7 +37,7 @@ kybernet/
 ├── VERSION, CLAUDE.md, README.md, CHANGELOG.md, LICENSE
 ├── src/
 │   ├── main.cyr           # Globals + boot sequence + event loop + harness gate
-│   ├── test.cyr           # Integration tests (632 assertions)
+│   ├── test.cyr           # Integration tests (660 assertions)
 │   ├── bench.cyr          # Microbenchmarks
 │   └── lib/
 │       ├── log.cyr        # klog / klog2 / kmsg / slog (factored out at 1.2.0)
@@ -111,9 +111,9 @@ Do **not** add a `path = "../<dep>"` alongside `git`/`tag`. When `path` resolves
 
 1. Make changes to `src/main.cyr` or `src/lib/*.cyr`
 2. Build: `CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet`
-3. Test: `cyrius test src/test.cyr` (632 tests must pass)
+3. Test: `cyrius test src/test.cyr` (660 tests must pass)
 4. Cross-build: `cyrius build --aarch64 src/main.cyr build/kybernet-aarch64` (verify both arches)
-5. Harness (needs KVM): `bash qemu/boot-test.sh` — 45 properties across four passes: boot markers + budget, the reactor gate, dm-verity verification, the emergency-auth prompt against BOTH credential formats
+5. Harness (needs KVM): `bash qemu/boot-test.sh` — 50 properties across four passes: boot markers + budget, the reactor gate, dm-verity verification, the emergency-auth prompt against BOTH credential formats
 5b. **On a version bump: `bash scripts/bench-history.sh`** — records per-benchmark ns/op to `benches/history.csv` and exits non-zero on a ≥15% regression vs the previous run. Review and explain (or fix) any flagged delta before cutting.
 6. All functions return `Result` or `Option` where failure is possible
 7. Use `str_builder` for path construction
@@ -190,6 +190,12 @@ Apply on every change touching src/:
 
 39. **VERIFY A HOST TOOL IS INSTALLED BY CI, NOT JUST PRESENT ON YOUR BOX — AND PREFER THE ONE THAT CANNOT BE ABSENT.** Rule 33's sibling, found by reproducing the runner (downloading the actual azure kernel, `busybox-static` and `mawk`) rather than reasoning about it. Every one of these failed *silently*: `awk '/^\s*\//'` — `\s` is a GNU extension, so **mawk matches nothing, exit 0, no warning**; `file` and `xxd` were used by gates but installed by nothing (Ubuntu 24.04 split `xxd` out of `vim-common`); `python3-minimal` lacks `json` and `pathlib`; `bsdcpio` vs `cpio` had the dev box and CI building images with different archivers, so they were never byte-comparable. Reach for coreutils and `libc-bin` first — `od` instead of `xxd`/`file` (and check `e_machine`, not just ELF magic, so a cross-built binary cannot pass as native), `ldd`'s exit status instead of `file`'s prose. And **qemu warns rather than fails on a CPU feature it cannot provide**: `-cpu host,+invtsc` silently continuing means sakshi's clock init panics with exit 75 before phase 1, presenting as a wall of missing markers. 1.6.1.
 
+40. **⚠ A DIAGNOSTIC MUST NEVER BE ABLE TO END THE RUN.** `qemu/boot-test.sh` runs under `set -euo pipefail`, and its failure-branch diagnostics are `echo "$OUT" | grep ... | head -N` pipelines. A grep that matches **nothing** exits 1, `pipefail` propagates it, and `set -e` **aborts the script** — so the first failing assertion whose diagnostic had nothing to print ended the run there, skipping every remaining assertion, the reactor pass, the edge pass and both auth passes, and reporting one failure as if it were the only one. It fired for real at 1.6.3 while adding the sd_notify assertions. Every such pipeline ends in `|| true`; 21 needed it. This is rule 38's principle (a gate must not suppress another gate) reached by a different route, and the tell is the same: a run that stops early looks identical to a run that found only one problem.
+
+41. **THE REACTOR IS THE ONLY THING THAT DRAINS THE NOTIFY SOCKET — ASSERT IT IN THE `harness=loop` PASS.** `handle_notify_msg` is called from exactly one place, the event loop's `TOKEN_NOTIFY` arm. `kybernet.harness=1` shuts down at phase 9 **before the reactor starts**, so under that mode a fixture's datagrams sit unread in the socket queue and are discarded at shutdown. Asserting them there produces confident failures for a feature that works — the gate asserting the outcome of code it arranged never to run. That is standing rule 23 restated for a specific subsystem, and 1.6.3 tripped it while implementing 23's own subject. Anything reactor-driven (notify, restarts, health ticks, watchdog) belongs in the loop pass.
+
+42. **⚠ A `oneshot` CANNOT BE ATTRIBUTED AFTER IT EXITS, AND sd_notify ATTRIBUTION IS pid → service AT DRAIN TIME.** The kernel stamps `SCM_CREDENTIALS` with the sender's pid when the datagram is *sent*; kybernet resolves that pid against the live service table when the reactor *drains*. A oneshot runs and exits during phase 8, so by phase 9 its pid is correctly no longer a service and every message it sent is rejected as unattributable. A notify fixture must be long-lived. This is a real property of pid-based attribution rather than a limitation to engineer around — sd_notify is a protocol for long-lived daemons (systemd's own `Type=notify`) — but it must be understood or it reads as an authentication bug. **Count reject REASONS separately** (`nocred` / `baduid` / `unattributed`): a single "rejected: N" cannot distinguish "SO_PASSCRED is not working" from "the sender was not a live service", and those have opposite fixes. 1.6.3 shipped the collapsed counter first and could not diagnose its own harness failure until it was split — the same defect this repo criticises in argonaut's `notify_try_recv_authenticated`, one function away.
+
 
 ## Release gates
 
@@ -199,7 +205,7 @@ Every version bump runs all of these, in this order, and they must all be green 
 rm -rf lib && cyrius deps && cyrius deps --verify   # expect: N verified, 0 failed
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet
 cyrius build --aarch64 src/main.cyr build/kybernet-aarch64
-cyrius test src/test.cyr                            # 632 tests, 0 failed
+cyrius test src/test.cyr                            # 660 tests, 0 failed
 bash scripts/bench-history.sh                       # ≥15% regression gate
 bash qemu/boot-test.sh                              # needs KVM
 ```

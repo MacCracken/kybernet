@@ -1,0 +1,126 @@
+# qemu/notify-fixture.cyr — sd_notify client for the PID-1 harness. (1.6.3)
+#
+# WHY THIS EXISTS
+# ---------------
+# Standing rule 27: if a config key reaches a syscall, a harness fixture must
+# set it and the gate must assert the effect from INSIDE the child. sd_notify
+# had none — `grep -rn notify qemu/` returned nothing before this file — which
+# is exactly how `"seccomp": "basic"` shipped for three releases killing every
+# service it was applied to. The notify path had the same shape: a socket
+# kybernet bound, registered with epoll and wrote a handler for, that no gate
+# had ever delivered a single datagram to.
+#
+# WHY A CYRIUS BINARY AND NOT A SHELL ONE-LINER
+# ---------------------------------------------
+# Sending to a unix DATAGRAM socket needs `nc -u -U`, and busybox's nc is
+# built without unix-socket support in most configurations — including
+# Ubuntu's `busybox-static`, which is what CI installs. Rule 39: a gate must
+# not depend on a host capability nobody checked, and should prefer the thing
+# that cannot be absent. Any machine that can build kybernet can build this.
+#
+# WHAT IT PROVES
+# --------------
+# Run as a normal kybernet service, so the kernel stamps its SCM_CREDENTIALS
+# pid with a pid kybernet knows. That is the whole point: it exercises the
+# authenticated + attributed path end to end, rather than the parser alone
+# (which src/test.cyr covers with 28 assertions).
+#
+# It sends a SEQUENCE of datagrams covering every interesting shape, rather
+# than taking a mode argument — the cyrius stdlib exposes no argc/argv, and one
+# process sending several messages exercises the drain loop's fairness bound
+# as well as the parser.
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fs.cyr"
+include "lib/process.cyr"
+include "lib/chrono.cyr"
+
+# ⚠ Local constant, not the bare `SOCK_DGRAM`. This binary does not link
+# argonaut, so the shadowing that bites src/lib/notify.cyr does not apply
+# here — but naming it locally keeps the two files reading the same way, and
+# means a future copy-paste in either direction stays correct.
+enum FixSock {
+    FIX_AF_UNIX = 1;
+    FIX_SOCK_DGRAM = 2;
+}
+
+var NOTIFY_SOCK = "/run/kybernet/notify";
+
+# ⚠ connect() + write(), NOT sendto(). There is no `sys_sendto` wrapper in the
+# cyrius stdlib (checked), and hand-rolling `syscall(SYS_SENDTO, ...)` would
+# need a per-arch number — the exact thing standing rule 1 forbids and that
+# src/lib/notify.cyr just deleted its own copy of. A unix DGRAM socket can be
+# connected to a peer address and then written to, which uses only wrappers
+# that already exist and is arch-clean for free.
+fn send_msg(path, msg) {
+    var fd = sys_socket(FIX_AF_UNIX, FIX_SOCK_DGRAM, 0);
+    if (fd < 0) { return 0 - 1; }
+
+    # sockaddr_un { sa_family: u16, sun_path: char[108] }
+    var addr[110];
+    memset(&addr, 0, 110);
+    store16(&addr, FIX_AF_UNIX);
+    var plen = strlen(path);
+    if (plen > 107) { plen = 107; }
+    memcpy(&addr + 2, path, plen);
+
+    var c = sys_connect(fd, &addr, 2 + plen + 1);
+    if (c < 0) { sys_close(fd); return 0 - 1; }
+
+    var r = sys_write(fd, msg, strlen(msg));
+    sys_close(fd);
+    if (r < 0) { return 0 - 1; }
+    return 0;
+}
+
+fn main() {
+    var sent = 0;
+
+    # 1. Plain readiness.
+    if (send_msg(NOTIFY_SOCK, "READY=1\n") == 0) { sent = sent + 1; }
+
+    # 2. ⚠ THE REGRESSION CASE. STATUS first, READY second — the ordering
+    #    systemd's own docs show. The pre-1.6.3 prefix classifier matched at
+    #    offset 0 and returned STATUS, silently discarding the readiness
+    #    notification a real service actually sent.
+    if (send_msg(NOTIFY_SOCK, "STATUS=coming up\nREADY=1\n") == 0) { sent = sent + 1; }
+
+    # 3. Control bytes: a service must not be able to emit terminal escapes
+    #    or forge extra log lines on PID 1's console.
+    if (send_msg(NOTIFY_SOCK, "STATUS=esc\x1b[31mred\n") == 0) { sent = sent + 1; }
+
+    # 4. Watchdog — accepted and attributed, deliberately NOT honoured.
+    if (send_msg(NOTIFY_SOCK, "WATCHDOG=1\n") == 0) { sent = sent + 1; }
+
+    if (sent != 4) {
+        println("kyb-notify-fixture: send FAILED");
+        return 1;
+    }
+    println("kyb-notify-fixture: sent 4");
+
+    # ⚠ STAY ALIVE. THIS IS NOT PADDING — IT IS THE POINT.
+    #
+    # Attribution is pid -> service, resolved when the REACTOR drains the
+    # socket, not when the datagram is sent. A `oneshot` fixture exits during
+    # phase 8, long before the reactor starts in phase 9, so by drain time its
+    # pid is no longer a live service and every message it sent is correctly
+    # rejected as unattributable. The first version of this fixture was a
+    # oneshot and produced exactly that: rejected-unattributed=4, with
+    # rejected-nocred=0 proving the credentials themselves were fine.
+    #
+    # This is a real property of pid-based attribution, not a workaround: a
+    # process that has exited cannot be attributed. It costs nothing in
+    # practice because sd_notify is a protocol for long-lived daemons —
+    # systemd's own Type=notify is for services that keep running — but the
+    # fixture has to be one of those to exercise the path at all.
+    #
+    # Sleeps well past the reactor pass's 5 s window; kybernet SIGTERMs it at
+    # shutdown, which is also how the graceful-stop path gets exercised.
+    sleep_ms(30000);
+    return 0;
+}

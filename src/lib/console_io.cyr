@@ -15,6 +15,14 @@
 # a NUL, and every cstr logging path here calls strlen.
 fn _u64_str(n) {
     var b = alloc(24);
+    # ⚠ CHECKED. `alloc` returns 0 on exhaustion (alloc.cyr:188/235), and the
+    # next two statements write through it — in PID 1 a null store is a kernel
+    # panic, not an error return. This is the identical unchecked-alloc shape
+    # 1.6.3 removed from `notify_read`, one file over, and it is reached from
+    # every klog2 that formats a number (boot stages, the cgroup teardown
+    # count, the notify tallies). Degrade to a literal rather than fault: a log
+    # line that says "?" is strictly better than a board that dies printing it.
+    if (b == 0) { return "?"; }
     var l = fmt_int_buf(n, b);
     store8(b + l, 0);
     return b;

@@ -252,6 +252,22 @@ fi
 # missing busybox is now fatal above, so the guard was provably always
 # true — and while it stood, no busybox meant no /etc/kybernet directory
 # and an abort 200 lines later blaming the edge config.
+# ⚠ Rule 27's fixture for sd_notify. Before 1.6.3 `grep -rn notify qemu/`
+# returned NOTHING: kybernet bound the socket, registered it with epoll and
+# wrote a handler, and no gate had ever delivered a single datagram to it.
+# That is the identical shape to `"seccomp": "basic"`, which shipped for three
+# releases killing every service it touched. Built here rather than shipped as
+# a shell one-liner because sending to a unix DGRAM socket needs `nc -u -U`,
+# which Ubuntu's busybox-static does not provide (rule 39).
+NOTIFY_FIX_BIN="${PROJECT_DIR}/build/notify-fixture"
+if ! (cd "$PROJECT_DIR" && cyrius build qemu/notify-fixture.cyr "$NOTIFY_FIX_BIN" >/dev/null); then
+    echo "  ERROR: could not build qemu/notify-fixture.cyr (compiler output above)"
+    exit 1
+fi
+cp "$NOTIFY_FIX_BIN" "${INITRAMFS_DIR}/usr/bin/kyb-notify-fixture"
+chmod +x "${INITRAMFS_DIR}/usr/bin/kyb-notify-fixture"
+echo "  staged kyb-notify-fixture (sd_notify client)"
+
 mkdir -p "${INITRAMFS_DIR}/etc/kybernet"
 cat > "${INITRAMFS_DIR}/etc/kybernet/config.json" << 'CFGEOF'
 {
@@ -350,6 +366,13 @@ cat > "${INITRAMFS_DIR}/etc/kybernet/config.json" << 'CFGEOF'
         "seccomp": "basic",
         "no_new_privs": true
       }
+    },
+    {
+      "name": "kyb-notify",
+      "description": "sends sd_notify datagrams then stays alive so its pid is attributable",
+      "binary": "/usr/bin/kyb-notify-fixture",
+      "type": "simple",
+      "restart": "never"
     }
   ]
 }

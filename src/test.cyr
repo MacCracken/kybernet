@@ -2392,6 +2392,99 @@ fn test_notify_edge_cases() {
     return 0;
 }
 
+fn test_knotify_multiline() {
+    println("--- notify multiline (1.6.3) ---");
+
+    # ⚠ THE REGRESSION THIS FILE EXISTS TO PIN. The pre-1.6.3 classifier
+    # compared at offset 0 only and returned the first match, so a datagram
+    # whose STATUS line came first silently LOST the readiness notification —
+    # and "STATUS=...\nREADY=1" is the ordering systemd's own documentation
+    # shows. Any real service's readiness message was invisible.
+    var m = "STATUS=starting up\nREADY=1\n";
+    var n = strlen(m);
+    assert_eq(knotify_flag(m, n, "READY"), 1, "READY found after STATUS line");
+    assert_eq(knotify_classify(m), NOTIFY_READY, "multiline classifies READY");
+
+    # Exact value, not prefix. "READY=10" is not readiness.
+    assert_eq(knotify_flag("READY=10", 8, "READY"), 0, "READY=10 is not ready");
+    assert_eq(knotify_flag("READY=0", 7, "READY"), 0, "READY=0 is not ready");
+    assert_eq(knotify_flag("READY=1", 7, "READY"), 1, "READY=1 is ready");
+
+    # A key must start a line — a substring match must not count.
+    assert_eq(knotify_flag("XREADY=1", 8, "READY"), 0, "READY as suffix ignored");
+    assert_eq(knotify_flag("NOTREADY=1\nREADY=1\n", 20, "READY"), 1,
+      "real READY found past a decoy");
+
+    # knotify_field returns an OFFSET and -1 on a miss. A match at offset 0
+    # must not read as failure (rule 34's strstr trap).
+    var vl[8];
+    store64(&vl, 0);
+    var off = knotify_field("READY=1", 7, "READY", &vl);
+    assert_eq(off, 6, "value offset is just past the =");
+    assert_eq(load64(&vl), 1, "value length is 1");
+    assert_eq(knotify_field("NOPE=1", 6, "READY", &vl), 0 - 1, "miss returns -1");
+    return 0;
+}
+
+fn test_knotify_status_sanitize() {
+    println("--- notify status sanitize (1.6.3) ---");
+    var out = alloc(64);
+
+    # Plain value copies through.
+    var m1 = "STATUS=all good\n";
+    var w = knotify_status_sanitize(m1, strlen(m1), out, 64);
+    assert_eq(w, 8, "plain status length");
+    assert_eq(memeq(out, "all good", 8), 1, "plain status content");
+    assert_eq(load8(out + 8), 0, "sanitized status is NUL-terminated");
+
+    # ⚠ Control bytes are attacker-controlled text on the way to the console
+    # and dmesg. An escape sequence or an embedded newline could forge log
+    # lines; both become '.'.
+    var m2 = "STATUS=a\x1b[31mb\n";
+    w = knotify_status_sanitize(m2, strlen(m2), out, 64);
+    assert(w > 0, "escape status still copies");
+    assert_eq(load8(out + 1), 46, "ESC replaced with .");
+
+    # The copy stops at the newline, so a following line cannot leak in.
+    var m3 = "STATUS=one\nREADY=1\n";
+    w = knotify_status_sanitize(m3, strlen(m3), out, 64);
+    assert_eq(w, 3, "status stops at newline");
+    assert_eq(memeq(out, "one", 3), 1, "status content stops at newline");
+
+    # Bounded by outcap, always terminated.
+    var m4 = "STATUS=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n";
+    w = knotify_status_sanitize(m4, strlen(m4), out, 8);
+    assert_eq(w, 7, "status truncated to outcap-1");
+    assert_eq(load8(out + 7), 0, "truncated status is NUL-terminated");
+
+    # Absent STATUS writes an empty string rather than leaving stale bytes.
+    var m5 = "READY=1\n";
+    w = knotify_status_sanitize(m5, strlen(m5), out, 64);
+    assert_eq(w, 0, "no STATUS returns 0");
+    assert_eq(load8(out), 0, "no STATUS leaves an empty string");
+    return 0;
+}
+
+fn test_knotify_socket_constants() {
+    println("--- notify socket constants (1.6.3) ---");
+    # These are the values the credentialed receive depends on. They are
+    # asm-generic, shared by x86_64 and aarch64.
+    assert_eq(KYB_SOL_SOCKET, 1, "SOL_SOCKET");
+    assert_eq(KYB_SO_PASSCRED, 16, "SO_PASSCRED");
+    assert_eq(KYB_SCM_CREDENTIALS, 2, "SCM_CREDENTIALS");
+    assert_eq(KYB_MSG_DONTWAIT, 64, "MSG_DONTWAIT");
+    assert_eq(KYB_MSG_CTRUNC, 8, "MSG_CTRUNC");
+
+    # ⚠ The suffix on SOCK_DGRAM_TYPE is load-bearing: argonaut's unvalued
+    # `enum SocketType` shadows the stdlib's correct values, so in this link
+    # set the BARE name SOCK_DGRAM resolves to 1 (SOCK_STREAM's real value).
+    # If this assertion ever fails, someone used the bare name and kybernet is
+    # opening a STREAM socket for a datagram protocol.
+    assert_eq(SOCK_DGRAM_TYPE, 2, "SOCK_DGRAM_TYPE is the real SOCK_DGRAM");
+    assert_eq(SOCK_DGRAM, 1, "bare SOCK_DGRAM is still argonaut's shadowed 1");
+    return 0;
+}
+
 fn test_seccomp_agnostik_bridge() {
     println("--- seccomp bridge ---");
     # Test seccomp_from_profile with multiple rules
@@ -2506,6 +2599,9 @@ fn main() {
     test_edge_validators();
     test_edge_boot_gating();
     test_notify_edge_cases();
+    test_knotify_multiline();
+    test_knotify_status_sanitize();
+    test_knotify_socket_constants();
     test_seccomp_agnostik_bridge();
     test_sandbox_rules();
     return assert_summary();

@@ -5,32 +5,57 @@
 # registers with epoll as TOKEN_NOTIFY, and parses sd_notify messages.
 # Event-driven (not polled) — required for v0.60.0.
 
-# Socket syscall numbers (not in base syscalls.cyr at cyrius 5.10.44).
-# Per-arch dispatch via `#ifdef CYRIUS_ARCH_*` — the pre-1.1.5
-# single-block form hardcoded x86_64 numbers and silently called the
-# wrong syscalls on aarch64 (SYS_SOCKET=41 there is SYS_PIPE2, etc).
-# Filed upstream as a stdlib-wrapper request — fold these out when
-# `sys_socket`/`sys_bind`/`sys_recvfrom` land in the stdlib.
-#ifdef CYRIUS_ARCH_X86
-enum SockSysNr {
-    SYS_SOCKET = 41;
-    SYS_BIND = 49;
-    SYS_RECVFROM = 45;
-}
-#endif
-#ifdef CYRIUS_ARCH_AARCH64
-enum SockSysNr {
-    SYS_SOCKET = 198;
-    SYS_BIND = 200;
-    SYS_RECVFROM = 207;
-}
-#endif
+# ⚠ THE PER-ARCH `enum SockSysNr` THAT LIVED HERE IS GONE (1.6.3). Its own header
+# promised "fold these out when sys_socket/sys_bind/sys_recvfrom land in the
+# stdlib" — all three have landed (`~/.cyrius/lib/syscalls_linux_common.cyr`),
+# arch-dispatched, with byte-identical numbers to the table this file carried.
+# That is why the duplication never produced a warning and could sit for five
+# releases after its own stated trigger fired. Hand-rolled syscall tables are
+# exactly what standing rule 1 exists to prevent; the fix is to not have one.
 
+# ⚠ `SOCK_DGRAM_TYPE`, NOT `SOCK_DGRAM`, AND THE SUFFIX IS LOAD-BEARING.
+# argonaut declares `enum SocketType { SOCK_STREAM; SOCK_DGRAM; SOCK_SEQPACKET; }`
+# with NO values (`argonaut/src/types.cyr:459`), so cyrius numbers it from 0 —
+# and it WINS the link against the stdlib's correct `net.cyr` values (1/2).
+# Probed on both arches: in kybernet's link set the bare name `SOCK_DGRAM`
+# resolves to **1** (SOCK_STREAM's real value) and `SOCK_STREAM` to **0**.
+# That is the standing `duplicate symbol 'SOCK_STREAM' redefined with
+# conflicting value` warning on every build. Any new socket code in this repo
+# must use a locally-named constant; using the bare name would silently open a
+# STREAM socket for a datagram protocol.
 enum SockConst {
     AF_UNIX = 1;
     SOCK_DGRAM_TYPE = 2;
     SOCK_NONBLOCK_F = 2048;
     SOCK_CLOEXEC_F = 524288;
+}
+
+# Socket-option and message constants. None of these are in the cyrius stdlib
+# (checked: no SO_PASSCRED, SCM_CREDENTIALS, MSG_DONTWAIT or MSG_CTRUNC
+# anywhere in ~/.cyrius/lib), so kybernet names them locally with a KYB_
+# prefix — both to avoid the collision class above and to make it obvious at
+# every call site that these are ours.
+#
+# All five are asm-generic values, shared by x86_64 and aarch64, so unlike
+# `struct epoll_event` (standing rule 12) they need no #ifdef. SOL_SOCKET and
+# SO_PASSCRED do differ on other Linux ports (mips/sparc/ppc); if kybernet ever
+# targets one, these need per-arch treatment and this comment is the warning.
+# Receive buffer capacity. sd_notify datagrams are small; systemd's own limit
+# is comparable. One byte of the buffer is reserved for the NUL terminator, so
+# the iovec advertises CAP-1 and a datagram larger than that is truncated by
+# the kernel rather than overrunning us.
+enum NotifyBuf {
+    NOTIFY_BUF_CAP = 1024;
+    NOTIFY_STATUS_CAP = 256;
+    NOTIFY_DRAIN_MAX = 32;
+}
+
+enum KybSockOpt {
+    KYB_SOL_SOCKET = 1;
+    KYB_SO_PASSCRED = 16;
+    KYB_SCM_CREDENTIALS = 2;
+    KYB_MSG_DONTWAIT = 64;
+    KYB_MSG_CTRUNC = 8;
 }
 
 var NOTIFY_PATH = "/run/kybernet/notify";
@@ -49,13 +74,37 @@ enum NotifyType {
 # Returns: Result(fd) — raw fd for epoll registration
 fn notify_socket_create() {
     var flags = SOCK_DGRAM_TYPE | SOCK_NONBLOCK_F | SOCK_CLOEXEC_F;
-    var fd = syscall(SYS_SOCKET, AF_UNIX, flags, 0);
+    var fd = sys_socket(AF_UNIX, flags, 0);
     if (fd < 0) { return Err(0 - fd); }
 
-    # Ensure /run/kybernet exists
+    # SO_PASSCRED — the whole authentication story, in one setsockopt.
+    #
+    # Without it the kernel attaches no SCM_CREDENTIALS ancillary data, so
+    # `notify_recv_cred` below can never learn who sent a datagram. Until 1.6.3
+    # kybernet never set it and read with a NULL src_addr, which meant ANY
+    # process able to reach the socket could send ANY message and be believed.
+    # Every service runs as root (argonaut's ServiceDefinition has no uid
+    # field), so that was one compromised service forging notifications ABOUT
+    # ANOTHER — not merely a local-user nuisance.
+    #
+    # FAIL CLOSED. If this returns an error the socket cannot authenticate
+    # anything, and the receive path rejects every credential-less datagram —
+    # so a surviving socket would be a notify endpoint that silently discards
+    # 100% of legitimate traffic. Better to fail the bind and say why.
+    var one[4];                                  # 4 BYTES, an int (rule 2)
+    store32(&one, 1);
+    var so = sys_setsockopt(fd, KYB_SOL_SOCKET, KYB_SO_PASSCRED, &one, 4);
+    if (so < 0) {
+        klog("notify: SO_PASSCRED failed — refusing an unauthenticatable socket");
+        sys_close(fd);
+        return Err(0 - so);
+    }
+
+    # /run/kybernet, 0700. The mode matters: it is what keeps a non-root
+    # process off the socket entirely, and it is why the exposure here is
+    # service-to-service rather than any-user-to-PID-1.
     sys_mkdir("/run/kybernet", 0x1C0);
 
-    # Remove stale socket file
     sys_unlink(NOTIFY_PATH);
 
     # sockaddr_un: { sa_family: u16, sun_path: char[108] }
@@ -65,7 +114,7 @@ fn notify_socket_create() {
     var plen = strlen(NOTIFY_PATH);
     memcpy(sa + 2, NOTIFY_PATH, plen);
 
-    var r = syscall(SYS_BIND, fd, sa, 2 + plen + 1);
+    var r = sys_bind(fd, sa, 2 + plen + 1);
     if (r < 0) {
         sys_close(fd);
         return Err(0 - r);
@@ -74,34 +123,329 @@ fn notify_socket_create() {
     return Ok(fd);
 }
 
-# Read a notify message from the socket.
-# Returns: Option(ptr to null-terminated message)
-fn notify_read(fd) {
-    var buf = alloc(512);
-    var n = syscall(SYS_RECVFROM, fd, buf, 511, 0, 0, 0);
-    if (n <= 0) { return None(); }
+# ---------------------------------------------------------------------------
+# Credentialed receive
+#
+# ⚠ REPLACES `notify_read`, WHICH WAS A LIVE DENIAL OF SERVICE. It did
+# `var buf = alloc(512);` on EVERY datagram, on the reactor hot path, in the
+# one arena PID 1 never resets (standing rule 8). Any service — all of which
+# run as root — could send datagrams in a loop and permanently consume 512
+# bytes each until the 256 MB arena was gone, at which point every other
+# allocation in PID 1 begins failing. It also fed an UNCHECKED `alloc` return
+# straight into `store8(buf + n, 0)`; `alloc` returns 0 on exhaustion
+# (`alloc.cyr:188`), so the failure mode was a write through a null pointer in
+# the one process the kernel will not let die.
+#
+# ⚠ AND DO NOT "FIX" THIS BY ADOPTING argonaut's `notify_parse`. Measured, it
+# allocates 840 bytes per datagram (a NotifyMessage, a str-keyed hashmap, then
+# two `str_clone`s and up to twelve `str_from`s per line, none freed) — so
+# routing through it would replace a 512-byte leak with an 840-byte one while
+# looking like the principled fix. kybernet scans the buffer in place instead.
+#
+# ⚠ TRUE STATIC STORAGE, NOT A LAZY `alloc`. The first version did
+# `if (_nrecv_buf == 0) { _nrecv_buf = alloc(NOTIFY_BUF_CAP); }` and the
+# receive returned the STOP sentinel when that failed — without calling
+# recvmsg. On a level-triggered fd that is catastrophic: nothing is drained,
+# the fd stays readable, epoll_wait re-fires immediately, and PID 1 spins at
+# 100% CPU forever. That is precisely the 1.4.2 CRITICAL-1 shape standing rule
+# 13 was written about, reintroduced by the very change that quotes it.
+#
+# A fixed-size declaration is static storage in cyrius, so these cannot fail
+# and cannot be 0. The failure mode is designed out rather than handled.
+var _nrecv_buf[1024];      # 1024 BYTES == NOTIFY_BUF_CAP (rule 2)
+var _nstat_buf[256];       # 256 BYTES == NOTIFY_STATUS_CAP
+var _ncred[24];            # 24 BYTES: struct ucred { pid@0, uid@8, gid@16 }
+
+fn _notify_buf() { return &_nrecv_buf; }
+
+# Receive one datagram with its sender credentials.
+#
+# ⚠ TRI-STATE-PLUS, and every arm matters (standing rule 29's shape):
+#    >0  bytes received; sender pid/uid/gid are in `_ncred`
+#    -1  nothing queued (EAGAIN) — the ONLY value that means "stop draining"
+#    -2  MSG_CTRUNC: ancillary data was truncated, so credentials are not
+#        trustworthy. Consumed and rejected.
+#    -3  consumed, but carried no valid SCM_CREDENTIALS. Rejected.
+#
+# Deliberately stricter than argonaut's `notify_try_recv_authenticated`, which
+# collapses all four outcomes into a bare 0. That conflation is not cosmetic:
+# argonaut's own drain loop `break`s on 0, so a single forged datagram per tick
+# truncates the drain and starves every legitimate message queued behind it.
+# Distinguishing "empty" from "rejected" is what lets the caller keep draining
+# and count spoofing attempts. argonaut also checks only `ctrllen < 16` — never
+# `cmsg_len` and never MSG_CTRUNC.
+fn notify_recv_cred(fd) {
+    var buf = _notify_buf();
+
+    var iov[16];                       # struct iovec { base@0, len@8 }
+    store64(&iov, buf);
+    store64(&iov + 8, NOTIFY_BUF_CAP - 1);
+
+    # Control buffer: cmsghdr (16) + ucred (12), rounded up to the 8-byte
+    # CMSG alignment = 32. Zeroed so a short/absent cmsg cannot be read as
+    # stale bytes from a previous datagram.
+    var ctrl[32];
+    memset(&ctrl, 0, 32);
+
+    # struct msghdr, LP64: name@0 namelen@8 iov@16 iovlen@24
+    #                      control@32 controllen@40 flags@48  (56 bytes)
+    # Identical on x86_64 and aarch64 — both LP64 — so no #ifdef. This is the
+    # rule-12 hazard class; the layout is asserted by the unit tests.
+    var mh[56];
+    memset(&mh, 0, 56);
+    store64(&mh + 16, &iov);
+    store64(&mh + 24, 1);
+    store64(&mh + 32, &ctrl);
+    store64(&mh + 40, 32);
+
+    var n = sys_recvmsg(fd, &mh, KYB_MSG_DONTWAIT);
+    if (n < 0) { return 0 - 1; }                 # EAGAIN / error: nothing taken
+    # ⚠ n == 0 IS NOT AN EMPTY QUEUE. A zero-length datagram is legal on an
+    # AF_UNIX SOCK_DGRAM socket and recvmsg returns 0 having CONSUMED it.
+    # Reporting that as the stop sentinel ends the drain early, so one
+    # zero-length message per wakeup starves every legitimate one queued behind
+    # it — the exact starvation this file criticises in argonaut's drain, which
+    # `break`s because it cannot tell empty from rejected. Classify it as
+    # consumed-and-rejected so the loop continues.
+    if (n == 0) { return 0 - 3; }
+
+    # Truncated ancillary data means the credentials may be partial. The
+    # datagram has already been consumed, so report it as a rejection rather
+    # than as an empty queue — returning -1 here would end the drain early.
+    var mflags = load32(&mh + 48);
+    if (mflags & KYB_MSG_CTRUNC != 0) { return 0 - 2; }
+
+    var ctrllen = load64(&mh + 40);
+    if (ctrllen < 28) { return 0 - 3; }          # cmsghdr(16) + ucred(12)
+    var cmsg_len = load64(&ctrl);
+    if (cmsg_len < 28) { return 0 - 3; }
+    if (load32(&ctrl + 8) != KYB_SOL_SOCKET) { return 0 - 3; }
+    if (load32(&ctrl + 12) != KYB_SCM_CREDENTIALS) { return 0 - 3; }
+
+    # struct ucred is three 32-bit fields; widen into our 24-byte slot so
+    # callers can load64 without worrying about sign extension.
+    store64(&_ncred, load32(&ctrl + 16));        # pid
+    store64(&_ncred + 8, load32(&ctrl + 20));    # uid
+    store64(&_ncred + 16, load32(&ctrl + 24));   # gid
+
     store8(buf + n, 0);
-    return Some(buf);
+    return n;
 }
 
-# Parse a notify message type.
-# Checks for READY=1, STOPPING=1, WATCHDOG=1, RELOADING=1, STATUS=
-fn knotify_classify(msg) {
-    if (memeq(msg, "READY=1", 7) == 1) { return NOTIFY_READY; }
-    elif (memeq(msg, "STOPPING=1", 10) == 1) { return NOTIFY_STOPPING; }
-    elif (memeq(msg, "WATCHDOG=1", 10) == 1) { return NOTIFY_WATCHDOG; }
-    elif (memeq(msg, "RELOADING=1", 11) == 1) { return NOTIFY_RELOADING; }
-    elif (memeq(msg, "STATUS=", 7) == 1) { return NOTIFY_STATUS; }
-    else { return NOTIFY_UNKNOWN; }
-}
+fn _notify_status_buf() { return &_nstat_buf; }
 
-# Extract STATUS= value from a notify message.
-# Returns pointer to the status string (within msg buffer), or 0.
-fn notify_status_value(msg) {
-    if (memeq(msg, "STATUS=", 7) == 1) {
-        return msg + 7;
+fn notify_cred_pid() { return load64(&_ncred); }
+fn notify_cred_uid() { return load64(&_ncred + 8); }
+fn notify_cred_gid() { return load64(&_ncred + 16); }
+# ⚠ `&_nrecv_buf`, NOT `_nrecv_buf`. When the buffer became a static array
+# (from a lazily-alloc'd pointer), this accessor kept returning the variable by
+# VALUE — which for an array is its first eight BYTES. So it handed back
+# 0x0a313d5944414552, the little-endian bytes of "READY=1\n", and the caller
+# dereferenced the message's own text as an address: general protection fault,
+# and in PID 1 that is a kernel panic. The build was clean and all 660 unit
+# tests passed; only the reactor pass caught it.
+#
+# Same class as standing rule 3 (a value used where an address belongs), and the
+# reason the panic was legible at all is the register dump — RAX held readable
+# ASCII, which is the tell that a string is being used as a pointer.
+fn notify_buf_ptr()  { return &_nrecv_buf; }
+
+# ---------------------------------------------------------------------------
+# Field scanner — pure, allocation-free, line-oriented.
+#
+# ⚠ WHY THE OLD PREFIX MATCH WAS WRONG. `knotify_classify` compared at offset
+# 0 only, and returned the FIRST match:
+#     "STATUS=up\nREADY=1\n"  ->  NOTIFY_STATUS, and READY was silently lost
+#     "READY=10"                ->  NOTIFY_READY  (a prefix, not the value)
+# An sd_notify datagram is a set of NEWLINE-SEPARATED key=value lines and
+# carries several at once — `STATUS=…\nREADY=1` is the ordering systemd's own
+# documentation shows. So the classifier could not see a readiness
+# notification that any real service would send, and accepted "READY=10" as
+# readiness. Both are fixed by scanning lines and comparing the whole value.
+# ---------------------------------------------------------------------------
+
+# Find `key` at the start of a line in buf[0..len). Returns the offset of the
+# value (just past the '='), or -1. `out_len` receives the value's length.
+#
+# ⚠ Returns an OFFSET, and -1 on a miss — the same shape as `strstr`, and the
+# same trap: `!= 0` would treat a match at position 0 as a failure (rule 34).
+# Test against `< 0`.
+fn knotify_field(buf, len, key, out_len) {
+    if (buf == 0 || len <= 0) { return 0 - 1; }
+    var klen = strlen(key);
+    if (klen == 0) { return 0 - 1; }
+
+    var i = 0;
+    while (i < len) {
+        # start of a line
+        var ls = i;
+        while (i < len && load8(buf + i) != 10) { i = i + 1; }
+        var le = i;                       # exclusive
+        if (i < len) { i = i + 1; }       # step over the '\n'
+
+        # need "<key>=" and at least room for it
+        if (le - ls > klen) {
+            if (memeq(buf + ls, key, klen) == 1) {
+                if (load8(buf + ls + klen) == 61) {      # '='
+                    var vs = ls + klen + 1;
+                    if (out_len != 0) { store64(out_len, le - vs); }
+                    return vs;
+                }
+            }
+        }
     }
-    return 0;
+    return 0 - 1;
+}
+
+# 1 iff `key`'s value is exactly "1". Exact, not prefix — "READY=10" is not
+# readiness and must not be treated as it.
+fn knotify_flag(buf, len, key) {
+    var vl[8];
+    store64(&vl, 0);
+    var off = knotify_field(buf, len, key, &vl);
+    if (off < 0) { return 0; }
+    if (load64(&vl) != 1) { return 0; }
+    if (load8(buf + off) != 49) { return 0; }            # '1'
+    return 1;
+}
+
+# Copy a STATUS= value into `out`, sanitised. Returns the length written.
+#
+# ⚠ THIS IS ATTACKER-CONTROLLED TEXT ON ITS WAY TO THE CONSOLE AND dmesg.
+# Before 1.6.3 the raw pointer went straight to `klog`, so a service could
+# emit terminal escape sequences, embedded newlines that forge additional log
+# lines, or an unterminated run that walked past the datagram. Everything
+# outside printable ASCII becomes '.', the copy stops at the first newline,
+# and the result is always NUL-terminated within `outcap`.
+fn knotify_status_sanitize(buf, len, out, outcap) {
+    if (out == 0 || outcap <= 0) { return 0; }
+    store8(out, 0);
+
+    var vl[8];
+    store64(&vl, 0);
+    var off = knotify_field(buf, len, "STATUS", &vl);
+    if (off < 0) { return 0; }
+
+    var n = load64(&vl);
+    if (n > outcap - 1) { n = outcap - 1; }
+
+    var w = 0;
+    while (w < n) {
+        var c = load8(buf + off + w);
+        if (c == 10) { break; }
+        if (c < 32 || c > 126) { c = 46; }               # '.'
+        store8(out + w, c);
+        w = w + 1;
+    }
+    store8(out + w, 0);
+    return w;
+}
+
+# ---------------------------------------------------------------------------
+# Single-pass scan.
+#
+# ⚠ WHY THIS EXISTS AND NOT FOUR knotify_flag CALLS. The first version of the
+# line scanner made `knotify_classify` call `knotify_flag` up to four times and
+# then `knotify_field` once — FIVE full walks of the buffer where the old
+# prefix match did one 7-byte memeq. The benchmark gate caught it immediately:
+# knotify_classify(READY) +400%, knotify_classify+value +758%,
+# notify_status_value +604%. Correctness was worth a cost, but not that one,
+# and not on a path the reactor runs per datagram.
+#
+# One walk, every key resolved. Results land in a caller-provided 48-byte slot:
+#   +0  ready   +8  stopping   +16 watchdog   +24 reloading
+#   +32 status value offset (-1 = absent)     +40 status value length
+# ---------------------------------------------------------------------------
+enum NotifyScan {
+    NS_SIZE = 48;
+    NS_READY = 0;
+    NS_STOPPING = 8;
+    NS_WATCHDOG = 16;
+    NS_RELOADING = 24;
+    NS_STATUS_OFF = 32;
+    NS_STATUS_LEN = 40;
+}
+
+fn _ns_is_one(buf, vs, vlen) {
+    if (vlen != 1) { return 0; }
+    if (load8(buf + vs) != 49) { return 0; }        # '1'
+    return 1;
+}
+
+fn knotify_scan(buf, len, out) {
+    # ⚠ SIX EXPLICIT STORES, NOT `memset(out, 0, NS_SIZE)`. Measured on 6.5.35:
+    # memset of 48 bytes costs **67 ns/op**; six store64s cost **4**. For a
+    # 7-byte datagram that memset was ~half the total call cost and it is what
+    # made the first single-pass rewrite SLOWER than the five-scan version it
+    # replaced (138 ns vs 75). memset is a length-generic loop with call
+    # overhead; at this size the stores win by 16x.
+    store64(out + NS_READY, 0);
+    store64(out + NS_STOPPING, 0);
+    store64(out + NS_WATCHDOG, 0);
+    store64(out + NS_RELOADING, 0);
+    store64(out + NS_STATUS_LEN, 0);
+    store64(out + NS_STATUS_OFF, 0 - 1);
+    if (buf == 0 || len <= 0) { return 0; }
+
+    var i = 0;
+    while (i < len) {
+        var ls = i;
+        while (i < len && load8(buf + i) != 10) { i = i + 1; }
+        var le = i;
+        if (i < len) { i = i + 1; }
+
+        # locate '=' within the line
+        var eq = 0 - 1;
+        for (var j = ls; j < le; j = j + 1) {
+            if (load8(buf + j) == 61) { eq = j; break; }
+        }
+        if (eq < 0) { continue; }
+
+        var klen = eq - ls;
+        var vs = eq + 1;
+        var vlen = le - vs;
+        if (klen <= 0) { continue; }
+
+        if (klen == 5 && memeq(buf + ls, "READY", 5) == 1) {
+            if (_ns_is_one(buf, vs, vlen) == 1) { store64(out + NS_READY, 1); }
+        } elif (klen == 6 && memeq(buf + ls, "STATUS", 6) == 1) {
+            store64(out + NS_STATUS_OFF, vs);
+            store64(out + NS_STATUS_LEN, vlen);
+        } elif (klen == 8 && memeq(buf + ls, "STOPPING", 8) == 1) {
+            if (_ns_is_one(buf, vs, vlen) == 1) { store64(out + NS_STOPPING, 1); }
+        } elif (klen == 8 && memeq(buf + ls, "WATCHDOG", 8) == 1) {
+            if (_ns_is_one(buf, vs, vlen) == 1) { store64(out + NS_WATCHDOG, 1); }
+        } elif (klen == 9 && memeq(buf + ls, "RELOADING", 9) == 1) {
+            if (_ns_is_one(buf, vs, vlen) == 1) { store64(out + NS_RELOADING, 1); }
+        }
+    }
+    return 1;
+}
+
+# Retained as a thin shim so the existing assertions keep their meaning. Order
+# picks a single "primary" verb for reporting; main.cyr checks each flag
+# independently and does not use this.
+fn knotify_classify(msg) {
+    var sc[48];
+    knotify_scan(msg, strlen(msg), &sc);
+    if (load64(&sc + NS_READY) == 1) { return NOTIFY_READY; }
+    if (load64(&sc + NS_STOPPING) == 1) { return NOTIFY_STOPPING; }
+    if (load64(&sc + NS_WATCHDOG) == 1) { return NOTIFY_WATCHDOG; }
+    if (load64(&sc + NS_RELOADING) == 1) { return NOTIFY_RELOADING; }
+    if (load64(&sc + NS_STATUS_OFF) >= 0) { return NOTIFY_STATUS; }
+    return NOTIFY_UNKNOWN;
+}
+
+# Offset of the STATUS= value within `msg`, or 0 if absent.
+#
+# Kept for existing callers/tests. Prefer knotify_status_sanitize for anything
+# that reaches a log — this returns the RAW bytes.
+fn notify_status_value(msg) {
+    var sc[48];
+    knotify_scan(msg, strlen(msg), &sc);
+    var off = load64(&sc + NS_STATUS_OFF);
+    if (off < 0) { return 0; }
+    return msg + off;
 }
 
 # Get the notify socket path (for NOTIFY_SOCKET env var)

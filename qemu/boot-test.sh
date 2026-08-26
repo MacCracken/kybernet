@@ -24,7 +24,7 @@
 #   "started: kyb-live"              — a LIVE service, so a cgroup is really
 #                                      created and the pid moved into it
 #                                      (a completed oneshot correctly gets none)
-#   "removed service cgroups: 9"     — the shutdown sweep killed and rmdir'd them
+#   "removed service cgroups: 10"    — the shutdown sweep killed and rmdir'd them
 #
 #     ⚠ NINE of NINE. This said EIGHT from 1.5.3 to 1.6.1, with a comment
 #     arguing the shortfall was correct: kyb-orphan backgrounds a child, this
@@ -75,6 +75,19 @@
 #   BUDGET_MS=5000 qemu/boot-test.sh             # override boot budget
 
 set -euo pipefail
+
+# ⚠ EVERY DIAGNOSTIC `... | grep ... | head -N` BELOW ENDS IN `|| true`, AND IT
+# IS NOT DECORATION. With `pipefail` set, a grep that matches NOTHING makes the
+# whole pipeline exit 1, and with `set -e` that ABORTS THE SCRIPT. Those
+# pipelines run only inside failure branches — so the first failing assertion
+# whose diagnostic found nothing to print would kill the run then and there,
+# skipping every remaining assertion, the reactor pass, the edge pass and the
+# auth passes, and reporting a single failure as though it were the only one.
+# That fired for real in 1.6.3 while adding the sd_notify assertions: five
+# failures printed, then the run stopped before the reactor gate.
+#
+# This is standing rule 38 wearing a different hat — a gate must not be able to
+# suppress a different gate. A diagnostic must never be able to end the run.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -218,7 +231,7 @@ fail=0
 # runs nested. Checked here, before the markers, so it is the FIRST thing said.
 if grep -aq "doesn't support requested feature" "$LOG" 2>/dev/null; then
     echo "  FAIL: qemu could not provide a requested CPU feature:"
-    grep -a "doesn't support requested feature" "$LOG" | head -3
+    grep -a "doesn't support requested feature" "$LOG" | head -3 || true
     echo "        If that is invtsc, sakshi's clock init panics (exit 75) before"
     echo "        phase 1 — every 'missing marker' below follows from this alone."
     fail=1
@@ -234,12 +247,12 @@ for marker in \
     "kybernet: services started" \
     "kybernet: harness done" \
     "kybernet: shutdown" \
-    "kybernet: config: services parsed: 9" \
+    "kybernet: config: services parsed: 10" \
     "kybernet:   completed (oneshot): kyb-dep" \
     "kybernet:   completed (oneshot): kyb-svc" \
     "kybernet: boot: skipped (not applicable): Start udev device manager" \
     "kybernet:   started: kyb-live" \
-    "kybernet: removed service cgroups: 9"; do
+    "kybernet: removed service cgroups: 10"; do
     if echo "$RUNTIME_OUT" | grep -aqF "$marker"; then
         echo "  OK: $marker"
     else
@@ -272,7 +285,7 @@ if echo "$RUNTIME_OUT" | grep -qE '^CapEff:[[:space:]]*0{16}'; then
     echo "  OK: kyb-confined dropped all capabilities (CapEff=0)"
 else
     echo "  FAIL: kyb-confined did not drop capabilities"
-    echo "$RUNTIME_OUT" | grep -aE '^CapEff:' | head -2
+    echo "$RUNTIME_OUT" | grep -aE '^CapEff:' | head -2 || true
     fail=1
 fi
 if echo "$RUNTIME_OUT" | grep -qE '^NoNewPrivs:[[:space:]]*1'; then
@@ -298,7 +311,7 @@ if echo "$RUNTIME_OUT" | grep -qE '^Seccomp:[[:space:]]*2'; then
     echo "  OK: kyb-seccomp runs under a loaded filter (Seccomp=2, mode filter)"
 else
     echo "  FAIL: kyb-seccomp produced no Seccomp line — the profile killed it, or was never applied"
-    echo "$RUNTIME_OUT" | grep -aiE 'seccomp' | head -3
+    echo "$RUNTIME_OUT" | grep -aiE 'seccomp' | head -3 || true
     fail=1
 fi
 if echo "$RUNTIME_OUT" | grep -qE '^Seccomp_filters:[[:space:]]*[1-9]'; then
@@ -329,21 +342,21 @@ if echo "$RUNTIME_OUT" | grep -aqF "LIMIT-cgroup=/kybernet.slice/kyb-limited"; t
     echo "  OK: oneshot was in its own cgroup before exec"
 else
     echo "  FAIL: kyb-limited not placed in its cgroup"
-    echo "$RUNTIME_OUT" | grep -aE '^LIMIT-cgroup' | head -1
+    echo "$RUNTIME_OUT" | grep -aE '^LIMIT-cgroup' | head -1 || true
     fail=1
 fi
 if echo "$RUNTIME_OUT" | grep -aqF "LIMIT-memmax=67108864"; then
     echo "  OK: memory.max applied (64 MiB, read back from kernel)"
 else
     echo "  FAIL: memory.max not applied"
-    echo "$RUNTIME_OUT" | grep -aE '^LIMIT-memmax' | head -1
+    echo "$RUNTIME_OUT" | grep -aE '^LIMIT-memmax' | head -1 || true
     fail=1
 fi
 if echo "$RUNTIME_OUT" | grep -aqF "LIMIT-pidsmax=32"; then
     echo "  OK: pids.max applied (32, read back from kernel)"
 else
     echo "  FAIL: pids.max not applied"
-    echo "$RUNTIME_OUT" | grep -aE '^LIMIT-pidsmax' | head -1
+    echo "$RUNTIME_OUT" | grep -aE '^LIMIT-pidsmax' | head -1 || true
     fail=1
 fi
 # cpu.weight and memory.high exercise the OTHER controllers, and together
@@ -355,28 +368,28 @@ if echo "$RUNTIME_OUT" | grep -aqF "LIMIT-cpuweight=250"; then
     echo "  OK: cpu.weight applied (250, read back from kernel)"
 else
     echo "  FAIL: cpu.weight not applied"
-    echo "$RUNTIME_OUT" | grep -aE '^LIMIT-cpuweight' | head -1
+    echo "$RUNTIME_OUT" | grep -aE '^LIMIT-cpuweight' | head -1 || true
     fail=1
 fi
 if echo "$RUNTIME_OUT" | grep -aqF "LIMIT-memhigh=50331648"; then
     echo "  OK: memory.high applied (48 MiB, read back from kernel)"
 else
     echo "  FAIL: memory.high not applied"
-    echo "$RUNTIME_OUT" | grep -aE '^LIMIT-memhigh' | head -1
+    echo "$RUNTIME_OUT" | grep -aE '^LIMIT-memhigh' | head -1 || true
     fail=1
 fi
 if echo "$RUNTIME_OUT" | grep -aqE '^LIMIT-ctrl=.*memory.*pids'; then
     echo "  OK: cgroup subtree_control enables memory + pids"
 else
     echo "  FAIL: cgroup controllers not enabled on the slice"
-    echo "$RUNTIME_OUT" | grep -aE '^LIMIT-ctrl' | head -1
+    echo "$RUNTIME_OUT" | grep -aE '^LIMIT-ctrl' | head -1 || true
     fail=1
 fi
 if echo "$RUNTIME_OUT" | grep -aqF "LIMIT-unlimited=max"; then
     echo "  OK: unlimited service reads memory.max=max (control case)"
 else
     echo "  FAIL: control case wrong — kyb-live should be unlimited"
-    echo "$RUNTIME_OUT" | grep -aE '^LIMIT-unlimited' | head -1
+    echo "$RUNTIME_OUT" | grep -aE '^LIMIT-unlimited' | head -1 || true
     fail=1
 fi
 
@@ -387,7 +400,7 @@ fi
 # stage genuinely did not do its job.
 if echo "$RUNTIME_OUT" | grep -aqF "FATAL: required boot stage failed"; then
     echo "  FAIL: a required boot stage failed"
-    echo "$RUNTIME_OUT" | grep -aF "FATAL: required boot stage failed" | head -3
+    echo "$RUNTIME_OUT" | grep -aF "FATAL: required boot stage failed" | head -3 || true
     fail=1
 else
     echo "  OK: no boot stage failed"
@@ -555,9 +568,91 @@ if echo "$LOOP_OUT" | grep -aqF "health check failed: kyb-health"; then
     echo "  OK: health tick body executed and reported a failing check"
 else
     echo "  FAIL: no health-check failure observed — the tick body never ran"
-    echo "$LOOP_OUT" | grep -aiE 'health' | head -3
+    echo "$LOOP_OUT" | grep -aiE 'health' | head -3 || true
     fail=1
 fi
+
+# ⚠ THESE LIVE IN THE REACTOR PASS, NOT THE BOOT PASS, AND THAT IS THE WHOLE
+# POINT OF STANDING RULE 23. `handle_notify_msg` is only ever called from the
+# event loop (main.cyr's TOKEN_NOTIFY arm). `kybernet.harness=1` shuts down at
+# phase 9 BEFORE the reactor starts, so under that mode the fixture's datagrams
+# sit unread in the socket queue and are discarded at shutdown. I put them in
+# the boot pass first and got five failures for a feature that works: the gate
+# was asserting the outcome of code it had arranged never to run.
+# --- sd_notify (1.6.3) — REACTOR PASS -----------------------------------------------------
+#
+# ⚠ THIS IS THE PASS THAT DID NOT EXIST. Before 1.6.3 `grep -rn notify qemu/`
+# returned nothing: kybernet bound the socket, registered it with epoll and
+# wrote a handler, and no release gate had ever delivered a datagram to it.
+# Same shape as `"seccomp": "basic"`, which shipped for three releases killing
+# every service it was applied to (standing rule 27).
+#
+# kyb-notify sends four datagrams as a real supervised service, so the kernel
+# stamps SCM_CREDENTIALS with a pid kybernet knows. Each assertion below proves
+# a different half of the path.
+
+# 1. The datagram was ACCEPTED and ATTRIBUTED to the sending service. This is
+#    the whole authentication story: before 1.6.3 nothing set SO_PASSCRED and
+#    the receive passed a NULL src_addr, so kybernet could not have named the
+#    sender even in principle.
+if echo "$LOOP_OUT" | grep -aqF "notify: ready: kyb-notify"; then
+    echo "  OK: sd_notify READY attributed to the sending service"
+else
+    echo "  FAIL: no attributed READY — SO_PASSCRED, the drain, or attribution is broken"
+    echo "$LOOP_OUT" | grep -aiE 'notify' | head -5 || true
+    fail=1
+fi
+
+# 2. STATUS= first, READY= second. The pre-1.6.3 classifier compared at offset
+#    0 and returned the FIRST match, so this ordering — the one systemd's own
+#    docs show — silently LOST the readiness notification. The fixture sends
+#    both a plain READY and a STATUS-then-READY datagram; two accepted READY
+#    lines proves the multiline scan works.
+if [ "$(echo "$LOOP_OUT" | grep -acF "notify: ready: kyb-notify")" -ge 2 ]; then
+    echo "  OK: READY found after a STATUS line (multiline scan)"
+else
+    echo "  FAIL: only one READY seen — the STATUS-then-READY datagram lost its READY"
+    fail=1
+fi
+
+# 3. WATCHDOG is accepted and attributed but explicitly NOT honoured. The only
+#    refreshable deadline is managed_svc_last_hc, which already means "the last
+#    health check PASSED" — refreshing it on a self-reported ping would let a
+#    wedged service silence a probe kybernet actually ran and saw fail.
+if echo "$LOOP_OUT" | grep -aqF "notify: watchdog ping (not honoured): kyb-notify"; then
+    echo "  OK: WATCHDOG attributed and explicitly not honoured"
+else
+    echo "  FAIL: watchdog ping was not logged as unhonoured"
+    fail=1
+fi
+
+# 4. The status text reached the log SANITISED. The fixture sends an ESC
+#    sequence; a raw ESC byte on the console means attacker-controlled text is
+#    reaching dmesg unfiltered.
+if echo "$LOOP_OUT" | grep -aqF "notify: status: kyb-notify"; then
+    if echo "$LOOP_OUT" | grep -aq 'esc\.\[31mred'; then
+        echo "  OK: status text sanitised (ESC replaced)"
+    else
+        echo "  FAIL: status line present but the ESC byte was not sanitised"
+        echo "$LOOP_OUT" | grep -aiE 'notify: status' | head -3 || true
+        fail=1
+    fi
+else
+    echo "  FAIL: no attributed status line"
+    fail=1
+fi
+
+# 5. Nothing was rejected. Every datagram came from a live service pid, so a
+#    non-zero reject count means authentication is refusing legitimate traffic
+#    — the failure mode where SO_PASSCRED is set but the cmsg parse is wrong.
+if echo "$LOOP_OUT" | grep -aqF "notify: rejected: 0"; then
+    echo "  OK: no legitimate datagram was rejected"
+else
+    echo "  FAIL: some datagrams were rejected — cmsg parsing or attribution is wrong"
+    echo "$LOOP_OUT" | grep -aiE 'notify: (accepted|rejected)' | head -3 || true
+    fail=1
+fi
+
 rm -f "$LOOP_LOG"
 
 # ============================================================
@@ -604,7 +699,7 @@ _assert_no_panic() {
     # $1 = captured output, $2 = label
     if echo "$1" | grep -aqE "Attempted to kill init|Kernel panic"; then
         echo "  FAIL: [$2] PID 1 panicked"
-        echo "$1" | grep -aE "Attempted to kill init|Kernel panic" | head -2
+        echo "$1" | grep -aE "Attempted to kill init|Kernel panic" | head -2 || true
         fail=1
     fi
 }
@@ -673,7 +768,7 @@ else
         echo "  OK: intact image verifies against its root hash"
     elif [ "$SKIP_EDGE" != "1" ]; then
         echo "  FAIL: intact image did not verify"
-        echo "$GOOD_OUT" | grep -aiE 'edge boot|verit' | head -5
+        echo "$GOOD_OUT" | grep -aiE 'edge boot|verit' | head -5 || true
         fail=1
     fi
 
@@ -691,7 +786,7 @@ else
         echo "  OK: corrupted image fails verification"
     else
         echo "  FAIL: corrupted image was not detected"
-        echo "$BAD_OUT" | grep -aiE 'edge boot|verit' | head -5
+        echo "$BAD_OUT" | grep -aiE 'edge boot|verit' | head -5 || true
         fail=1
     fi
     if echo "$BAD_OUT" | grep -aqF "refusing to continue boot without edge prerequisites"; then
@@ -826,7 +921,7 @@ else
                 echo "        NOT the brick: the boot died before phase 6c, or the VM was"
                 echo "        too slow for _auth_boot's fixed 8 s pre-prompt wait."
             fi
-            echo "$ok_out" | grep -aiE 'password|authent|credential' | head -3
+            echo "$ok_out" | grep -aiE 'password|authent|credential' | head -3 || true
             fail=1
         fi
 
@@ -887,7 +982,7 @@ else
             echo "  OK: [argon2id v1] boot log reports the KDF parameters"
         else
             echo "  FAIL: [argon2id v1] KDF parameters not reported at load"
-            echo "$AUTH_LAST_OK_OUT" | grep -aiE 'credential|argon' | head -3
+            echo "$AUTH_LAST_OK_OUT" | grep -aiE 'credential|argon' | head -3 || true
             fail=1
         fi
 

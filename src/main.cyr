@@ -103,6 +103,23 @@ var g_services_started = 0;
 var g_emerg_require_auth = 0;
 var g_emerg_hash = 0;          # Str ptr, 0 = none configured
 
+# sd_notify accounting (1.6.3). Counted rather than logged per event: a
+# rejected datagram is attacker-triggerable, so logging each one hands any
+# root process on the box a log-flooding primitive against PID 1's console.
+# The totals are reported once at shutdown, which is enough to notice
+# something is speaking sd_notify at PID 1 that should not be.
+# ⚠ THE REJECT REASONS ARE COUNTED SEPARATELY, DELIBERATELY. Collapsing them
+# is the exact defect this file criticises in argonaut's
+# notify_try_recv_authenticated, which returns a bare 0 for four distinct
+# outcomes. A single "rejected: 4" cannot distinguish "SO_PASSCRED is not
+# working" from "the sender was not a live service" — and those have opposite
+# fixes. Found the hard way: the first harness run reported rejected=4 and the
+# counter could not say why.
+var g_notify_accepted = 0;
+var g_notify_nocred = 0;        # no/invalid SCM_CREDENTIALS, or truncated
+var g_notify_baduid = 0;        # authenticated, but not uid 0
+var g_notify_unattributed = 0;  # authenticated root, but not a live service pid
+
 # ================================================================
 # Logging is factored into src/lib/log.cyr (since 1.2.0). klog,
 # klog2, kmsg, slog, slog_init, and _logbuf live there. g_log_fd
@@ -577,6 +594,19 @@ fn kybernet_harness_loop_requested() {
 # ================================================================
 
 fn do_shutdown(shutdown_type) {
+    # Report the sd_notify tallies once, here, rather than per datagram — a
+    # rejected message is attacker-triggerable, so per-event logging would be a
+    # console-flooding primitive. A non-zero reject count means something on
+    # this box spoke sd_notify at PID 1 without being one of its services.
+    var _nrej = g_notify_nocred + g_notify_baduid + g_notify_unattributed;
+    if (g_notify_accepted > 0 || _nrej > 0) {
+        klog2("notify: accepted: ", _u64_str(g_notify_accepted));
+        klog2("notify: rejected: ", _u64_str(_nrej));
+        klog2("notify: rejected-nocred: ", _u64_str(g_notify_nocred));
+        klog2("notify: rejected-baduid: ", _u64_str(g_notify_baduid));
+        klog2("notify: rejected-unattributed: ", _u64_str(g_notify_unattributed));
+    }
+
     if (g_init != 0) {
         var plan = init_plan_shutdown(g_init, shutdown_type);
         if (plan != 0) {
@@ -867,7 +897,11 @@ fn remove_all_service_cgroups() {
 fn ensure_services_started() {
     if (g_services_started == 1) { return 0; }
     g_services_started = 1;
-    return start_services();
+    var r = start_services();
+    # Build the notify attribution cache ONCE, here, where the service set is
+    # final and we are not on an attacker-reachable path. See g_notify_names.
+    kyb_notify_names_refresh();
+    return r;
 }
 
 fn start_services() {
@@ -1087,23 +1121,173 @@ fn handle_restart_tick() {
     return 0;
 }
 
+# Which service does this pid belong to? Returns a cstr name, or 0.
+#
+# The authenticated sender pid is the ONLY trustworthy identity in an
+# sd_notify datagram — the MAINPID= field inside it is attacker-controlled by
+# definition. So attribution goes pid -> service, never message -> service.
+#
+# ⚠ Rule 3: `init_service_names` hands back **cstrs** (argonaut's own comment
+# at init.cyr:319), which is what `init_get_service` and `klog2` both want. Do
+# NOT reach for `proc_table_pid` here — that takes a boxed `Str` and calls
+# `str_data()` internally, and handing it a cstr is precisely the SIGSEGV
+# argonaut 1.13.3 fixed in the watchdog path.
+#
+# STATE_STARTING is accepted as well as STATE_RUNNING, deliberately: a
+# readiness notification arrives exactly during the starting window, so
+# filtering to RUNNING only — which is what argonaut's own expected-pid set at
+# init.cyr:843 does — would reject every READY=1 that mattered.
+# Cached service-name vec for attribution.
+#
+# ⚠ THIS CACHE IS THE FIX FOR A LEAK THIS RELEASE ALMOST SHIPPED. The first
+# version called `init_service_names(g_init)` per datagram — and that is
+# `map_keys` (hashmap.cyr:331), which does `vec_new()` (a 24-byte header plus a
+# 128-byte 16-slot backing array) plus a push per service, EVERY call, with
+# nothing freed. Measured: 152 bytes per datagram at 8 services, 408 above 16
+# once the vec grows. In the arena PID 1 never resets (rule 8), reachable by
+# any root sender, at 32 datagrams per level-triggered wakeup.
+#
+# So the "fix" for `notify_read`'s 512-byte-per-datagram leak had replaced it
+# with a 152-byte-per-datagram leak on the very same path: same primitive, same
+# actor, same terminal failure, 70% smaller. A reduction is not a fix.
+#
+# Names cannot change without a reboot — `reload_config` explicitly refuses
+# service-definition changes — so the list is built once, after services start,
+# and reused. The per-datagram path now allocates NOTHING: the receive buffer,
+# the status buffer and the scan slot are all static.
+var g_notify_names = 0;
+
+fn kyb_notify_names_refresh() {
+    if (g_init == 0) { return 0; }
+    g_notify_names = init_service_names(g_init);
+    return vec_len(g_notify_names);
+}
+
+fn kyb_notify_service_for_pid(pid) {
+    if (g_init == 0) { return 0; }
+    if (pid <= 0) { return 0; }
+    # No cache means attribution is impossible; never build one here — this is
+    # the attacker-reachable path and building it is exactly the allocation
+    # that had to be removed.
+    var names = g_notify_names;
+    if (names == 0) { return 0; }
+    var n = vec_len(names);
+    for (var i = 0; i < n; i = i + 1) {
+        var nm = vec_get(names, i);
+        var ms = init_get_service(g_init, nm);
+        if (ms == 0) { continue; }
+        if (managed_svc_pid(ms) != pid) { continue; }
+        var st = managed_svc_state(ms);
+        if (st == STATE_RUNNING) { return nm; }
+        if (st == STATE_STARTING) { return nm; }
+        return 0;
+    }
+    return 0;
+}
+
+# Drain the notify socket, authenticating and attributing every datagram.
+#
+# ⚠ THREE CONSTRAINTS HERE ARE LOAD-BEARING, AND EACH HAS A PRIOR INCIDENT.
+#
+# 1. A REJECTED DATAGRAM HAS ALREADY BEEN CONSUMED. The recvmsg happens before
+#    any classification, so every path below has taken the message off the
+#    queue. `-1` (EAGAIN) is the ONLY value that ends the loop. Returning early
+#    on a rejection would leave the level-triggered fd readable with nothing
+#    draining it — the exact 1.4.2 CRITICAL-1 shape that span PID 1 at 100% CPU
+#    ten seconds into every boot (standing rule 13).
+#
+# 2. NEVER `break` ON A REJECTION. argonaut's own drain does (init.cyr:849),
+#    because its receive collapses "empty" and "rejected" into the same 0 — so
+#    one forged datagram per tick starves every legitimate message queued
+#    behind it. kybernet's receive distinguishes them for this reason.
+#
+# 3. THE BOUND IS A FAIRNESS CEILING, not a formality. Without it a local
+#    sender monopolises the reactor and drives the wakeup count that the
+#    `kybernet.harness=loop` gate gets to bound at 500 (standing rule 23).
+#
+# What is honoured, and what is deliberately NOT:
+#   READY=1      logged, attributed, audited. At argonaut 1.13.3 it cannot
+#                change managed state — `init_start_simple` sets STATE_RUNNING
+#                synchronously before returning (init.cyr:466) and there is no
+#                notify service type, so no service is ever awaiting one.
+#   STATUS=      sanitised, then logged attributed. Raw attacker bytes used to
+#                go straight to klog.
+#   RELOADING/STOPPING  logged attributed. No state sink exists.
+#   WATCHDOG=1   REFUSED. The only refreshable deadline is
+#                `managed_svc_last_hc`, which already means "the last health
+#                check PASSED". Refreshing it on a self-reported ping would let
+#                a wedged service silence a probe kybernet actually ran and saw
+#                fail. That is a safety inversion, and authentication does not
+#                cure it — auth proves the ping came from the service, not that
+#                the service is honest about its own health. Needs a separate
+#                last_notify field in argonaut; roadmapped.
+#   MAINPID=     REFUSED. `str_to_int` honours a leading '-' and silently skips
+#                non-digits ("MAINPID=-1" parses to -1), and `process_kill` has
+#                no internal pid > 0 guard — so honouring it could hand PID 1 a
+#                kill(-1, SIGKILL), i.e. every process on the machine. Needs a
+#                bounded parse plus cgroup-membership proof; roadmapped.
 fn handle_notify_msg() {
-    var nmsg = notify_read(g_nfd);
-    if (is_some(nmsg) == 0) { return 0; }
-
-    var raw = unwrap(nmsg);
-    var ntype = knotify_classify(raw);
-
-    switch (ntype) {
-        case 1: klog("service ready");
-        case 2: klog("service stopping");
-        case 3: klog("service watchdog ping");
-        case 4: {
-            var status = notify_status_value(raw);
-            if (status != 0) { klog(status); }
+    var buf = notify_buf_ptr();
+    for (var d = 0; d < NOTIFY_DRAIN_MAX; d = d + 1) {
+        var n = notify_recv_cred(g_nfd);
+        if (n == 0 - 1) { return 0; }               # queue empty: the only exit
+        if (n < 0) {                                 # consumed but unauthenticated
+            g_notify_nocred = g_notify_nocred + 1;
+            continue;
         }
-        case 5: klog("service reloading");
-        default: return 0;
+
+        buf = notify_buf_ptr();
+        var pid = notify_cred_pid();
+        var uid = notify_cred_uid();
+
+        # Only root may notify, and every service runs as root. A non-zero uid
+        # is by construction not one of our services.
+        if (uid != 0) {
+            g_notify_baduid = g_notify_baduid + 1;
+            continue;
+        }
+
+        var name = kyb_notify_service_for_pid(pid);
+        if (name == 0) {
+            # Authenticated by the kernel, but not a live service pid. This is
+            # the forgery case worth counting: some other root process on the
+            # box is speaking sd_notify at PID 1.
+            g_notify_unattributed = g_notify_unattributed + 1;
+            continue;
+        }
+
+        g_notify_accepted = g_notify_accepted + 1;
+
+        # ONE pass over the datagram, every verb resolved. Four knotify_flag
+        # calls plus a sanitize walked the buffer five times per message, on a
+        # path bounded at 32 datagrams per reactor wakeup — the benchmark gate
+        # flagged the cost the first time it ran (+758% on the classifier).
+        var sc[48];
+        knotify_scan(buf, n, &sc);
+
+        if (load64(&sc + NS_READY) == 1) {
+            klog2("notify: ready: ", name);
+        }
+        if (load64(&sc + NS_RELOADING) == 1) {
+            klog2("notify: reloading: ", name);
+        }
+        if (load64(&sc + NS_STOPPING) == 1) {
+            klog2("notify: stopping: ", name);
+        }
+        if (load64(&sc + NS_WATCHDOG) == 1) {
+            # Counted, not honoured — see the header above.
+            klog2("notify: watchdog ping (not honoured): ", name);
+        }
+
+        if (load64(&sc + NS_STATUS_OFF) >= 0) {
+            var sbuf = _notify_status_buf();
+            if (sbuf != 0) {
+                if (knotify_status_sanitize(buf, n, sbuf, NOTIFY_STATUS_CAP) > 0) {
+                    klog2("notify: status: ", name);
+                    klog2("notify:   ", sbuf);
+                }
+            }
+        }
     }
     return 0;
 }
