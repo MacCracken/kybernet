@@ -791,6 +791,39 @@ else
     fail=1
 fi
 
+# 4b. ⚠ A FORGED MAINPID IS REFUSED. This is the assertion that distinguishes
+#     authentication from authorisation. kyb-notify is authenticated, attributed
+#     and entirely legitimate — and it claims MAINPID=1, which is kybernet
+#     itself and is emphatically not in its cgroup. Honouring it would point
+#     kybernet's supervision, and eventually its kill path, at PID 1.
+#
+#     It also sends MAINPID=-1, which `str_to_int` would have read as -1: from
+#     PID 1 that value handed to kill(2) is every process on the machine.
+#
+#     Both must be refused, and the counter proves it rather than the absence
+#     of a crash.
+if echo "$LOOP_OUT" | grep -aqF "notify: MAINPID not in this service's cgroup - REFUSED"; then
+    echo "  OK: a forged MAINPID (pid 1) was refused on cgroup membership"
+else
+    echo "  FAIL: forged MAINPID was not refused — authorisation check missing"
+    echo "$LOOP_OUT" | grep -aiE 'mainpid' | head -3 || true
+    fail=1
+fi
+
+if echo "$LOOP_OUT" | grep -aqF "notify: MAINPID malformed - ignored"; then
+    echo "  OK: a malformed MAINPID (-1) was rejected by the bounded parse"
+else
+    echo "  FAIL: malformed MAINPID was not rejected — str_to_int would read it as -1"
+    fail=1
+fi
+
+if echo "$LOOP_OUT" | grep -aqE "notify: refused-mainpid: [1-9]"; then
+    echo "  OK: refused-MAINPID counter recorded the attempts"
+else
+    echo "  FAIL: refused-mainpid counter is zero — were the claims even seen?"
+    fail=1
+fi
+
 # 5. Nothing was rejected. Every datagram came from a live service pid, so a
 #    non-zero reject count means authentication is refusing legitimate traffic
 #    — the failure mode where SO_PASSCRED is set but the cmsg parse is wrong.

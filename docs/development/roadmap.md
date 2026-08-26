@@ -47,28 +47,24 @@ of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into
           `default_services(BOOT_DESKTOP)`, so making it depend on a new `agnos-init`
           needs either an argonaut change or a config that replaces the default set.
 
-- [ ] **`MAINPID=` is still parsed, logged and discarded.** The last unhonoured
-      sd_notify verb, and the one that cannot be done safely by parsing alone.
-      `str_to_int` honours a leading `-` and silently skips non-digits, so
-      `MAINPID=-1` yields -1, and `process_kill` has no internal `pid > 0` guard —
-      from PID 1 that is `kill(-1, SIGKILL)`, i.e. every process on the machine.
-      Needs a bounded parse (rule 25's shape) AND proof the claimed pid is in the
-      sending service's own cgroup, because an authenticated sender can still name
-      somebody else's pid. The cgroup half is kybernet's to write:
-      `/sys/fs/cgroup/kybernet.slice/<svc>/cgroup.procs` is the membership list.
 - [ ] **Log the orphan-reap count and assert it (kybernet half).** argonaut 1.13.5 now
       returns the reaped pids (`proc_table_reap_orphans_into`) and reconciles the service
       table against them, so the information exists. kybernet still discards it:
       `init_reap_services`' return is ignored, so a service leaking children produces no
       evidence anywhere. Needs a consumer bump to 1.13.5, a klog line, and then the
       `kyb-orphan` fixture (1.6.1) becomes assertable instead of merely exercised.
-- [ ] **`sandbox_from_ruleset` and `_ll_access_to_kernel` are benchmark-only.** Verified at
-      1.6.4 while correcting CLAUDE.md rule 9: `_ll_access_to_kernel` has exactly one caller
-      (`sandbox.cyr:254`, inside `sandbox_from_ruleset`), and `sandbox_from_ruleset`'s only
-      caller in the tree is `src/bench.cyr`. So a chunk of the Landlock surface exists solely
-      to be benchmarked. Either give it a production call site or delete it — but note that
-      deleting it lowers the recorded benchmark COUNT, which `bench-history.sh` gates on, so
-      the removal and the count expectation have to land together.
+- [ ] **DELETE `sandbox_from_ruleset` + `_ll_access_to_kernel` and their benchmark.**
+      Promoted from "either wire it or delete it" to a decision: DELETE. At 1.6.10 its
+      benchmark flagged a +20% regression (2560 -> 3075 ns, paired against the 1.6.9
+      tag) on a release that never touched `sandbox.cyr` — pure link-layout movement in
+      a function whose only caller in the tree is `src/bench.cyr`. A benchmark of dead
+      code that fails release gates is worse than no benchmark: it measures where the
+      linker put something nothing calls. ⚠ The removal and the `bench-history.sh`
+      COUNT expectation must land in the same change, and note CLAUDE.md rule 9
+      discusses `_ll_access_to_kernel`'s if-ladder — that rule's corrected rationale
+      (1.6.4) is that the ladder is kept because it is harmless, NOT because it guards
+      PID 1, so deleting the whole dead chain does not contradict it. Update rule 9 in
+      the same change.
 - [ ] **Per-service health scheduling (argonaut).** 1.6.7 made the poll timer take the
       SMALLEST configured `interval_ms` so nobody is polled slower than they asked — but
       `init_poll_health` checks every service with a health_check on each tick, so a

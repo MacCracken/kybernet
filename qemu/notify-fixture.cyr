@@ -97,11 +97,23 @@ fn main() {
     # 4. Watchdog — accepted and attributed, deliberately NOT honoured.
     if (send_msg(NOTIFY_SOCK, "WATCHDOG=1\n") == 0) { sent = sent + 1; }
 
-    if (sent != 4) {
+    # 5. ⚠ A FORGED MAINPID. pid 1 is kybernet itself, and it is emphatically
+    #    NOT in this service's cgroup — so an honest authenticated sender
+    #    claiming it must be REFUSED. Authentication proves who sent the
+    #    datagram; it says nothing about the pid named inside it. If this were
+    #    honoured, kybernet would end up supervising, and eventually killing,
+    #    PID 1 — itself.
+    if (send_msg(NOTIFY_SOCK, "MAINPID=1\n") == 0) { sent = sent + 1; }
+
+    # 6. A malformed MAINPID. `str_to_int` would read this as -1, which handed
+    #    to kill(2) from PID 1 means every process on the machine.
+    if (send_msg(NOTIFY_SOCK, "MAINPID=-1\n") == 0) { sent = sent + 1; }
+
+    if (sent != 6) {
         println("kyb-notify-fixture: send FAILED");
         return 1;
     }
-    println("kyb-notify-fixture: sent 4");
+    println("kyb-notify-fixture: sent 6");
 
     # ⚠ STAY ALIVE. THIS IS NOT PADDING — IT IS THE POINT.
     #

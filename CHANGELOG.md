@@ -7,6 +7,94 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.6.10] — 2026-08-26
+
+**The last sd_notify verb, and the difference between authentication and authorisation.**
+Suite 676 assertions. Harness 58 → 61 properties. No dep change (argonaut 1.13.7).
+
+### Added — `MAINPID=` is honoured, behind two independent checks
+
+The last unhonoured verb, and the one that could not be done by parsing alone. Each
+check rejects a different attack.
+
+**1. A bounded parse.** `str_to_int` honours a leading `-` and silently skips
+non-digits, so `MAINPID=-1` yields **-1** and `MAINPID=1abc` yields 1. `process_kill`
+has no internal `pid > 0` guard — the check is duplicated across its five call sites —
+so from PID 1 a claimed pid of -1 handed to `kill(2)` means **every process on the
+machine**. `knotify_parse_pid` accepts plain decimal digits only, bounds DURING
+accumulation (rule 25 — a long digit run would otherwise wrap onto a small value that
+passes a ceiling test), and refuses anything at or above `PID_MAX_LIMIT`.
+
+**2. ⚠ CGROUP MEMBERSHIP — and this is the conceptual half.** `SO_PASSCRED` proves
+which process SENT a datagram. It says nothing whatsoever about the pid named INSIDE
+it. A service that is authenticated, correctly attributed and entirely legitimate can
+still claim `MAINPID=<another service's pid>`, and honouring that would aim kybernet's
+supervision — and eventually its kill path — at an unrelated process.
+
+`cgroup_has_pid` consults `cgroup.procs`, the kernel's own membership list for that
+service, which the service cannot forge. It answers 0 on EVERY failure — unreadable
+file, unsafe name, truncated read — because it gates a privileged action and "could
+not tell" must never read as "yes". It compares whole lines, so pid 42 cannot satisfy
+a claim for pid 4. The read carries one byte of headroom so a full read is
+distinguishable from a truncated one (rule 30).
+
+A refused claim is counted and logged, never fatal: a service naming a pid outside its
+own cgroup is misconfigured or hostile, and either way the answer is to ignore the
+claim rather than kill anything.
+
+### Added — a fixture that forges a MAINPID from an honest sender
+
+`kyb-notify` now sends `MAINPID=1` — kybernet itself, emphatically not in its cgroup —
+and `MAINPID=-1`. It is authenticated and attributed throughout; only the claim is
+false. That is precisely the case authentication cannot catch.
+
+Three assertions, because the absence of a crash proves nothing: the cgroup refusal,
+the malformed rejection, and a **non-zero `refused-mainpid` counter** confirming the
+claims were seen and judged rather than dropped somewhere upstream. That last arm
+exists because the first sd_notify harness run at 1.6.3 reported `rejected: 4` with no
+way to tell why, and splitting the reasons is what made it diagnosable.
+
+### Known — `sandbox_from_ruleset` is 20% slower, on code this release never touched
+
+⚠ **Real, reproducible, and in a function with no production caller.** Paired samples
+from a clean worktree at the 1.6.9 tag versus this tree, same box, back to back:
+
+```
+1.6.9:   2597, 2531 ns/op
+1.6.10:  3069, 3078 ns/op        (~+20%)
+```
+
+`src/lib/sandbox.cyr` is untouched by this release. This is the third benchmark to
+behave this way — `strlen(52 chars)` at 1.6.3, `is_mounted` at 1.6.8, now this — all
+of them untouched code moving when unrelated code changes size. The likely mechanism is
+the same: this release added `cgroup_has_pid` (~50 lines) to `cgroup.cyr` and widened
+`NS_SIZE`, shifting layout for everything downstream.
+
+**Zero product impact, by construction rather than by argument:**
+`sandbox_from_ruleset`'s only caller in the entire tree is `src/bench.cyr`. Nothing in
+production reaches it — that is the roadmap item filed at 1.6.4. Boot span is 182 ms
+against a 1200 ms budget.
+
+So a function nothing calls, benchmarked for its own sake, is now failing release
+gates. That is a stronger argument for the removal that item already prescribes than
+anything written when it was filed: the benchmark is not measuring kybernet, it is
+measuring where the linker happened to put dead code. Left in place for this cut
+because deleting it must land together with the recorded benchmark COUNT the gate
+checks, and that is a separate change made deliberately rather than at the end of
+another one.
+
+### Fixed — widening `NS_SIZE` without widening its buffers
+
+⚠ Introduced and caught within the same change, and worth recording because of how it
+presented. Adding the MAINPID fields took `NS_SIZE` from 48 to 64 bytes while three
+callers still declared `var sc[48]` — so `knotify_scan` wrote 16 bytes past each
+buffer. Standing rule 2 exactly: `var X[N]` is N BYTES, not slots.
+
+The test suite did not report a failing assertion. It **stopped**, mid-run, at
+`--- notify ---`. A silent halt rather than a red line is what memory corruption looks
+like from outside, and it is a far weaker signal than a failure. The buffers now carry
+the `NS_SIZE` relationship in a comment rather than a bare number.
+
 ## [1.6.9] — 2026-08-26
 
 **Services can finally run as something other than root.**
