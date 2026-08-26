@@ -100,7 +100,6 @@ modules = [
     "src/resolver.cyr",
     "src/health.cyr",
     "src/notify.cyr",
-    "src/tmpfiles.cyr",
     "src/audit.cyr",
     "src/audit_ext.cyr",
     "src/init.cyr",

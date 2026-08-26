@@ -7,7 +7,7 @@
 #   3. Block signals + create signalfd
 #   4. Setup epoll event loop + notify socket
 #   5. Load config from /etc/kybernet/config.json (or defaults)
-#   6. Initialize argonaut + execute tmpfiles
+#   6. Initialize argonaut
 #   7. Run boot stages + start services (wave-based)
 #   8. Event loop: signals, health, watchdog, notify, restarts
 #   9. Shutdown on SIGTERM/SIGINT (coordinated via argonaut)
@@ -332,56 +332,6 @@ fn reload_config() {
     return 1;
 }
 
-# ================================================================
-# Tmpfile directive execution
-# ================================================================
-
-enum TmpfileType {
-    TMP_DIR = 0;
-    TMP_SYMLINK = 1;
-    TMP_TOUCH = 2;
-}
-
-fn execute_tmpfiles() {
-    if (g_config == 0) { return 0; }
-    var tmpfiles = config_tmpfiles(g_config);
-    if (tmpfiles == 0) { return 0; }
-
-    var count = vec_len(tmpfiles);
-    var created = 0;
-    for (var ti = 0; ti < count; ti = ti + 1) {
-        var entry = vec_get(tmpfiles, ti);
-        var etype = load64(entry);
-        var path = load64(entry + 8);
-
-        if (etype == TMP_DIR) {
-            var r = sys_mkdir(path, 0x1C0);
-            if (is_err(r) == 0) { created = created + 1; }
-        } elif (etype == TMP_SYMLINK) {
-            var target = load64(entry + 16);
-            # sys_symlink() dispatches to symlinkat(AT_FDCWD,...) on
-            # aarch64 (SYS_SYMLINK 88 is x86_64-only — aarch64 numbers
-            # SYS_PIPE2 there). Same lesson as the 1.0.0 sandbox.cyr
-            # SYS_OPEN fix.
-            sys_symlink(target, path);
-            created = created + 1;
-        } elif (etype == TMP_TOUCH) {
-            var mode = load64(entry + 16);
-            # O_CLOEXEC: tmpfile touch — fd is closed immediately after
-            # creation; CLOEXEC guards against fork-between-open-and-close.
-            var fd = sys_open(path, O_WRONLY | O_CREAT | O_CLOEXEC, mode);
-            if (fd >= 0) {
-                sys_close(fd);
-                created = created + 1;
-            }
-        }
-    }
-
-    if (created > 0) {
-        klog2("tmpfiles created: ", "ok");
-    }
-    return created;
-}
 # Prompt for the emergency password on a REAL console and return its length,
 # or -1. `fd` must be an interactive descriptor from console_open_rw().
 #
@@ -1302,9 +1252,6 @@ fn kybernet_run() {
     argonaut_set_pre_exec_hook(&kyb_pre_exec);
     klog("argonaut initialized");
     kmsg("phase 6: argonaut ready");
-
-    # Phase 6b: Execute tmpfile directives
-    execute_tmpfiles();
 
     # Phase 6c: Edge boot pre-flight (capability detect + PCR read).
     # No-op unless config_boot_mode == BOOT_EDGE && config_verify_boot.

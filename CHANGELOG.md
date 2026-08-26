@@ -7,6 +7,70 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.6.2] — 2026-08-25
+
+**Code that does nothing, and docs that say it does.**
+Suite 632 assertions. Harness 45 properties. argonaut import list 13 → 12 modules;
+no dep version change (argonaut stays 1.13.3).
+
+### Removed — boot phase 6b was a provable no-op with three defects
+
+`execute_tmpfiles()` and `enum TmpfileType` are gone from `main.cyr`, along with the
+phase 6b call site and the `src/tmpfiles.cyr` entry in argonaut's import list.
+
+**It could never have run.** `config_tmpfiles(cfg)` is a getter; there is no
+`config_set_tmpfiles` anywhere in argonaut, and the only write to that field in either
+tree is `store64(cfg + 56, vec_new())` inside `argonaut_config_default()`
+(`argonaut/src/types.cyr:1006`). No `tmpfiles` key was parsed in any kybernet source.
+So the loop body had never executed once, in any release.
+
+**And it was wrong three ways if it ever had:**
+
+- `TMP_TOUCH = 2` aliased argonaut's `TMP_DEVICE = 2`. argonaut's enum is *unvalued*, so
+  cyrius numbers it 0/1/2, and the only doubly-defined name — `TMP_SYMLINK` — holds the
+  same value in both. There was therefore **no `conflicting value` warning to catch it**.
+- The touch arm read offset `+16` as `mode`. In argonaut's `TmpfileEntry`
+  (`{entry_type@0, path@8, target@16, mode@24, uid@32, gid@40, …}`) that is `target`, a
+  `Str` pointer, which was then passed as the mode argument to `sys_open`.
+- It passed the boxed `Str` at `+8` straight to `sys_mkdir` as a cstr (standing rule 3).
+- A fourth, previously unfiled: the symlink arm discarded `sys_symlink`'s return and
+  incremented `created` unconditionally, so a failed symlink counted as a success.
+
+**Why deleted rather than built.** The need is real — `/run` is a fresh tmpfs every
+boot, and `aethersafha`, which kybernet starts *by default* in `BOOT_DESKTOP`, binds
+sockets under `/run/agnos/{agents,plugins}` and contains no `mkdir`. But kybernet
+already ships the mechanism for it: a `"type": "oneshot"` service, wave-ordered,
+cgroup-placed, supervised, and covered by six of the nine QEMU fixtures. A service with
+no `security` block runs unconfined as root and can `mkdir`/`chown`/`chmod` freely.
+Building tmpfiles instead would have put a new root-privileged filesystem-mutation
+surface — config-driven, needing a JSON schema, a path validator and a symlink-safe walk
+— inside the least recoverable process on the machine, to buy what one config object
+already buys. The roadmap item is now "port `agnos-init.sh`'s `setup_directories()` to a
+oneshot", with the two real blockers named.
+
+No harness change: phase 6b emitted no `kmsg`, so no marker moves, and standing rule 27
+does not apply to a deletion. Its non-applicability is part of why deleting won.
+
+### Fixed — two audit findings that cleared this code for the wrong reason
+
+Both prior audits looked at `execute_tmpfiles` and let it through. Both reached the right
+operational verdict — nothing reached a syscall — via reasoning that does not hold, and
+both are now retracted in place rather than edited, so the record shows what was believed
+and when it was corrected.
+
+- `docs/audit/2026-05-11-audit.md` cleared path injection because "tmpfile paths come
+  from `config_tmpfiles()`, also argonaut-validated". Nothing populates that field, and
+  the validator argonaut ships (`validate_tmpfile_entries`) has **zero callers in either
+  tree** — it describes a function that has never run.
+- `docs/audit/2026-08-24-audit.md` listed "tmpfiles Str-as-cstr" among findings "refuted
+  against the actual code". The defect was real; what was true is that it was
+  unreachable.
+
+**The lesson, recorded because it generalises: "unreachable" and "correct" are not the
+same verdict.** Filing the first as the second is what let three defects sit in
+`main.cyr` for the lifetime of the function — and "it's validated" is an active
+invitation to the next person to wire up the parser.
+
 ## [1.6.1] — 2026-08-25
 
 **Gates that could not fail, and the kernel panic the first new one found.**

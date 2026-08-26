@@ -19,15 +19,34 @@ of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into
 
 ## v1.6.2 — code that does nothing, and docs that say it does
 
-- [ ] **Boot phase 6b is a provable no-op.** `execute_tmpfiles()` (`main.cyr:316-361`)
-      iterates `config_tmpfiles(cfg)`, which only `argonaut_config_default()` ever
-      writes — as an empty `vec_new()`. No `tmpfiles` key is parsed anywhere in
-      `src/lib/`, so the loop body has never executed. It would not work if it did:
-      main.cyr declares its own `enum TmpfileType` that silently collides with
-      argonaut's (`TMP_TOUCH == TMP_DEVICE == 2`; cyrius does not warn on duplicate
-      enums), reads `mode` at the offset where argonaut keeps `target`, and hands a
-      boxed `Str` to `sys_mkdir` as a cstr (rule 3). Advertised at `main.cyr:10` and
-      `overview.md:55`. Either build it or delete the phase and the enum.
+- [ ] **Port `agnos-init.sh`'s `setup_directories()` to a kybernet oneshot service.**
+      Replaces the deleted phase 6b (1.6.2), and it is the *real* form of the need
+      phase 6b pretended to serve. `/run` is a fresh tmpfs on every boot
+      (`mount.cyr`), so `/run/agnos/{agents,plugins}` and `/run/user/1000` cannot be
+      shipped in an image — and `aethersafha`, which kybernet starts **by default** in
+      `BOOT_DESKTOP` (argonaut `services.cyr:216`), binds sockets in both
+      (`aethersafha/src/apps.cyr:381`, `plugin_host.cyr:468`) and contains no `mkdir`.
+      Today AGNOS covers this with a systemd oneshot
+      (`agnosticos/config/init/agnos-init.sh:47-62`); kybernet is the PID 1 that
+      replaces systemd (`agnosticos/README.md:64`), so the work lands here.
+      **Do it as a `"type": "oneshot"` service definition, not as init-resident code** —
+      that path is already parsed, wave-ordered, cgroup-placed, supervised and
+      harness-gated (six of the nine QEMU fixtures are oneshots), and a service with no
+      `security` block runs unconfined as root, so it can `mkdir`/`chown`/`chmod`
+      freely. Putting the same capability inside PID 1 would mean a new root-privileged
+      filesystem-mutation surface in the least recoverable process on the machine, plus
+      a JSON schema, a path validator, a symlink-safe walk and a rule-27 fixture — to
+      buy what one config object already buys. This is mostly an agnosticos change.
+      ⚠ Two kybernet-side blockers to close first, both real:
+        - **A failed prerequisite does not block its dependents.** `start_services`
+          (`main.cyr`) starts waves in order, but a wave-N failure only increments
+          `failed` — wave N+1 runs anyway. So a broken `agnos-init` would still let the
+          confined compositor start and exit 126. This is the item that actually makes
+          the oneshot approach trustworthy, and it is worth doing on its own merits.
+        - **`aethersafha`'s `depends_on` is hardcoded** in argonaut's
+          `default_services(BOOT_DESKTOP)`, so making it depend on a new `agnos-init`
+          needs either an argonaut change or a config that replaces the default set.
+
 - [ ] **sd_notify is received, classified, logged, and discarded.** `handle_notify_msg`
       (`main.cyr:1080-1099`) is five `klog` calls and a `default: return 0`; nothing
       reaches `g_init`. `READY=1` marks nothing ready, `WATCHDOG=1` refreshes nothing
@@ -56,23 +75,12 @@ of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into
       number already exists; it just needs returning and logging. An argonaut change
       plus a consumer bump, and then the `kyb-orphan` fixture (added at 1.6.1) becomes
       assertable instead of merely exercised.
-- [ ] **The cgroup teardown sweep kills and immediately `rmdir`s, without waiting for
-      the processes to actually die.** `remove_all_service_cgroups` calls `kill_cgroup(nm)`
-      then `remove_service_cgroup(nm)` on the next line; a SIGKILL is asynchronous, so the
-      `rmdir` can hit a still-populated cgroup and return EBUSY. Observed at v1.6.1: with
-      a child alive in one service's cgroup at shutdown, `services parsed: 9` but
-      `removed service cgroups: 8`, and the directory is leaked. The count is logged, so
-      the symptom is visible — but nothing acts on it and no gate asserts the two numbers
-      match. Wants a bounded wait on `cgroup.procs` emptying (or a retry) between the two
-      calls, and a harness assertion that created == removed.
 - [ ] **Dead chains to delete or wire.** `cgroup_setup_agent` (zero references anywhere)
       → `move_to_cgroup` + `cgroup_apply_resource_limits`, all superseded at 1.5.5 by the
       child-side `_kyb_join_cgroup`; `any_failures` (`reaper.cyr:69`);
       `edge_boot_elapsed_ms` / `edge_boot_verity_ok` / `edge_boot_pcr_mismatches` (zero
       callers, and two comments claim "main reads these … in the boot summary" — there is
       no boot summary); `edge_hash_device` / `edge_luks_device` / `edge_expected_pcrs`.
-      `src/tmpfiles.cyr` is the one argonaut module with no call site in the entire link
-      set — one manifest line.
 - [ ] **Stale comments that mislead about live behaviour.** `seccomp.cyr:228` says the
       module "is not yet wired into the boot path" — it has been since 1.4.3, and that
       claim is what let the aarch64 validation lapse. `edge_boot.cyr:218-219` names

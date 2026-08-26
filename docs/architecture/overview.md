@@ -52,7 +52,6 @@ Phase 4 : Block signals, create signalfd
 Phase 5 : Create epoll event loop + timerfds
 Phase 5b: Bind the sd_notify socket, publish $NOTIFY_SOCKET      (1.5.4)
 Phase 6 : Load /etc/kybernet/config.json, initialize argonaut
-Phase 6b: Execute tmpfile directives
 Phase 6c: Edge-boot pre-flight — capability detect, PCR read,
           dm-verity integrity verification                       (1.2.0/1.5.7)
 Phase 7 : Run boot stages (OK / SKIP / FAIL per stage)           (1.5.1)
