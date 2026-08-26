@@ -17,7 +17,7 @@ of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into
 
 ---
 
-## v1.6.10 — code that does nothing, and docs that say it does
+## v1.6.11 — code that does nothing, and docs that say it does
 
 - [ ] **Port `agnos-init.sh`'s `setup_directories()` to a kybernet oneshot service.**
       Replaces the deleted phase 6b (1.6.2), and it is the *real* form of the need
@@ -53,18 +53,6 @@ of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into
       `init_reap_services`' return is ignored, so a service leaking children produces no
       evidence anywhere. Needs a consumer bump to 1.13.5, a klog line, and then the
       `kyb-orphan` fixture (1.6.1) becomes assertable instead of merely exercised.
-- [ ] **DELETE `sandbox_from_ruleset` + `_ll_access_to_kernel` and their benchmark.**
-      Promoted from "either wire it or delete it" to a decision: DELETE. At 1.6.10 its
-      benchmark flagged a +20% regression (2560 -> 3075 ns, paired against the 1.6.9
-      tag) on a release that never touched `sandbox.cyr` — pure link-layout movement in
-      a function whose only caller in the tree is `src/bench.cyr`. A benchmark of dead
-      code that fails release gates is worse than no benchmark: it measures where the
-      linker put something nothing calls. ⚠ The removal and the `bench-history.sh`
-      COUNT expectation must land in the same change, and note CLAUDE.md rule 9
-      discusses `_ll_access_to_kernel`'s if-ladder — that rule's corrected rationale
-      (1.6.4) is that the ladder is kept because it is harmless, NOT because it guards
-      PID 1, so deleting the whole dead chain does not contradict it. Update rule 9 in
-      the same change.
 - [ ] **Per-service health scheduling (argonaut).** 1.6.7 made the poll timer take the
       SMALLEST configured `interval_ms` so nobody is polled slower than they asked — but
       `init_poll_health` checks every service with a health_check on each tick, so a

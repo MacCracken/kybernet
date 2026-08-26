@@ -101,9 +101,9 @@ fn _access_to_flags(access) {
     }
 }
 
-# Handled access: every filesystem operation we control. Both
-# sandbox_apply and sandbox_from_ruleset declare the ruleset over
-# this full mask, so it lives here once.
+# Handled access: every filesystem operation we control. `sandbox_apply`
+# declares the ruleset over this full mask. (It said "both sandbox_apply and
+# sandbox_from_ruleset" until 1.6.11, when the latter was removed as dead.)
 fn _landlock_handled_mask() {
     return LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_WRITE_FILE
     | LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR
@@ -188,89 +188,24 @@ fn sandbox_apply(builder) {
 # Agnostik integration
 # ================================================================
 
-# Convert agnostik LandlockFsAccess flags vec to kernel Landlock bitmask.
-fn _ll_access_to_kernel(access_vec) {
-    var mask = 0;
-    var alen = vec_len(access_vec);
-    for (var ai = 0; ai < alen; ai = ai + 1) {
-        var flag = vec_get(access_vec, ai);
-        # agnostik LL_ enums map 1:1 to kernel bit positions.
-        #
-        # Written as an if-ladder rather than a `switch`. cyrius 6.4.62
-        # MISCOMPILED a switch of exactly this shape — cases whose bodies
-        # accumulate (`mask = mask | CONST`) inside a loop, closed by a
-        # `default: return` — into a SIGSEGV at the call site, while a switch
-        # of `case N: return K` bodies compiled fine. Root cause (cyrius
-        # 6.5.20): the regalloc NOP-harvest compactor did not know the switch
-        # jump table existed and shifted every entry +4 per preceding case
-        # body — so only bodies containing a local store were affected, which
-        # is precisely the accumulate form. FIXED upstream at 6.5.20.
-        #
-        # The ladder stays: it is correct on every toolchain, this is the
-        # sandbox path applied to every service (a miscompile here is a PID-1
-        # crash), and there is nothing to gain from churning it back. See
-        # CHANGELOG 1.4.0 (discovery) and 1.4.1 (upstream fix).
-        #
-        # An unknown flag is skipped (the old `default: return mask` bailed
-        # early; skipping is strictly more robust and never fires on the
-        # agnostik-produced 0..12 flag set).
-        if (flag == 0)  { mask = mask | LANDLOCK_ACCESS_FS_EXECUTE; }
-        if (flag == 1)  { mask = mask | LANDLOCK_ACCESS_FS_WRITE_FILE; }
-        if (flag == 2)  { mask = mask | LANDLOCK_ACCESS_FS_READ_FILE; }
-        if (flag == 3)  { mask = mask | LANDLOCK_ACCESS_FS_READ_DIR; }
-        if (flag == 4)  { mask = mask | LANDLOCK_ACCESS_FS_REMOVE_DIR; }
-        if (flag == 5)  { mask = mask | LANDLOCK_ACCESS_FS_REMOVE_FILE; }
-        if (flag == 6)  { mask = mask | LANDLOCK_ACCESS_FS_MAKE_CHAR; }
-        if (flag == 7)  { mask = mask | LANDLOCK_ACCESS_FS_MAKE_DIR; }
-        if (flag == 8)  { mask = mask | LANDLOCK_ACCESS_FS_MAKE_REG; }
-        if (flag == 9)  { mask = mask | LANDLOCK_ACCESS_FS_MAKE_SOCK; }
-        if (flag == 10) { mask = mask | LANDLOCK_ACCESS_FS_MAKE_FIFO; }
-        if (flag == 11) { mask = mask | LANDLOCK_ACCESS_FS_MAKE_BLOCK; }
-        if (flag == 12) { mask = mask | LANDLOCK_ACCESS_FS_MAKE_SYM; }
-    }
-    return mask;
-}
-
-# Build a sandbox from an agnostik landlock_ruleset.
-# Converts agnostik fs rules to kybernet sandbox rules and applies.
-# Returns: Result (Ok(0)=applied, Ok(1)=landlock unavailable, Err(errno))
-fn sandbox_from_ruleset(ruleset) {
-    var fs_rules = llrs_fs_rules(ruleset);
-    var rlen = vec_len(fs_rules);
-    if (rlen == 0) { return Ok(0); }
-
-    var ruleset_fd = _landlock_create_ruleset();
-    if (ruleset_fd < 0) {
-        var errno = 0 - ruleset_fd;
-        if (errno == 38) { return Ok(1); }
-        if (errno == 95) { return Ok(1); }
-        return Err(errno);
-    }
-
-    for (var ri = 0; ri < rlen; ri = ri + 1) {
-        var rule = vec_get(fs_rules, ri);
-        var path = llfsr_path(rule);
-        var access_vec = llfsr_allowed_access(rule);
-        var allowed = _ll_access_to_kernel(access_vec);
-
-        if (allowed != 0) {
-            var rc = _landlock_add_path(ruleset_fd, path, allowed);
-            if (rc < 0) {
-                sys_close(ruleset_fd);
-                return Err(0 - rc);
-            }
-        }
-    }
-
-    var ret = syscall(SYS_LANDLOCK_RESTRICT_SELF, ruleset_fd, 0);
-    sys_close(ruleset_fd);
-    if (ret < 0) { return Err(0 - ret); }
-    return Ok(0);
-}
-
 # Build sandbox from agnostik sandbox_config.
 # Extracts fs_rules, converts to filesystem_rule access levels, applies.
 # Returns: Result
+# ⚠ `sandbox_from_ruleset` AND `_ll_access_to_kernel` WERE REMOVED AT 1.6.11.
+# Neither had a production caller: `_ll_access_to_kernel`'s only caller was
+# `sandbox_from_ruleset`, whose only caller in the whole tree was
+# `src/bench.cyr`. A chunk of the Landlock surface existed solely to be
+# benchmarked.
+#
+# What forced the decision: at 1.6.10 that benchmark flagged a +20% regression
+# (2560 -> 3075 ns, paired against the 1.6.9 tag) on a release that never
+# touched this file — pure link-layout movement. A benchmark of dead code that
+# fails release gates is worse than no benchmark, because it measures where the
+# linker put something nothing calls.
+#
+# The live per-service path is `sandbox_from_config` -> `_access_to_flags`,
+# which is unaffected and is what `kyb_pre_exec` actually uses.
+
 fn sandbox_from_config(config) {
     var fs_rules = sandbox_fs_rules(config);
     var rlen = vec_len(fs_rules);

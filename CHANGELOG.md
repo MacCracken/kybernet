@@ -7,6 +7,53 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.6.11] — 2026-08-26
+
+**Deleting a benchmark of dead code, without weakening the gate that forbids it.**
+Suite 676 assertions. Benchmarks 57 → 56 (declared). No dep change.
+
+### Removed — `sandbox_from_ruleset` and `_ll_access_to_kernel`
+
+Neither had a production caller. `_ll_access_to_kernel`'s only caller was
+`sandbox_from_ruleset`, whose only caller in the entire tree was `src/bench.cyr` — a
+chunk of the Landlock surface existing solely to be benchmarked.
+
+What forced the decision rather than leaving it filed: at 1.6.10 that benchmark flagged
+a **+20% regression** (2560 → 3075 ns, paired against the 1.6.9 tag) on a release that
+never touched `sandbox.cyr`. Pure link-layout movement. **A benchmark of dead code that
+fails release gates is worse than no benchmark** — it measures where the linker put
+something nothing calls, and it costs a release cycle to prove that each time.
+
+The live per-service path is untouched: `sandbox_from_config` → `_access_to_flags` is
+what `kyb_pre_exec` uses, and `kyb-landlock` still proves denial from inside the child.
+
+### Added — `BENCH_REMOVED=<n>`, a declared removal that cannot hide a real one
+
+Deleting a benchmark trips `bench-history.sh`'s shrink check, which exists because a
+deleted benchmark leaves the regression gate silently. The fix is not to weaken it.
+
+`BENCH_REMOVED=<n>` declares "I removed exactly n benchmarks on purpose", and **must
+match the shortfall exactly** — so a deliberate removal of 1 cannot absorb an unrelated
+disappearance that lands in the same run. Verified both directions: undeclared it still
+fails (`SHRANK — 56 < 57`), declared it passes with the shrink stated in the log.
+
+### Changed — standing rule 9 rewritten, because its subject no longer exists
+
+The rule kept `_ll_access_to_kernel`'s explicit `if`-ladder and justified it as "the
+per-service Landlock path where a miscompile is a PID-1 crash". That was **false**, as
+1.6.4 established: the function's only caller chain terminated in `src/bench.cyr`. It
+guarded a benchmark while claiming to guard init, for seven releases.
+
+Rule 9 now points at the path that IS live — `sandbox_from_config` → `_access_to_flags`,
+a `switch` of `case N: return K` bodies, i.e. the shape the rule itself states was never
+affected by the 6.4.62 miscompile — and keeps the actionable part: if a future
+`_access_to_flags` ever needs to accumulate flags across cases, write an `if`-ladder
+rather than trusting the fix, because that IS the path where a miscompile is a PID-1
+crash.
+
+**A rule defended by a false reason survives until someone checks, and then it is worth
+less than nothing.**
+
 ## [1.6.10] — 2026-08-26
 
 **The last sd_notify verb, and the difference between authentication and authorisation.**

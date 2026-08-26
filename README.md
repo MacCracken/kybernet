@@ -131,7 +131,7 @@ cyrius bench src/bench.cyr                 # Run benchmarks
 - **Data-driven mount table** — not hardcoded per-mount calls
 - **sd_notify compatible** — READY, STOPPING, WATCHDOG, STATUS, RELOADING messages via epoll
 - **String builder** for path construction and logging
-- **676 tests**, 57 benchmarks
+- **676 tests**, 56 benchmarks
 
 ## Dependencies
 
@@ -171,7 +171,7 @@ boot. With the working lane moved onto the caller's arena it costs +25 KB.
 
 ```sh
 cyrius test src/test.cyr            # 676 assertions
-bash scripts/bench-history.sh       # 57 benchmarks, load-tolerant regression gate
+bash scripts/bench-history.sh       # 56 benchmarks, load-tolerant regression gate
 bash qemu/boot-test.sh              # PID-1 boot harness (needs KVM)
 ```
 

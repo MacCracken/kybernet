@@ -304,6 +304,17 @@ PREV_TS=$(awk -F, 'NR>1 && $1 != "'"$TIMESTAMP"'" {t=$1} END {print t}' "$HISTOR
 if [ -n "$PREV_TS" ]; then
     PREV_COUNT=$(awk -F, -v t="$PREV_TS" '$1==t' "$HISTORY_FILE" | wc -l)
     if [ "$RECORDED" -lt "$PREV_COUNT" ]; then
+        # ⚠ A DELIBERATE REMOVAL IS DECLARED, NOT ASSUMED. `BENCH_REMOVED=<n>`
+        # says "I removed exactly n benchmarks in this change, on purpose" —
+        # and it must MATCH the shortfall exactly, so it cannot absorb an
+        # unrelated disappearance that happens to land in the same run. The
+        # gate exists because deleting a benchmark removes it from regression
+        # coverage silently; an explicit count keeps that deliberate without
+        # making it impossible.
+        SHORTFALL=$(( PREV_COUNT - RECORDED ))
+        if [ -n "${BENCH_REMOVED:-}" ] && [ "$BENCH_REMOVED" = "$SHORTFALL" ]; then
+            echo "note: suite shrank ${PREV_COUNT} -> ${RECORDED}, declared via BENCH_REMOVED=${BENCH_REMOVED}"
+        else
         echo "ERROR: the benchmark suite SHRANK — ${RECORDED} < ${PREV_COUNT} recorded on ${PREV_TS}."
         echo "A benchmark was deleted, renamed, or self-skipped. Every one of those removes"
         echo "it from the regression gate without any regression being reported."
@@ -314,7 +325,14 @@ if [ -n "$PREV_TS" ]; then
             echo "(src/bench.cyr) both open with \`if (is_root() == 1) { return 0; }\` and report"
             echo "nothing under root, so the count drops by exactly 2. Re-run unprivileged."
         fi
+        if [ -n "${BENCH_REMOVED:-}" ]; then
+            echo ""
+            echo "BENCH_REMOVED=${BENCH_REMOVED} was set but the shortfall is ${SHORTFALL}."
+            echo "The declared count must match exactly, or a genuine disappearance could"
+            echo "hide behind a deliberate one."
+        fi
         exit 1
+        fi
     fi
     if [ "$RECORDED" -gt "$PREV_COUNT" ]; then
         echo "note: suite grew ${PREV_COUNT} -> ${RECORDED} benchmarks"

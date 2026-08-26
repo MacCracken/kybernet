@@ -837,31 +837,6 @@ fn bench_sandbox_rule_new() {
     return 0;
 }
 
-fn bench_sandbox_from_ruleset() {
-    var iters = 10000;
-    var llrs = landlock_ruleset_new();
-    var fs = llrs_fs_rules(llrs);
-    var r1 = landlock_fs_rule_new("/etc");
-    var a1 = llfsr_allowed_access(r1);
-    vec_push(a1, LL_READ_FILE);
-    vec_push(a1, LL_READ_DIR);
-    vec_push(fs, r1);
-    var r2 = landlock_fs_rule_new("/tmp");
-    var a2 = llfsr_allowed_access(r2);
-    vec_push(a2, LL_READ_FILE);
-    vec_push(a2, LL_WRITE_FILE);
-    vec_push(fs, r2);
-
-    var start = now_ns();
-    var k = 0;
-    while (k < iters) {
-        sandbox_from_ruleset(llrs);
-        k = k + 1;
-    }
-    report("sandbox_from_ruleset(2 rules)", now_ns() - start, iters);
-    return 0;
-}
-
 # ================================================================
 # Privilege operations (cold path — per service pre_exec)
 # ================================================================
@@ -1296,7 +1271,6 @@ fn main() {
     arena_reset_clean();
     bench_sandbox_rule_new();
     arena_reset_clean();
-    bench_sandbox_from_ruleset();
     println("");
 
     # --- Privilege ops ---
