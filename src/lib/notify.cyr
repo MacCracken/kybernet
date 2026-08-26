@@ -13,16 +13,21 @@
 # releases after its own stated trigger fired. Hand-rolled syscall tables are
 # exactly what standing rule 1 exists to prevent; the fix is to not have one.
 
-# ⚠ `SOCK_DGRAM_TYPE`, NOT `SOCK_DGRAM`, AND THE SUFFIX IS LOAD-BEARING.
-# argonaut declares `enum SocketType { SOCK_STREAM; SOCK_DGRAM; SOCK_SEQPACKET; }`
-# with NO values (`argonaut/src/types.cyr:459`), so cyrius numbers it from 0 —
-# and it WINS the link against the stdlib's correct `net.cyr` values (1/2).
-# Probed on both arches: in kybernet's link set the bare name `SOCK_DGRAM`
-# resolves to **1** (SOCK_STREAM's real value) and `SOCK_STREAM` to **0**.
-# That is the standing `duplicate symbol 'SOCK_STREAM' redefined with
-# conflicting value` warning on every build. Any new socket code in this repo
-# must use a locally-named constant; using the bare name would silently open a
-# STREAM socket for a datagram protocol.
+# `SOCK_DGRAM_TYPE` rather than the bare `SOCK_DGRAM` — historical, and kept.
+#
+# Until argonaut 1.13.5 its `enum SocketType` was UNVALUED, so cyrius numbered
+# it from 0 and it won the link against the stdlib's correct `net.cyr` values:
+# the bare name `SOCK_DGRAM` resolved to **1** (SOCK_STREAM's real value) on
+# both arches, which is what produced the standing `duplicate symbol
+# 'SOCK_STREAM' redefined with conflicting value` warning on every build. This
+# local constant existed to avoid it.
+#
+# argonaut 1.13.5 gave the enum kernel values and the warning is gone, so the
+# bare name would now be correct. This is kept anyway: it costs nothing, it
+# states the intended value at the one call site that matters, and it means a
+# dep regression cannot silently turn kybernet's datagram socket into a stream
+# socket. src/test.cyr asserts both, so a regression in either shows up as a
+# test failure rather than as a subtly wrong socket.
 enum SockConst {
     AF_UNIX = 1;
     SOCK_DGRAM_TYPE = 2;

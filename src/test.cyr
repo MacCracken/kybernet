@@ -2473,13 +2473,21 @@ fn test_knotify_socket_constants() {
     assert_eq(KYB_MSG_DONTWAIT, 64, "MSG_DONTWAIT");
     assert_eq(KYB_MSG_CTRUNC, 8, "MSG_CTRUNC");
 
-    # ⚠ The suffix on SOCK_DGRAM_TYPE is load-bearing: argonaut's unvalued
-    # `enum SocketType` shadows the stdlib's correct values, so in this link
-    # set the BARE name SOCK_DGRAM resolves to 1 (SOCK_STREAM's real value).
-    # If this assertion ever fails, someone used the bare name and kybernet is
-    # opening a STREAM socket for a datagram protocol.
+    # ⚠ THIS ASSERTION CHANGED MEANING AT 1.6.7, AND THE CHANGE IS THE POINT.
+    # From 1.6.3 it read `assert_eq(SOCK_DGRAM, 1, ...)` — pinning the BROKEN
+    # state, because argonaut's `enum SocketType` was unvalued and cyrius
+    # numbered it from 0, so the bare name resolved to SOCK_STREAM's real value.
+    # argonaut 1.13.5 gave the enum kernel values, so it is 2 now and that test
+    # correctly went red on the fix.
+    #
+    # The local SOCK_DGRAM_TYPE is KEPT even though the collision is gone: it
+    # costs nothing, it documents which value is intended at the one call site
+    # that matters, and it means a future dep regression cannot silently turn
+    # kybernet's datagram socket into a stream socket. If SOCK_DGRAM ever reads
+    # 1 again, argonaut has regressed.
     assert_eq(SOCK_DGRAM_TYPE, 2, "SOCK_DGRAM_TYPE is the real SOCK_DGRAM");
-    assert_eq(SOCK_DGRAM, 1, "bare SOCK_DGRAM is still argonaut's shadowed 1");
+    assert_eq(SOCK_DGRAM, 2, "argonaut 1.13.5 fixed the shadowed SocketType");
+    assert_eq(SOCK_STREAM, 1, "SOCK_STREAM is the kernel value too");
     return 0;
 }
 
@@ -2510,6 +2518,62 @@ fn test_log_console_gate() {
     assert_eq(log_console_enabled(), 1, "restored to on");
 
     log_set_console(was);
+    return 0;
+}
+
+fn test_health_interval_from_services() {
+    println("--- health poll interval (1.6.7) ---");
+
+    # ⚠ THE REGRESSION THIS PINS. `health_check.interval_ms` was parsed onto the
+    # HealthCheck struct and then ignored: the reactor polled on a hardcoded 30 s
+    # timer, so a service asking for 5 s got 30. That also mis-sizes argonaut's
+    # runtime watchdog, which is `interval * retries + timeout` computed from the
+    # service's OWN interval — so the service could be killed for being late when
+    # it was the poller that was late.
+
+    # No services at all -> the historical default, unchanged.
+    assert_eq(health_interval_from_services(0), 30, "null vec keeps 30s");
+    assert_eq(health_interval_from_services(vec_new()), 30, "empty vec keeps 30s");
+
+    # A service with no health_check contributes nothing.
+    var v = vec_new();
+    var plain = svc_def_new(str_from("plain"), str_from("d"), str_from("/bin/true"));
+    vec_push(v, plain);
+    assert_eq(health_interval_from_services(v), 30, "service without health_check keeps 30s");
+
+    # One service asking for 5s gets 5s.
+    var a = svc_def_new(str_from("a"), str_from("d"), str_from("/bin/true"));
+    svc_def_set_health_check(a, health_check_new(HC_PROCESS_ALIVE, 0, 0, 5000, 1000, 2));
+    var v2 = vec_new();
+    vec_push(v2, a);
+    assert_eq(health_interval_from_services(v2), 5, "5000ms -> 5s");
+
+    # The MINIMUM wins, so nobody is polled more slowly than they asked.
+    var b = svc_def_new(str_from("b"), str_from("d"), str_from("/bin/true"));
+    svc_def_set_health_check(b, health_check_new(HC_PROCESS_ALIVE, 0, 0, 2000, 1000, 2));
+    vec_push(v2, b);
+    assert_eq(health_interval_from_services(v2), 2, "min of 5s and 2s is 2s");
+
+    # Clamped below at 1s — a sub-second request must not spin the reactor.
+    var c = svc_def_new(str_from("c"), str_from("d"), str_from("/bin/true"));
+    svc_def_set_health_check(c, health_check_new(HC_PROCESS_ALIVE, 0, 0, 10, 1000, 2));
+    var v3 = vec_new();
+    vec_push(v3, c);
+    assert_eq(health_interval_from_services(v3), 1, "10ms clamps up to 1s");
+
+    # Rounds UP, so a 1500ms request is polled at 2s rather than 1s.
+    var d = svc_def_new(str_from("d"), str_from("d"), str_from("/bin/true"));
+    svc_def_set_health_check(d, health_check_new(HC_PROCESS_ALIVE, 0, 0, 1500, 1000, 2));
+    var v4 = vec_new();
+    vec_push(v4, d);
+    assert_eq(health_interval_from_services(v4), 2, "1500ms rounds up to 2s");
+
+    # Clamped above at 30s — a very long interval keeps the default cadence.
+    var e = svc_def_new(str_from("e"), str_from("d"), str_from("/bin/true"));
+    svc_def_set_health_check(e, health_check_new(HC_PROCESS_ALIVE, 0, 0, 600000, 1000, 2));
+    var v5 = vec_new();
+    vec_push(v5, e);
+    assert_eq(health_interval_from_services(v5), 30, "600s clamps down to 30s");
     return 0;
 }
 
@@ -2631,6 +2695,7 @@ fn main() {
     test_knotify_status_sanitize();
     test_knotify_socket_constants();
     test_log_console_gate();
+    test_health_interval_from_services();
     test_seccomp_agnostik_bridge();
     test_sandbox_rules();
     return assert_summary();

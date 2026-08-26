@@ -1355,6 +1355,14 @@ fn handle_notify_msg() {
 # Main boot + event loop
 # ================================================================
 
+# Wrapper over the pure `health_interval_from_services` (src/lib/svc_config.cyr),
+# which is where the logic lives so src/test.cyr can reach it — main.cyr is not
+# included by the test binary (standing rule 34).
+fn _health_interval_for_config() {
+    if (g_config == 0) { return 30; }
+    return health_interval_from_services(config_services(g_config));
+}
+
 fn kybernet_run() {
     klog("starting");
     kmsg("phase 0: starting");
@@ -1494,6 +1502,22 @@ fn kybernet_run() {
     # a hook registered after the first spawn confines nothing.
     argonaut_set_pre_exec_hook(&kyb_pre_exec);
     klog("argonaut initialized");
+
+    # Re-arm the health timer to what the services actually asked for. The
+    # timer was necessarily created at phase 5, before the config existed.
+    # Harness loop mode keeps its short interval so ticks land inside the 5 s
+    # window — the gate needs the tick to fire, not to be realistic.
+    if (g_loop_harness == 0) {
+        var hiv = _health_interval_for_config();
+        if (hiv != 30) {
+            if (eventloop_rearm_health(hiv) == 1) {
+                klog2("health poll interval (s): ", _u64_str(hiv));
+            } else {
+                klog("WARNING: could not re-arm the health timer — staying at 30s");
+            }
+        }
+    }
+
     kmsg("phase 6: argonaut ready");
 
     # Phase 6c: Edge boot pre-flight (capability detect + PCR read).

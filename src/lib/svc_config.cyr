@@ -536,3 +536,50 @@ fn svc_apply_security_json(sd, obj) {
     svc_def_set_seccomp(sd, kyb_seccomp_policy_new(kind, nnp, ll_opt));
     return 1;
 }
+
+# The health-poll interval the configured services actually asked for.
+#
+# ⚠ THIS IS A POLL FLOOR, NOT PER-SERVICE SCHEDULING, AND THE DIFFERENCE IS
+# STATED SO NOBODY READS MORE INTO IT. argonaut's `init_poll_health` checks
+# EVERY service with a health_check on each tick; kybernet cannot ask it for a
+# subset. So the timer is set to the SMALLEST interval any service requested,
+# which means:
+#   - no service is polled more slowly than it asked for (the defect being
+#     fixed: a 5 s service was polled at the hardcoded 30 s), and
+#   - a service that asked for a LONGER interval is polled more often than it
+#     requested. Over-polling a health check is wasteful, not wrong.
+# True per-service scheduling needs argonaut to accept a due-time filter; that
+# is roadmapped rather than faked here.
+#
+# Why it matters beyond latency: argonaut sizes the runtime watchdog deadline
+# as `interval * retries + timeout` from the service's OWN configured interval.
+# A service polled six times slower than it asked for has a watchdog sized for
+# a cadence it never receives, and can be killed for being late when it is the
+# POLLER that was late.
+#
+# Clamped to [1, 30] seconds: below 1 s the reactor spends its life polling
+# (and the harness bounds wakeups at 500), and 30 s is the historical default
+# so a config with no health checks at all behaves exactly as before.
+fn health_interval_from_services(svcs) {
+    if (svcs == 0) { return 30; }
+    var n = vec_len(svcs);
+    var best = 0;
+    for (var i = 0; i < n; i = i + 1) {
+        var sd = vec_get(svcs, i);
+        if (sd == 0) { continue; }
+        var hc = svc_def_health_check(sd);
+        if (hc == 0) { continue; }
+        var ivms = svc_hc_interval_ms(hc);
+        if (ivms <= 0) { continue; }
+        # Round UP to whole seconds: rounding down would poll faster than the
+        # clamp intends and a sub-second request is already below the floor.
+        var ivs = (ivms + 999) / 1000;
+        if (ivs < 1) { ivs = 1; }
+        if (best == 0 || ivs < best) { best = ivs; }
+    }
+    if (best == 0) { return 30; }
+    if (best < 1) { best = 1; }
+    if (best > 30) { best = 30; }
+    return best;
+}
+

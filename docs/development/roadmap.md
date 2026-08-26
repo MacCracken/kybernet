@@ -17,7 +17,7 @@ of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into
 
 ---
 
-## v1.6.6 — code that does nothing, and docs that say it does
+## v1.6.7 — code that does nothing, and docs that say it does
 
 - [ ] **Port `agnos-init.sh`'s `setup_directories()` to a kybernet oneshot service.**
       Replaces the deleted phase 6b (1.6.2), and it is the *real* form of the need
@@ -77,37 +77,12 @@ of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into
       service's notifications), and arms argonaut's own drain-and-discard loop in
       `init_poll_health`, which would then race kybernet's reactor for a DGRAM queue that
       delivers each datagram exactly once. kybernet keeps its own socket.
-- [ ] **A reaped service keeps STATE_RUNNING and a freed pid, so pid reuse can misattribute.**
-      Confirmed during 1.6.3's review, and it is the reason sd_notify attribution is only as
-      good as the service table. `init_reap_services` probes each tracked pid with
-      `waitpid(pid, WNOHANG)` and only clears the entry when that returns `> 0` — but
-      `proc_table_reap_orphans()` and kybernet's own `reap_and_log()` both run
-      `waitpid(-1, WNOHANG)` sweeps afterwards and **discard the pid they reap**. A tracked
-      service that exits between its per-pid probe and either sweep is collected there; the
-      next probe returns `-ECHILD`, which is not `> 0`, so `managed_svc_set_pid(ms, 0)` never
-      runs and the entry stays RUNNING with a dead pid indefinitely (with no `health_check`
-      there is no watchdog to notice). Any process that then recycles that pid is attributed
-      to that service. Fix is in argonaut: have the orphan sweep RETURN the reaped pids so the
-      consumer can clear the matching entry — which is the same change the orphan-reaping
-      roadmap item above already wants for its own reasons. Until then, kybernet could
-      additionally verify cgroup membership before attributing.
-- [ ] **argonaut's notify receive collapses four outcomes into one return value.**
-      `notify_try_recv_authenticated` returns a bare `0` for "no datagram", "truncated
-      ancillary", "no/wrong SCM_CREDENTIALS" and "sender not in the expected set", and
-      **discards the authenticated sender pid** it just validated. Its own drain loop
-      therefore `break`s on a rejection, so one forged datagram per tick starves every
-      legitimate message behind it. kybernet wrote its own stricter receive at 1.6.3
-      rather than wait for this; fixing it upstream would let the two converge. Rule 29's
-      shape, in a dep.
-- [ ] **Orphan reaping is correct but completely invisible, and unattributable.**
-      argonaut's `proc_table_reap_orphans()` does `waitpid(-1, WNOHANG)` in a loop and
-      **discards the count it computes**; `init_reap_services` calls it and ignores the
-      return. Since kybernet calls `init_reap_services` before its own `reap_and_log`,
-      argonaut collects every orphan first — so a service leaking children produces no
-      evidence anywhere, and kybernet's own reaper is unreachable on that path. The
-      number already exists; it just needs returning and logging. An argonaut change
-      plus a consumer bump, and then the `kyb-orphan` fixture (added at 1.6.1) becomes
-      assertable instead of merely exercised.
+- [ ] **Log the orphan-reap count and assert it (kybernet half).** argonaut 1.13.5 now
+      returns the reaped pids (`proc_table_reap_orphans_into`) and reconciles the service
+      table against them, so the information exists. kybernet still discards it:
+      `init_reap_services`' return is ignored, so a service leaking children produces no
+      evidence anywhere. Needs a consumer bump to 1.13.5, a klog line, and then the
+      `kyb-orphan` fixture (1.6.1) becomes assertable instead of merely exercised.
 - [ ] **`sandbox_from_ruleset` and `_ll_access_to_kernel` are benchmark-only.** Verified at
       1.6.4 while correcting CLAUDE.md rule 9: `_ll_access_to_kernel` has exactly one caller
       (`sandbox.cyr:254`, inside `sandbox_from_ruleset`), and `sandbox_from_ruleset`'s only
@@ -115,15 +90,6 @@ of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into
       to be benchmarked. Either give it a production call site or delete it — but note that
       deleting it lowers the recorded benchmark COUNT, which `bench-history.sh` gates on, so
       the removal and the count expectation have to land together.
-- [ ] **A standing `duplicate symbol … conflicting value` warning on every build.**
-      argonaut's `enum SocketType { SOCK_STREAM; SOCK_DGRAM; SOCK_SEQPACKET; }` is
-      unvalued, so cyrius numbers it from **0** while the kernel and
-      `~/.cyrius/lib/net.cyr` use 1/2. Harmless today only because every call site in
-      both repos passes the literals — argonaut's own `sys_socket(1, 2, 0)` included —
-      so the enum is decorative. It is still a trap for the next person who uses it, and
-      CLAUDE.md's capability rule says a `conflicting value` warning means the two
-      definitions have diverged. Fix in argonaut: give the enum kernel values or drop
-      it. A build with a permanent warning trains people to ignore warnings.
 - [ ] **`health_check.interval_ms` does not control polling frequency.** The key is
       parsed onto the `HealthCheck` struct, but the reactor polls on its own fixed timer,
       so a service asking for a 5 s check gets the global interval.

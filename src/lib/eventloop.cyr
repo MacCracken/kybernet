@@ -139,6 +139,32 @@ fn timer_new(interval_sec) {
     return Ok(tfd);
 }
 
+# Re-arm the health timer at a new interval, keeping the SAME fd.
+#
+# ⚠ WHY THIS EXISTS. `eventloop_setup` runs at phase 5, before the config is
+# parsed at phase 6 — so the health timer is necessarily armed before kybernet
+# knows what any service asked for. Until 1.6.7 it simply stayed at the
+# hardcoded 30 s, and every service's `health_check.interval_ms` was parsed,
+# stored and ignored.
+#
+# That is not merely a slow poll. argonaut computes the runtime watchdog
+# deadline as `interval * retries + timeout` from the service's OWN configured
+# interval — so a service asking for 5 s and polled at 30 s has a watchdog
+# sized for a cadence it never gets, and can be killed for being late when it
+# is the poller that was late.
+#
+# Re-arming keeps the existing fd, so the epoll registration and the
+# level-triggered drain contract (rule 13) are untouched. Returns 1 on success,
+# 0 if there is no health timer or the settime fails.
+fn eventloop_rearm_health(interval_sec) {
+    if (_ep_health_tfd < 0) { return 0; }
+    if (interval_sec <= 0) { return 0; }
+    var ts = timerspec_new(interval_sec, interval_sec);
+    var sr = sys_timerfd_settime(_ep_health_tfd, 0, ts, 0);
+    if (sr < 0) { return 0; }
+    return 1;
+}
+
 # Parsed event from epoll_wait
 struct EpollEvent { token; flags; }
 
