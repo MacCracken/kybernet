@@ -1325,7 +1325,22 @@ fn handle_notify_msg() {
         knotify_scan(buf, n, &sc);
 
         if (load64(&sc + NS_READY) == 1) {
-            klog2("notify: ready: ", name);
+            # ⚠ HONOURED AS OF 1.6.8, and only because argonaut 1.13.6 gave it
+            # somewhere to land. Before that every service was STATE_RUNNING the
+            # instant fork+exec succeeded, so no service was ever awaiting a
+            # notification and READY could only ever be an observation.
+            #
+            # `init_notify_ready` transitions STARTING -> RUNNING for SVC_NOTIFY
+            # services only, is idempotent, and is one-way — a compromised
+            # service cannot declare itself un-ready and cascade restarts. It
+            # returns 0 for a service that was not awaiting readiness, which is
+            # normal, not an error: a `simple` service sending READY is just
+            # being polite.
+            if (init_notify_ready(g_init, name) == 1) {
+                klog2("notify: READY — service is now running: ", name);
+            } else {
+                klog2("notify: ready: ", name);
+            }
         }
         if (load64(&sc + NS_RELOADING) == 1) {
             klog2("notify: reloading: ", name);
@@ -1334,8 +1349,20 @@ fn handle_notify_msg() {
             klog2("notify: stopping: ", name);
         }
         if (load64(&sc + NS_WATCHDOG) == 1) {
-            # Counted, not honoured — see the header above.
-            klog2("notify: watchdog ping (not honoured): ", name);
+            # ⚠ HONOURED AS OF 1.6.8, AND IT REFRESHES ONLY `last_notify`.
+            # argonaut 1.13.6 added a deadline a self-report is ALLOWED to
+            # satisfy, kept strictly apart from `last_health_check` — which
+            # means "a probe argonaut ran and observed passing". Refreshing the
+            # health timestamp from a ping would let a wedged service silence a
+            # failure that was actually observed, and authentication does not
+            # cure that: SCM_CREDENTIALS proves the ping came from the service,
+            # not that the service is honest about its own health.
+            #
+            # A service with no `watchdog_ms` configured has no notify watchdog,
+            # so the ping is recorded and simply bounds nothing. That is the
+            # default and it preserves pre-1.6.8 behaviour exactly.
+            init_notify_watchdog(g_init, name);
+            klog2("notify: watchdog ping: ", name);
         }
 
         if (load64(&sc + NS_STATUS_OFF) >= 0) {

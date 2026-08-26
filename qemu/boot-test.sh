@@ -691,8 +691,18 @@ fi
 #    the whole authentication story: before 1.6.3 nothing set SO_PASSCRED and
 #    the receive passed a NULL src_addr, so kybernet could not have named the
 #    sender even in principle.
-if echo "$LOOP_OUT" | grep -aqF "notify: ready: kyb-notify"; then
-    echo "  OK: sd_notify READY attributed to the sending service"
+# ⚠ THE STRING CHANGED AT 1.6.8 AND THAT IS THE ASSERTION. Before argonaut
+# 1.13.6 a READY could only be logged as an observation ("notify: ready: X")
+# because no service was ever awaiting one — every type went STATE_RUNNING the
+# instant fork+exec returned. kyb-notify is now `"type": "notify"`, so it is
+# left STATE_STARTING and its own authenticated READY=1 is what promotes it.
+# Matching the PROMOTION line rather than the observation line is what makes
+# this prove a state transition instead of a log statement.
+if echo "$LOOP_OUT" | grep -aqF "notify: READY — service is now running: kyb-notify"; then
+    echo "  OK: READY promoted a type=notify service from STARTING to RUNNING"
+elif echo "$LOOP_OUT" | grep -aqF "notify: ready: kyb-notify"; then
+    echo "  FAIL: READY was logged but did NOT promote the service — is the type notify?"
+    fail=1
 else
     echo "  FAIL: no attributed READY — SO_PASSCRED, the drain, or attribution is broken"
     echo "$LOOP_OUT" | grep -aiE 'notify' | head -5 || true
@@ -715,10 +725,10 @@ fi
 #    refreshable deadline is managed_svc_last_hc, which already means "the last
 #    health check PASSED" — refreshing it on a self-reported ping would let a
 #    wedged service silence a probe kybernet actually ran and saw fail.
-if echo "$LOOP_OUT" | grep -aqF "notify: watchdog ping (not honoured): kyb-notify"; then
-    echo "  OK: WATCHDOG attributed and explicitly not honoured"
+if echo "$LOOP_OUT" | grep -aqF "notify: watchdog ping: kyb-notify"; then
+    echo "  OK: WATCHDOG ping accepted and refreshed the notify deadline"
 else
-    echo "  FAIL: watchdog ping was not logged as unhonoured"
+    echo "  FAIL: watchdog ping was not accepted"
     fail=1
 fi
 

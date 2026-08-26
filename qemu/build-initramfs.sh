@@ -408,9 +408,10 @@ cat > "${INITRAMFS_DIR}/etc/kybernet/config.json" << 'CFGEOF'
     },
     {
       "name": "kyb-notify",
-      "description": "sends sd_notify datagrams then stays alive so its pid is attributable",
+      "description": "type=notify: stays STARTING until its own READY=1 promotes it",
       "binary": "/usr/bin/kyb-notify-fixture",
-      "type": "simple",
+      "type": "notify",
+      "watchdog_ms": 30000,
       "restart": "never"
     }
   ]
