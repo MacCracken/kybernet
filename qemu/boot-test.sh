@@ -24,7 +24,7 @@
 #   "started: kyb-live"              — a LIVE service, so a cgroup is really
 #                                      created and the pid moved into it
 #                                      (a completed oneshot correctly gets none)
-#   "removed service cgroups: 13"    — the shutdown sweep killed and rmdir'd them
+#   "removed service cgroups: 15"    — the shutdown sweep killed and rmdir'd them
 #
 #     ⚠ NINE of NINE. This said EIGHT from 1.5.3 to 1.6.1, with a comment
 #     arguing the shortfall was correct: kyb-orphan backgrounds a child, this
@@ -356,12 +356,12 @@ for marker in \
     "kybernet: services started" \
     "kybernet: harness done" \
     "kybernet: shutdown" \
-    "kybernet: config: services parsed: 13" \
+    "kybernet: config: services parsed: 15" \
     "kybernet:   completed (oneshot): kyb-dep" \
     "kybernet:   completed (oneshot): kyb-svc" \
     "kybernet: boot: skipped (not applicable): Start udev device manager" \
     "kybernet:   started: kyb-live" \
-    "kybernet: removed service cgroups: 13"; do
+    "kybernet: removed service cgroups: 15"; do
     if echo "$RUNTIME_OUT" | grep -aqF "$marker"; then
         echo "  OK: $marker"
     else
@@ -481,6 +481,55 @@ else
     fail=1
 fi
 
+# --- capabilities AND a uid, together (1.6.14 HIGH-3) ------------------------
+#
+# ⚠ THE INTERSECTION OF THE TWO MOST IMPORTANT SECURITY KEYS, WHICH NO FIXTURE
+# HAD EVER COMBINED. kyb-confined sets `capabilities` and no uid; kyb-nonroot
+# sets a uid and no `capabilities`. Both passed, and the combination could not
+# work at all: the capability step surrendered CAP_SETGID/CAP_SETUID before the
+# privilege drop needed them, so `{"capabilities": [...], "uid": N}` — the
+# canonical "bind a low port as an unprivileged user" policy — was accepted by
+# the parser and made the service exit 126 every time. Two green fixtures, one
+# on each axis, and the axis nobody crossed was broken.
+#
+# ⚠ THE TRAILING ANCHOR IS A NON-HEX BOUNDARY, NOT `[[:space:]]*$`. The serial
+# capture carries a trailing carriage-return artefact that `$` will not see
+# past, so an anchored match silently never fires — a green-looking assertion
+# that can only ever FAIL, which is the mirror of the usual defect and just as
+# useless. `([^0-9a-fA-F]|$)` still rejects a longer mask: 0x4004 does not
+# match, 0x400 followed by anything non-hex does.
+#
+# CapAmb is the assertion that matters. Permitted alone would not survive
+# execve of a plain binary, so a service can hold a capability in Prm and still
+# reach main() with nothing: the AMBIENT set is what actually delivers it.
+if echo "$RUNTIME_OUT" | grep -aqE '^CAPUID-Uid:[[:space:]]*65534'; then
+    echo "  OK: capabilities+uid service ran as uid 65534"
+elif echo "$RUNTIME_OUT" | grep -aqE '^CAPUID-Uid:[[:space:]]*0'; then
+    echo "  FAIL: capabilities+uid service ran as ROOT — the drop did not happen"
+    fail=1
+else
+    echo "  FAIL: no CAPUID-Uid line — the service never started (exit 126 = the 1.6.13 shape)"
+    echo "$RUNTIME_OUT" | grep -aiE 'capuid' | head -3 || true
+    fail=1
+fi
+
+# 0x400 = 1 << 10 = CAP_NET_BIND_SERVICE, and nothing else.
+if echo "$RUNTIME_OUT" | grep -aqE '^CAPUID-CapAmb:[[:space:]]*0*400([^0-9a-fA-F]|$)'; then
+    echo "  OK: CAP_NET_BIND_SERVICE is AMBIENT — it survives execve to the service"
+else
+    echo "  FAIL: the kept capability is not in the ambient set — a non-root service gets nothing"
+    echo "$RUNTIME_OUT" | grep -aE '^CAPUID-Cap' | head -3 || true
+    fail=1
+fi
+
+if echo "$RUNTIME_OUT" | grep -aqE '^CAPUID-CapBnd:[[:space:]]*0*400([^0-9a-fA-F]|$)'; then
+    echo "  OK: the bounding set is exactly the keep-list — nothing can be regained"
+else
+    echo "  FAIL: the bounding set is not the keep-list"
+    echo "$RUNTIME_OUT" | grep -aE '^CAPUID-CapBnd' | head -2 || true
+    fail=1
+fi
+
 # --- Landlock (1.6.6) --------------------------------------------------------
 #
 # ⚠ THE THIRD CONFINEMENT MECHANISM, AND THE LAST ONE WITHOUT A FIXTURE.
@@ -517,6 +566,30 @@ if echo "$RUNTIME_OUT" | grep -aqF "LL-INSIDE=ALLOWED"; then
     echo "  OK: landlock still permitted a path inside the rule set"
 else
     echo "  FAIL: landlock denied a path it was told to allow (or the child never ran)"
+    echo "$RUNTIME_OUT" | grep -aiE 'LL-' | head -3 || true
+    fail=1
+fi
+
+# ⚠ A DENIED `open` SAYS NOTHING ABOUT `truncate`. 1.6.14 HIGH-2.
+#
+# A Landlock ruleset governs only the operations named in `handled_access_fs`,
+# and kybernet's mask was frozen at ABI v1 — which has no
+# LANDLOCK_ACCESS_FS_TRUNCATE (1 << 14, ABI v3 / Linux 6.2). So every confined
+# service could `truncate("/boot/vmlinuz", 0)` while `sandbox_from_config`
+# returned Ok(0) "applied", and this pass could not see it because the fixture
+# only ever called `sys_open(O_RDONLY)`. Measured on the dev box: open denied,
+# truncate allowed, a 16-byte file reduced to 0.
+#
+# Since the uid drop is opt-in, the common shape is a ROOT service under
+# Landlock, for which DAC imposes nothing either — so this reached every file
+# on the filesystem.
+if echo "$RUNTIME_OUT" | grep -aqF "LL-TRUNCATE=DENIED"; then
+    echo "  OK: landlock denied truncate() on a path outside the rule set"
+elif echo "$RUNTIME_OUT" | grep -aqF "LL-TRUNCATE=ALLOWED"; then
+    echo "  FAIL: landlock allowed truncate() outside its rule set — file destruction is unconfined"
+    fail=1
+else
+    echo "  FAIL: kyb-landlock produced no LL-TRUNCATE line — the fixture is stale or died"
     echo "$RUNTIME_OUT" | grep -aiE 'LL-' | head -3 || true
     fail=1
 fi

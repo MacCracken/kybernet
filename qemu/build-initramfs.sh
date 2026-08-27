@@ -290,6 +290,13 @@ fi
 cp "$LL_FIX_BIN" "${INITRAMFS_DIR}/usr/bin/kyb-landlock-fixture"
 chmod +x "${INITRAMFS_DIR}/usr/bin/kyb-landlock-fixture"
 echo "  staged kyb-landlock-fixture (Landlock probe)"
+
+# The truncate probe's victim: outside the fixture's Landlock rule set, with
+# 16 known bytes. If the sandbox governs TRUNCATE this file is untouched; if
+# it does not, the fixture zeroes it and says so. Staged as its own file so a
+# broken sandbox does not corrupt config.json mid-boot. 1.6.14 HIGH-2.
+printf '0123456789abcdef' > "${INITRAMFS_DIR}/etc/kyb-landlock-victim"
+echo "  staged kyb-landlock-victim (16 bytes, truncate probe target)"
 chmod +x "${INITRAMFS_DIR}/usr/bin/kyb-notify-fixture"
 echo "  staged kyb-notify-fixture (sd_notify client)"
 
@@ -414,6 +421,29 @@ cat > "${INITRAMFS_DIR}/etc/kybernet/config.json" << 'CFGEOF'
       "type": "oneshot",
       "restart": "never",
       "depends_on": ["kyb-nonroot"]
+    },
+    {
+      "name": "kyb-capuid",
+      "description": "1.6.14 HIGH-3: BOTH a capability keep-list AND a uid drop",
+      "binary": "/bin/sh",
+      "args": ["-c", "grep -E '^(Uid|CapPrm|CapAmb|CapBnd):' /proc/self/status > /dev/shm/capuid.txt 2>&1"],
+      "type": "oneshot",
+      "restart": "never",
+      "security": {
+        "capabilities": ["cap_net_bind_service"],
+        "uid": 65534,
+        "gid": 65534,
+        "no_new_privs": true
+      }
+    },
+    {
+      "name": "kyb-capuid-read",
+      "description": "root reader that surfaces kyb-capuid's own status lines",
+      "binary": "/bin/sh",
+      "args": ["-c", "awk '{print \"CAPUID-\" $0}' /dev/shm/capuid.txt > /dev/console 2>&1"],
+      "type": "oneshot",
+      "restart": "never",
+      "depends_on": ["kyb-capuid"]
     },
     {
       "name": "kyb-landlock",

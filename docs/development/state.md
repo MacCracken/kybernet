@@ -6,28 +6,36 @@
 
 ## Version
 
-**1.6.13** — the P(-1) audit, ten releases late. Nine independent lenses with adversarial
-verification: 84 agents, 37 candidates, **31 findings** (2 CRITICAL, 9 HIGH, 13 MEDIUM,
-7 LOW). Nine closed, one mitigated, **21 deferred with their evidence** into
-[roadmap.md](roadmap.md). Full report:
-[`docs/audit/2026-08-26-audit.md`](../audit/2026-08-26-audit.md).
+**1.6.14** — **all five HIGH findings** from the 2026-08-26 P(-1) audit. Four land in
+kybernet; the fifth is argonaut's and is fixed in **argonaut 1.13.9, which is written,
+tested and clean but NOT YET TAGGED** — so kybernet still pins 1.13.8 and that finding
+stays open until the tag exists. Suite 681 → 702 assertions. Harness 62 → 66 properties.
 
-⚠ **The aarch64 binary this project has published for ten releases cannot boot.**
-`sys_signalfd()` issues **`fsync(-1)`** on aarch64 — aarch64's native `signalfd4` (74)
-collides with x86_64's `fsync` (74) and the cyrius backend's inline translation ladder
-eats it. `setup_signals()` returns `Err(EBADF)`, `main.cyr` takes its phase-4 FATAL arm,
-and the board powers itself off before it loads config. Every gate was green, because no
-gate had ever executed one aarch64 instruction: the cross-build exiting 0 was the entire
-evidence base for half the product.
+What was wrong, in one line each:
 
-A sweep of all 34 `sys_*` wrappers kybernet reaches found **exactly two** wrong —
-`sys_signalfd -> fsync` and `sys_pause -> flock`. The other 32 are correct. The
-load-bearing fix is upstream in **cyrius**, which CLAUDE.md places off-limits here.
+- **HIGH-2** — Landlock was frozen at ABI v1, so `truncate(2)` was governed by nothing:
+  a confined service could zero any file on the box while `sandbox_from_config` returned
+  "applied". Measured: `open(O_WRONLY)` denied, `truncate()` allowed, 16 bytes → 0.
+  Now negotiated (`landlock_create_ruleset(NULL,0,VERSION)`), TRUNCATE at ABI ≥ 3,
+  IOCTL_DEV at ≥ 5, grants intersected with the handled mask so older kernels still work.
+- **HIGH-3** — `capabilities` and `uid` could not be used together **at all**. The
+  capability drop surrendered CAP_SETUID/CAP_SETGID before the privilege drop needed
+  them, so the service exited 126 every time. New `drop_caps_and_privileges()` does
+  KEEPCAPS → inheritable → bounding → setuid → effective → **AMBIENT**, the only set
+  that survives execve of a plain binary.
+- **HIGH-5** — every `kill -HUP 1` leaked ~38 KB, and leaked even with no config file.
+- **HIGH-8** — dm-verity verification borrowed an undocumented hardcoded 10 s, so a
+  board with an intact rootfs powered off blaming a veritysetup that was present and
+  running. Now `edge.verify_timeout_ms`, validated at load, default 300 s, with a
+  distinct TIMEOUT verdict.
 
-⚠ **`_eb_compare_pcrs` SIGSEGV'd PID 1 on the success path** of an attesting edge board,
-reading sigil's raw cstr digest as a boxed `Str`. Measured exit 139. It survived because
-no fixture sets `tpm_attestation: true`, so the function had never executed anywhere.
-Fixed, with a test verified to kill the test binary on the unfixed source.
+⚠ **The `strlen(52 chars)` / `is_mounted` benchmark question is settled, and the answer
+is that they are not gateable.** Proven, not assumed: inserting a purely INERT BSS pad
+into `src/bench.cyr` — read by nothing, called by nothing — moves `strlen(52 chars)`
+from 46 to 63 ns/op and back. That swing is larger than any regression the gate ever
+flagged on it. Both are now reported as `layout … NOT gated`, still recorded and still
+counted. Verified the gate still turns red on a real one: doubling `memeq`'s work was
+flagged +118%.
 
 ## Toolchain
 
@@ -64,11 +72,13 @@ than by a verify that runs after the resolve rewrites it.
 
 | Arch | Bytes |
 |---|---|
-| x86_64 (`CYRIUS_DCE=1`) | 1,515,712 |
-| aarch64 | 1,961,928 |
+| x86_64 (`CYRIUS_DCE=1`) | 1,524,632 |
+| aarch64 | 1,962,656 |
 
-Both grew ~8.2 KB: `_CG_PROCS_BUF`, the static buffer that replaced `cgroup_has_pid`'s
-per-datagram `alloc`. Verified `e_machine` 0x3e / 0xb7 respectively.
+Static data is 141,168 bytes, **+96 over 1.6.13** — deliberately. The config read
+buffer is allocated once and cached rather than living in BSS: the BSS version worked
+and grew static data by 16,392 bytes, which moved `is_mounted` 15-19% on the bench
+gate. Verified `e_machine` 0x3e / 0xb7 respectively.
 
 ## Gate counts
 
@@ -77,15 +87,15 @@ the build; that is standing rule 32.
 
 | Gate | Count | Enforcement |
 |---|---|---|
-| `cyrius test src/test.cyr` | **681** assertions | floor read from CLAUDE.md; a shrinking suite fails |
-| `bash scripts/aarch64-exec-gate.sh` | **681** assertions + 5 syscall probes | **NEW at 1.6.13** — the only gate that executes aarch64 |
-| `bash qemu/boot-test.sh` | **62** properties, 5 passes | `HARNESS_STRICT=1` in CI makes a skip a failure |
+| `cyrius test src/test.cyr` | **702** assertions | floor read from CLAUDE.md; a shrinking suite fails |
+| `bash scripts/aarch64-exec-gate.sh` | **702** assertions + 5 syscall probes | **NEW at 1.6.13** — the only gate that executes aarch64 |
+| `bash qemu/boot-test.sh` | **66** properties, 5 passes | `HARNESS_STRICT=1` in CI makes a skip a failure |
 | `bash scripts/verify-lock.sh` | 2 halves, 5 commit pins | **NEW at 1.6.13** — the committed lock vs a fresh resolve |
-| `bash scripts/bench-history.sh` | **56** benchmarks | ≥15% regression gate; a dropped benchmark must be declared `BENCH_REMOVED=n` |
+| `bash scripts/bench-history.sh` | **56** benchmarks (2 reported-not-gated) | ≥15% regression gate; a dropped benchmark must be declared `BENCH_REMOVED=n`; `LAYOUT_SENSITIVE` names the two exempt ones |
 | `cyrius lint` | 0 warnings, **0 untracked deferrals** | HARD GATE — both halves |
 | `cyrius fmt --check` | clean | non-mutating; never `diff <(cyrius fmt …)` |
 
-20 modules in `src/lib/`. 13 `kyb-*` harness fixtures. 4 `.cyr` files under `qemu/`.
+20 modules in `src/lib/`. 15 `kyb-*` harness fixtures. 4 `.cyr` files under `qemu/`.
 
 ## Verification posture
 
@@ -104,23 +114,22 @@ deferred items is among them: check their evidence, not their severity label.
 
 ## In flight
 
-**v1.6.13 is NOT yet tagged.** The working tree carries the audit, the fixes, two new
-gates and the doc set. All release gates are green locally. The user tags.
+**v1.6.14 is NOT tagged.** All gates green locally. The user tags.
+
+⚠ **argonaut 1.13.9 is written, tested and clean in `../argonaut`, and NOT TAGGED.**
+33 suites pass; `health_exec.tcyr` went 23 → 33. kybernet cannot consume it until the
+tag is on the remote — a `cyrius.cyml` naming an untagged version fails CI resolution
+(and `path` overrides are forbidden, see the release order below). **Tag argonaut
+first, then bump kybernet's manifest and re-resolve.**
 
 ## Next
 
-**The 21 deferred audit findings**, in [roadmap.md](roadmap.md). The two that most want
-a decision:
+**v1.6.15 — all thirteen MEDIUM findings**, then **v1.6.16 — all seven LOWs**, per the
+plan set at 1.6.14. Both lists, with evidence, are in [roadmap.md](roadmap.md).
 
-1. **CRITICAL-1's upstream half** — a cyrius fix for the aarch64 syscall ladder. Until
-   then `release.yml` refuses to publish the aarch64 artifact, so a release either waits
-   or ships x86_64 only via `ALLOW_BROKEN_AARCH64=1`. **That is a policy call the
-   maintainer should make deliberately.**
-2. **HIGH-3** — `capabilities` and `uid`/`gid` cannot be used together; the capability
-   drop strips CAP_SETUID before the privilege drop needs it. The correct fix
-   (PR_SET_KEEPCAPS, bounding-set drop, setuid, capset, ambient raise) is a redesign of
-   the most dangerous path in the tree and must not ship without a fixture asserting
-   CapEff/Uid from inside the child.
+Before either: **bump argonaut to 1.13.9** once tagged, which closes HIGH-6 and lets
+MEDIUM-4 (`health_check.type = "http"` blocking `connect(2)`) be fixed in the same
+dep cycle.
 
 ## Release order (cross-repo)
 

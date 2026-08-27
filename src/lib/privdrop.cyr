@@ -60,19 +60,22 @@ fn is_root() {
 # (the call hit SYS_SETPRIORITY instead). PR_* and CAP_LAST_CAP are
 # kernel constants — arch-independent.
 enum PrctlConst {
+    PR_SET_KEEPCAPS = 8;
     PR_CAPBSET_READ = 23;
     PR_CAPBSET_DROP = 24;
     PR_SET_NO_NEW_PRIVS = 38;
+    PR_CAP_AMBIENT = 47;
+    PR_CAP_AMBIENT_RAISE = 2;
     CAP_LAST_CAP = 40;
 }
 
 # capset(2). Not exported by the cyrius stdlib, so dispatched per-arch
 # here — same pattern and same reason as notify.cyr's socket numbers.
 #ifdef CYRIUS_ARCH_X86
-enum CapSysNr { SYS_CAPSET = 126; }
+enum CapSysNr { SYS_CAPSET = 126; SYS_CAPGET = 125; }
 #endif
 #ifdef CYRIUS_ARCH_AARCH64
-enum CapSysNr { SYS_CAPSET = 91; }
+enum CapSysNr { SYS_CAPSET = 91; SYS_CAPGET = 90; }
 #endif
 
 enum CapConst {
@@ -121,6 +124,143 @@ fn drop_cap_sets(keep_mask) {
 
     var r = syscall(SYS_CAPSET, hdr, data);
     if (r < 0) { return Err(0 - r); }
+    return Ok(0);
+}
+
+# Read this process's PERMITTED set as a 64-bit mask, or a negative -errno.
+#
+# Needed because the combined drop below has to preserve the caps it already
+# holds while it edits INHERITABLE. capset(2) cannot raise permitted, so the
+# value written back must be exactly what capget reports — writing a
+# hand-built "everything" mask would be a request to gain capabilities and is
+# rejected EPERM.
+fn capget_permitted() {
+    var hdr = alloc(8);
+    store32(hdr, LINUX_CAPABILITY_VERSION_3);
+    store32(hdr + 4, 0);                 # pid 0 == self
+    var data = alloc(24);
+    memset(data, 0, 24);
+    var r = syscall(SYS_CAPGET, hdr, data);
+    if (r < 0) { return r; }
+    var lo = load32(data + 4) & 0xFFFFFFFF;         # permitted [0..31]
+    var hi = load32(data + 16) & 0xFFFFFFFF;        # permitted [32..63]
+    return lo | (hi << 32);
+}
+
+# capset(2) with all three sets given explicitly.
+fn _capset3(eff, perm, inh) {
+    var hdr = alloc(8);
+    store32(hdr, LINUX_CAPABILITY_VERSION_3);
+    store32(hdr + 4, 0);
+    var data = alloc(24);
+    memset(data, 0, 24);
+    store32(data, eff & 0xFFFFFFFF);
+    store32(data + 4, perm & 0xFFFFFFFF);
+    store32(data + 8, inh & 0xFFFFFFFF);
+    store32(data + 12, (eff >> 32) & 0xFFFFFFFF);
+    store32(data + 16, (perm >> 32) & 0xFFFFFFFF);
+    store32(data + 20, (inh >> 32) & 0xFFFFFFFF);
+    var r = syscall(SYS_CAPSET, hdr, data);
+    if (r < 0) { return Err(0 - r); }
+    return Ok(0);
+}
+
+# ⚠ CAPABILITIES AND A uid DROP CANNOT BE DONE INDEPENDENTLY. 1.6.14 HIGH-3.
+#
+# Doing them as two separate steps — which is what kyb_pre_exec did from 1.6.9
+# to 1.6.13 — cannot work, and the failure is total rather than partial. The
+# capability step surrenders everything outside the keep-list from the
+# EFFECTIVE set, and the kernel gates setgid/setgroups on CAP_SETGID and setuid
+# on CAP_SETUID (`ns_capable_setid`), NOT on euid == 0. So the moment a policy
+# named any keep-list at all, the privilege drop one step later failed EPERM
+# and `kyb_pre_exec` returned 1 — argonaut exits the child 126 and the service
+# never starts. Measured: `{"capabilities":["cap_net_bind_service"],"uid":65534}`
+# — the canonical "bind :443 as nobody" policy — was ACCEPTED by the config
+# parser and could never run. `"capabilities": []` (drop everything, the
+# hardening most likely to be paired with a uid) fails the same way.
+#
+# Naively keeping CAP_SETUID/CAP_SETGID on the keep-list is not a fix either:
+# it works, but it leaves the service holding the two capabilities you least
+# want it able to regain, and it STILL delivers zero capabilities to a non-root
+# service — with no_new_privs set, execve computes pP' from the file's
+# capabilities, which a plain binary does not have, so pE'/pP' come out empty.
+#
+# THE ORDER BELOW IS THE ONLY ONE THAT WORKS, and each step is load-bearing:
+#
+#   1. PR_SET_KEEPCAPS(1) — without it setuid() to a non-zero uid clears the
+#      PERMITTED set outright and there is nothing left to grant.
+#   2. capset(inheritable = keep) while still fully privileged — raising
+#      INHERITABLE requires CAP_SETPCAP in EFFECTIVE, which is true now and
+#      will not be after step 4. Permitted/effective are written back exactly
+#      as capget reports them, because capset cannot RAISE permitted.
+#   3. Bounding-set drop — needs CAP_SETPCAP too, so it also belongs before
+#      the uid change. This is what stops the service regaining anything via a
+#      setuid binary later.
+#   4. setgroups -> setgid -> setuid, in that order (gid first: after losing
+#      root the gid can no longer be changed).
+#   5. capset(effective = permitted = inheritable = keep). Raising EFFECTIVE
+#      from PERMITTED is always allowed and needs no capability; KEEPCAPS
+#      preserved permitted across step 4, and the kernel cleared effective.
+#   6. PR_CAP_AMBIENT_RAISE per kept cap — THIS is the step that actually
+#      delivers a capability to a non-root service, because ambient caps are
+#      the only ones that survive execve of an unprivileged binary. Requires
+#      the cap to be in BOTH permitted and inheritable, which steps 2 and 5
+#      arranged.
+#   7. PR_SET_KEEPCAPS(0) — leave no standing exemption behind.
+#
+# Returns Ok(0), or Err(PrivError/errno). FAILS CLOSED at every step: a service
+# configured for uid N and a keep-list must never run as root, or with more
+# capability than it asked for.
+fn drop_caps_and_privileges(keep_mask, uid, gid) {
+    if (sys_geteuid() != 0) { return Err(PRIV_NOT_ROOT); }
+
+    # 1. Keep the permitted set across the uid change.
+    if (syscall(SYS_PRCTL, PR_SET_KEEPCAPS, 1, 0, 0, 0) < 0) {
+        return Err(PRIV_SETUID_FAIL);
+    }
+
+    # 2. Raise INHERITABLE to the keep-list while CAP_SETPCAP is still held.
+    var perm = capget_permitted();
+    if (perm < 0) { return Err(0 - perm); }
+    var ir = _capset3(perm, perm, keep_mask & perm);
+    if (is_err_result(ir) == 1) { return ir; }
+
+    # 3. Bounding set: everything outside the keep-list, gone for good.
+    for (var cap = 0; cap <= CAP_LAST_CAP; cap = cap + 1) {
+        if ((keep_mask & (1 << cap)) == 0) {
+            var dr = drop_cap(cap);
+            if (is_err_result(dr) == 1 && err_code_of(dr) != EINVAL) { return dr; }
+        }
+    }
+
+    # 4. The privilege drop itself.
+    if (gid > 0) {
+        if (is_err(sys_setgroups(0, 0)) == 1) { return Err(PRIV_SETGROUPS_FAIL); }
+        if (is_err(sys_setgid(gid)) == 1) { return Err(PRIV_SETGID_FAIL); }
+    }
+    if (uid > 0) {
+        if (is_err(sys_setuid(uid)) == 1) { return Err(PRIV_SETUID_FAIL); }
+    }
+    if (uid > 0 && sys_getuid() != uid) { return Err(PRIV_VERIFY_FAIL); }
+    if (gid > 0 && sys_getgid() != gid) { return Err(PRIV_VERIFY_FAIL); }
+
+    # 5. Re-raise effective from the permitted KEEPCAPS preserved.
+    var keep = keep_mask & perm;
+    var cr = _capset3(keep, keep, keep);
+    if (is_err_result(cr) == 1) { return cr; }
+
+    # 6. Ambient — the only set that survives execve of a plain binary.
+    for (var c2 = 0; c2 <= CAP_LAST_CAP; c2 = c2 + 1) {
+        if ((keep & (1 << c2)) != 0) {
+            # A kernel below 4.3 has no ambient set; that is not a reason to
+            # refuse the whole drop, and the service still runs with strictly
+            # LESS privilege than it asked for rather than more.
+            syscall(SYS_PRCTL, PR_CAP_AMBIENT, PR_CAP_AMBIENT_RAISE, c2, 0, 0);
+        }
+    }
+
+    # 7. No standing exemption left behind.
+    syscall(SYS_PRCTL, PR_SET_KEEPCAPS, 0, 0, 0, 0);
     return Ok(0);
 }
 
@@ -218,19 +358,27 @@ fn privdrop_from_context(ctx) {
 # Drop capabilities using agnostik capability_set bounding set.
 # Keeps only caps listed in capset_bounding(caps); drops everything else.
 # Returns: Result (Ok(dropped_count) or Err(errno))
-fn drop_caps_from_set(caps) {
-    if (sys_geteuid() != 0) { return Err(PRIV_NOT_ROOT); }
+# The keep-list as a bitmask. Factored out of `drop_caps_from_set` at 1.6.14 so
+# `kyb_pre_exec` can hand the same mask to `drop_caps_and_privileges` when a uid
+# drop is configured too — the two operations cannot be done independently
+# (see that function's header).
+#
+# ⚠ Bit N means KERNEL capability number N: this mask goes to `capset(2)` and
+# `PR_CAPBSET_DROP`. agnostik and argonaut both define `enum LinuxCapability`
+# and both were once wrong; see CLAUDE.md.
+fn capset_keep_mask(caps) {
     var keep = capset_bounding(caps);
     var keep_len = vec_len(keep);
-
-    # Build bitmask from the bounding set vec
     var keep_mask = 0;
     for (var ki = 0; ki < keep_len; ki = ki + 1) {
-        var cap = vec_get(keep, ki);
-        keep_mask = keep_mask | (1 << cap);
+        keep_mask = keep_mask | (1 << vec_get(keep, ki));
     }
+    return keep_mask;
+}
 
-    return drop_capabilities(keep_mask);
+fn drop_caps_from_set(caps) {
+    if (sys_geteuid() != 0) { return Err(PRIV_NOT_ROOT); }
+    return drop_capabilities(capset_keep_mask(caps));
 }
 
 # Full security setup from agnostik security_context + capability_set.

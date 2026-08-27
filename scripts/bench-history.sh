@@ -54,6 +54,41 @@ MIN_DELTA_NS="${MIN_DELTA_NS:-3}"
 TINY_NS="${TINY_NS:-20}"
 TINY_DELTA_NS="${TINY_DELTA_NS:-5}"
 RUNS="${RUNS:-3}"
+
+# ⚠ LAYOUT-SENSITIVE BENCHMARKS: REPORTED, NOT GATED. 1.6.14.
+#
+# These two measure where the LINKER put things, not what the code does, and
+# that was demonstrated rather than assumed. Experiment, on one box, one
+# binary, with `cyrius bench` directly rather than through this script:
+# inserting a purely INERT BSS pad into src/bench.cyr — an array nothing reads,
+# nothing writes and nothing calls — moved `strlen(52 chars)` from 46 to 63
+# ns/op at 32 slots and back to 46 at 48 slots. A +37% swing from code that
+# does not execute is larger than any "regression" this gate has ever flagged
+# on either of them.
+#
+# Corroborating: 1.6.14 measured 45/50/46 ns against 1.6.13's 31/32/32 on the
+# same box, minutes apart, while touching neither `strlen` nor `mount.cyr`; the
+# benchmark's string literal had moved 4,740 bytes and changed alignment (mod8
+# 5 -> 1). And shrinking one unrelated 16 KiB BSS buffer, with every other
+# change in place, made `is_mounted`'s flag vanish on its own.
+#
+# This is the third intervention on `is_mounted` (1.6.1 host mount table,
+# 1.6.8 unexplained +12.6%) and the second on `strlen(52 chars)` (1.6.3, filed
+# unexplained). roadmap.md asked for exactly this decision: make them
+# layout-insensitive, or accept they are not gateable and exempt them WITH THE
+# REASON STATED. They are exempted here, and the reason is above.
+#
+# ⚠ THE EXEMPTION IS NARROW AND MUST STAY NARROW. Their raw ns/op still goes to
+# the CSV, they are still COUNTED (so deleting one still fails the suite-shrank
+# check), and they are printed as `layout` on every run so nobody forgets they
+# are unguarded. This is not a general escape hatch: adding a name here needs
+# the same inert-padding experiment, in the commit that adds it.
+LAYOUT_SENSITIVE="is_mounted(/proc, 2KiB fixed table)
+strlen(52 chars)"
+
+_is_layout_sensitive() {
+    printf '%s\n' "$LAYOUT_SENSITIVE" | grep -qxF "$1"
+}
 CALIB_NAME="_calibration (reference loop)"
 
 # ⚠ A SECOND REFERENCE, FOR SYSCALL-BOUND BENCHMARKS.
@@ -281,6 +316,11 @@ while IFS="$(printf '\t')" read -r NS NAME; do
                     fi
                 elif [ "$DELTA" -ge "$REGRESS_PCT" ] && [ "$ABS" -lt "$MIN_DELTA_NS" ]; then
                     echo "  noise       ${NAME}: ${PREV} -> ${NS} ns/op (expected ~${EXPECT}, +${DELTA}%, ${ABS}ns < ${MIN_DELTA_NS}ns floor)"
+                elif [ "$DELTA" -ge "$REGRESS_PCT" ] && _is_layout_sensitive "$NAME"; then
+                    # Reported, never gated — see the LAYOUT_SENSITIVE note at
+                    # the top. Printing it keeps the figure visible instead of
+                    # silently dropping it.
+                    echo "  layout      ${NAME}: ${PREV} -> ${NS} ns/op (expected ~${EXPECT}, +${DELTA}%) — layout-sensitive, NOT gated"
                 elif [ "$DELTA" -ge "$REGRESS_PCT" ]; then
                     echo "  REGRESSION  ${NAME}: ${PREV} -> ${NS} ns/op (expected ~${EXPECT} on this box, +${DELTA}%)"
                     REGRESSIONS=$((REGRESSIONS + 1))

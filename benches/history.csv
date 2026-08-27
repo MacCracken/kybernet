@@ -2279,3 +2279,59 @@ timestamp,commit,branch,benchmark,ns_per_op
 2026-08-27T06:22:14Z,f767d08,main,timer_new+close,4377
 2026-08-27T06:22:14Z,f767d08,main,timerspec_new,16
 2026-08-27T06:22:14Z,f767d08,main,vec(push*3+get*2+len),71
+2026-08-27T17:50:04Z,4ff02e9,main,Err+is_err_result,17
+2026-08-27T17:50:04Z,4ff02e9,main,Ok+is_ok,16
+2026-08-27T17:50:04Z,4ff02e9,main,Some+is_some+unwrap,30
+2026-08-27T17:50:04Z,4ff02e9,main,W* macros (4 calls),13
+2026-08-27T17:50:04Z,4ff02e9,main,_calibration (reference loop),141
+2026-08-27T17:50:04Z,4ff02e9,main,agent_config(new+get+set),126
+2026-08-27T17:50:04Z,4ff02e9,main,alloc(3)+reset+init,623
+2026-08-27T17:50:04Z,4ff02e9,main,alloc(4 sizes burst),40
+2026-08-27T17:50:04Z,4ff02e9,main,argon2id_into (m=64 cache-resident),868532
+2026-08-27T17:50:04Z,4ff02e9,main,capability_set(new+3push),261
+2026-08-27T17:50:04Z,4ff02e9,main,cgroup_file (5-file burst, per call),126
+2026-08-27T17:50:04Z,4ff02e9,main,cgroup_file (best case, same pair),4
+2026-08-27T17:50:04Z,4ff02e9,main,cgroup_limits(new+2set+2get),45
+2026-08-27T17:50:04Z,4ff02e9,main,cgroup_path,3
+2026-08-27T17:50:04Z,4ff02e9,main,classify_signal,3
+2026-08-27T17:50:04Z,4ff02e9,main,drop_caps(non-root err),334
+2026-08-27T17:50:04Z,4ff02e9,main,emerg_cred_parse (v1 record),1732
+2026-08-27T17:50:04Z,4ff02e9,main,epoll(new+add+close),8067
+2026-08-27T17:50:04Z,4ff02e9,main,epoll_event_new,15
+2026-08-27T17:50:04Z,4ff02e9,main,epoll_wait(timeout=0),336
+2026-08-27T17:50:04Z,4ff02e9,main,event_token+flags,5
+2026-08-27T17:50:04Z,4ff02e9,main,getpid,316
+2026-08-27T17:50:04Z,4ff02e9,main,getuid,306
+2026-08-27T17:50:04Z,4ff02e9,main,hashmap(3 set+4 get/has),990
+2026-08-27T17:50:04Z,4ff02e9,main,is_handled_signal,9
+2026-08-27T17:50:04Z,4ff02e9,main,is_mounted(/proc, 2KiB fixed table),5080
+2026-08-27T17:50:04Z,4ff02e9,main,is_root,319
+2026-08-27T17:50:04Z,4ff02e9,main,klog2_sim(4 writes),1451
+2026-08-27T17:50:04Z,4ff02e9,main,klog_sim(3 writes),1112
+2026-08-27T17:50:04Z,4ff02e9,main,knotify_classify(READY),86
+2026-08-27T17:50:04Z,4ff02e9,main,knotify_classify+value,239
+2026-08-27T17:50:04Z,4ff02e9,main,memcpy(128 bytes),245
+2026-08-27T17:50:04Z,4ff02e9,main,memeq (2 calls),25
+2026-08-27T17:50:04Z,4ff02e9,main,memset(128 bytes),214
+2026-08-27T17:50:04Z,4ff02e9,main,mount_table_init,34
+2026-08-27T17:50:04Z,4ff02e9,main,notify_status_value(2),190
+2026-08-27T17:50:04Z,4ff02e9,main,owned_fd_new+raw,15
+2026-08-27T17:50:04Z,4ff02e9,main,resource_limits(new+3get),28
+2026-08-27T17:50:04Z,4ff02e9,main,restart_queue_has_miss8,171
+2026-08-27T17:50:04Z,4ff02e9,main,restart_queue_pop_due_empty,2
+2026-08-27T17:50:04Z,4ff02e9,main,restart_queue_push,12
+2026-08-27T17:50:04Z,4ff02e9,main,sandbox(new+3 rules+count),158
+2026-08-27T17:50:04Z,4ff02e9,main,sandbox_basic_service,252
+2026-08-27T17:50:04Z,4ff02e9,main,seccomp_basic_service+build,2596
+2026-08-27T17:50:04Z,4ff02e9,main,seccomp_build(5 syscalls),431
+2026-08-27T17:50:04Z,4ff02e9,main,seccomp_from_profile,188
+2026-08-27T17:50:04Z,4ff02e9,main,secure_pre_exec(non-root),343
+2026-08-27T17:50:04Z,4ff02e9,main,security_context(new+4 get),100
+2026-08-27T17:50:04Z,4ff02e9,main,set_no_new_privs,477
+2026-08-27T17:50:04Z,4ff02e9,main,sigset_new+add+has,26
+2026-08-27T17:50:04Z,4ff02e9,main,str_builder(3 segments),331
+2026-08-27T17:50:04Z,4ff02e9,main,str_builder(cstr+int mix),307
+2026-08-27T17:50:04Z,4ff02e9,main,strlen(52 chars),44
+2026-08-27T17:50:04Z,4ff02e9,main,timer_new+close,4350
+2026-08-27T17:50:04Z,4ff02e9,main,timerspec_new,20
+2026-08-27T17:50:04Z,4ff02e9,main,vec(push*3+get*2+len),89

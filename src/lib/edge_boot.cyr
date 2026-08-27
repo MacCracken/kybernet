@@ -64,6 +64,30 @@ var _eb_root_device = 0;      # Str, 0 = unset
 var _eb_hash_device = 0;      # Str
 var _eb_root_hash = 0;        # Str, 64 hex chars
 var _eb_luks_device = 0;      # Str
+# ⚠ dm-verity VERIFICATION GETS ITS OWN BOUND. 1.6.14 HIGH-8.
+#
+# It used to borrow `max_boot_ms`, with `var vbudget = 10000;` as the
+# UNCONDITIONAL initialiser — so `max_boot_ms` unset did NOT mean unbounded
+# here, it meant exactly 10 seconds, with no comment justifying the number and
+# no way to change it. That contradicted the contract svc_config.cyr spends
+# eleven lines establishing ("0 means no budget configured") and that
+# `_eb_over_budget` honours everywhere else.
+#
+# The consequence was a correctly-provisioned board that powers off and stays
+# off: `veritysetup verify` walks the whole image, and 10 s buys roughly
+# 200-450 MB off an SD card. veritysetup was SIGKILLed, `run_safe_cmd_timeout`
+# returned -1, that folded into the tool-missing bucket, and the operator's
+# only diagnostic was "veritysetup missing or unrunnable" — actively wrong,
+# on the one path where they have no filesystem to debug from.
+#
+# The default is NOT unbounded. Standing rules 17 and 22 require every PID-1
+# exec to be bounded, and phase 6c runs before the reactor with nothing reaping
+# and nothing servicing a watchdog. 300 s is generous enough that a slow device
+# finishes (~6 GB at SD speeds) and still bounds the stall; an operator who
+# needs more asks for more, and gets a config error at LOAD time if they ask
+# for something absurd (rule 19).
+var _EB_VERIFY_TIMEOUT_DEFAULT = 300000;
+var _eb_verify_timeout_ms = 300000;
 var _eb_expected_pcrs = 0;    # vec of Str (64-hex digests), 0 = none
 
 # Escape hatches, resolved once from /proc/cmdline at phase 6c.
@@ -90,6 +114,8 @@ fn edge_set_devices(root_dev, hash_dev, root_hash, luks_dev) {
 }
 
 fn edge_set_expected_pcrs(v) { _eb_expected_pcrs = v; return 0; }
+fn edge_set_verify_timeout(ms) { _eb_verify_timeout_ms = ms; return 0; }
+fn edge_verify_timeout() { return _eb_verify_timeout_ms; }
 fn edge_root_device()   { return _eb_root_device; }
 fn edge_root_hash()     { return _eb_root_hash; }
 
@@ -280,11 +306,23 @@ fn _eb_verity_verify(budget_ms) {
     safe_cmd_add_arg(cmd, _eb_hash_device);
     safe_cmd_add_arg(cmd, _eb_root_hash);
 
+    # ⚠ TIME THE CALL, BECAUSE -1 MEANS TWO DIFFERENT THINGS. 1.6.14 HIGH-8.
+    #
+    # `run_safe_cmd_timeout` returns -1 both for a spawn failure and for a
+    # child it SIGKILLed at the deadline, and those have opposite diagnoses:
+    # one is "the tool is missing", the other is "the tool was working and we
+    # did not wait long enough". Conflating them told operators to go looking
+    # for an absent veritysetup that was present the whole time. argonaut does
+    # not distinguish them, but the caller can: if we spent the whole budget,
+    # it was the deadline.
+    var t0 = monotonic_ms();
     var rc = run_safe_cmd_timeout(cmd, budget_ms);
+    var spent = monotonic_ms() - t0;
     if (rc == 0) { return 0; }
-    # 127 is "binary not found" from _resolve_safe_binary; -1 is a spawn
-    # failure or a timeout we already killed. Neither is a verification
-    # verdict, and neither may be reported as one.
+    if (rc < 0 && budget_ms > 0 && spent >= budget_ms) { return 4; }
+    # 127 is "binary not found" from _resolve_safe_binary; a remaining -1 is a
+    # spawn failure. Neither is a verification verdict, and neither may be
+    # reported as one.
     if (rc == 127 || rc < 0) { return 3; }
     return 2;
 }
@@ -577,10 +615,22 @@ fn edge_boot_run(config) {
     # missing can still learn that its rootfs image matches the pinned root
     # hash, and that is the more useful half of the answer.
     if (_eb_root_device != 0) {
-        var vbudget = 10000;
+        # ⚠ THE CHECKPOINT THE HEADER CLAIMED AND THE CODE DID NOT HAVE.
+        # This file's own header says the budget is "checked BEFORE each
+        # exec-backed step"; before 1.6.14 there was no `_eb_over_budget` call
+        # ahead of the most expensive exec in the function.
+        if (_eb_over_budget(start_ms, max_ms) == 1) {
+            return _eb_refuse("FATAL: edge boot exceeded max_boot_ms before dm-verity verify",
+              "edge-boot REFUSED: max_boot_ms exceeded before dm-verity verify");
+        }
+        # The verify's OWN bound. `max_boot_ms`, when set, is an overall wall
+        # budget and still caps it — but its ABSENCE no longer silently means
+        # ten seconds.
+        var vbudget = _eb_verify_timeout_ms;
         if (max_ms > 0) {
-            vbudget = max_ms - (monotonic_ms() - start_ms);
-            if (vbudget < 500) { vbudget = 500; }
+            var remain = max_ms - (monotonic_ms() - start_ms);
+            if (remain < 500) { remain = 500; }
+            if (remain < vbudget) { vbudget = remain; }
         }
         var vres = _eb_verity_verify(vbudget);
         if (vres == 0) {
@@ -594,6 +644,17 @@ fn edge_boot_run(config) {
             }
             _eb_verity_waived = 1;
             klog("WARNING: dm-verity verification FAILED, but readonly_rootfs not required");
+        } elif (vres == 4) {
+            # TIMEOUT — the tool was present and running. Naming it "missing"
+            # here sent operators hunting for a binary that was never absent.
+            _eb_verity_verified = 0;
+            if (readonly_req == 1) {
+                return _eb_refuse(
+                  "FATAL: dm-verity verify exceeded its budget - raise edge.verify_timeout_ms",
+                  "edge-boot REFUSED: dm-verity verify TIMED OUT (veritysetup was present and running)");
+            }
+            _eb_verity_waived = 1;
+            klog("WARNING: dm-verity verify exceeded its budget - integrity NOT verified");
         } else {
             _eb_verity_verified = 0;
             if (readonly_req == 1) {

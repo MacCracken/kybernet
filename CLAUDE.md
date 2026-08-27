@@ -6,7 +6,7 @@
 
 - **Type**: Cyrius binary (PID 1 init)
 - **License**: GPL-3.0-only
-- **Version**: 1.6.13
+- **Version**: 1.6.14
 - **Language**: Cyrius 6.5.35 (the whole AGNOS pack front — kybernet/argonaut/libro/agnostik/**sigil**/agnostic — pins 6.5.35; via `~/.cyrius/bin/cyrius`, `cyriusly use 6.5.35`. sigil was the last holdout at 6.5.21 and was brought up at its 3.12.10 tag — a dep that tests on a different compiler from the consumer linking it is a gate that proves nothing)
 - **Tools**: `owl` to read .cyr files. (`cyim` is referenced in sibling repos but is **not installed here** — use ordinary file edits.)
 
@@ -21,7 +21,7 @@ The helmsman that steers the Argo. Manages system boot, essential mounts, signal
 ```sh
 cyrius deps                                  # Resolve deps from cyrius.cyml into lib/
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet   # Build (DCE recommended)
-cyrius test src/test.cyr                     # Run 681 tests
+cyrius test src/test.cyr                     # Run 702 tests
 cyrius bench src/bench.cyr                   # Run benchmarks
 bash scripts/bench-history.sh                # Record bench history + ≥15% regression gate (MANDATORY on every release)
 cyrius build --aarch64 src/main.cyr build/kybernet-aarch64   # Cross-build aarch64
@@ -37,7 +37,7 @@ kybernet/
 ├── VERSION, CLAUDE.md, README.md, CHANGELOG.md, LICENSE
 ├── src/
 │   ├── main.cyr           # Globals + boot sequence + event loop + harness gate
-│   ├── test.cyr           # Integration tests (681 assertions)
+│   ├── test.cyr           # Integration tests (702 assertions)
 │   ├── bench.cyr          # Microbenchmarks
 │   └── lib/
 │       ├── log.cyr        # klog / klog2 / kmsg / slog (factored out at 1.2.0)
@@ -113,7 +113,7 @@ Do **not** add a `path = "../<dep>"` alongside `git`/`tag`. When `path` resolves
 
 1. Make changes to `src/main.cyr` or `src/lib/*.cyr`
 2. Build: `CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet`
-3. Test: `cyrius test src/test.cyr` (681 tests must pass)
+3. Test: `cyrius test src/test.cyr` (702 tests must pass)
 4. Cross-build: `cyrius build --aarch64 src/main.cyr build/kybernet-aarch64` (verify both arches)
 5. Harness (needs KVM): `bash qemu/boot-test.sh` — 62 properties across five passes: boot markers + budget, the reactor gate, dm-verity verification, the emergency-auth prompt against BOTH credential formats, and the quiet gate (log_to_console=false)
 5b. **On a version bump: `bash scripts/bench-history.sh`** — records per-benchmark ns/op to `benches/history.csv` and exits non-zero on a ≥15% regression vs the previous run. Review and explain (or fix) any flagged delta before cutting.
@@ -217,7 +217,7 @@ bash scripts/verify-lock.sh                         # the COMMITTED lock == a fr
 rm -rf lib && cyrius deps && cyrius deps --verify   # expect: N verified, 0 failed
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet
 cyrius build --aarch64 src/main.cyr build/kybernet-aarch64
-cyrius test src/test.cyr                            # 681 tests, 0 failed
+cyrius test src/test.cyr                            # 702 tests, 0 failed
 bash scripts/aarch64-exec-gate.sh                   # EXECUTES aarch64 (needs qemu-user)
 bash scripts/bench-history.sh                       # ≥15% regression gate
 bash qemu/boot-test.sh                              # needs KVM
@@ -234,4 +234,4 @@ Plus a **sibling-free reproduction** — the only gate that catches a tag which 
 - Do not add C, Rust, or assembly files — everything is Cyrius
 - Do not reference `../cyrius/` repo — use installed toolchain at `~/.cyrius/`
 - Do not bump a dep tag to a value > the highest existing git tag (CI clones from `git + tag`; an unreleased VERSION-file value fails resolution — see 1.1.0 CHANGELOG note)
-- Test after every change (681 tests + harness when KVM available)
+- Test after every change (702 tests + harness when KVM available)

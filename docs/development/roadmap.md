@@ -1,18 +1,23 @@
 # Kybernet Roadmap
 
-**Current: v1.6.13** — [CHANGELOG.md](../../CHANGELOG.md) is the record of what each
+**Current: v1.6.14** — [CHANGELOG.md](../../CHANGELOG.md) is the record of what each
 release actually did. This file carries only what is **not** done.
 
 This file now carries two intakes. The 1.5.9 sweep opened **38** items (counted at the
-`1.6.0` tag) and **15 of those remain** — fourteen releases of attrition. The
-2026-08-26 P(-1) audit added **21** more. Total open: **36**. Every number is
-`grep -c '^- \[ \]'` against this file at the relevant tag, not an estimate.
+`1.6.0` tag) and **14 of those remain** — fifteen releases of attrition. The
+2026-08-26 P(-1) audit added 21, of which **17 remain**. Plus one new item opened by
+the 1.6.14 work. Total open: **32**. Every number is `grep -c '^- \[ \]'` against
+this file at the relevant tag, not an estimate.
 
 ⚠ The item count went UP at v1.6.13, and that is the audit working rather than the
-project regressing. Nine of the audit's findings were closed in the same release and
-one mitigated; the 21 added here are the ones deliberately not rushed. Two of them
-(CRITICAL-1's upstream half, HIGH-2's Landlock ABI) describe defects that had been
-shipping for many releases while this file said nothing about them.
+project regressing. v1.6.14 closed all five of the audit's HIGH findings — four here
+and one in argonaut 1.13.9, which is written and tested but **not yet tagged**, so
+kybernet still pins 1.13.8 and HIGH-6 stays open below until it is. v1.6.14 also
+closed the long-standing `is_mounted` / `strlen(52 chars)` benchmark question, by
+DEMONSTRATING that both measure binary layout: an inert BSS pad in `src/bench.cyr`
+moves `strlen(52 chars)` +37%, which is larger than any regression the gate ever
+flagged on it. They are now reported and not gated, with the reason recorded in
+`scripts/bench-history.sh`.
 
 Every item names the file that proves it. Where a claim was verified by running
 something rather than by reading, it says so — and where it was verified by *injecting
@@ -26,9 +31,9 @@ something outside this repo.
 `cyrius lint` reports **0 untracked deferrals and 0 warnings** across the tree, and as
 of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into fiction.
 
-**Gate counts at v1.6.13** (a next agent must not let these shrink; each is enforced):
-681 test assertions (**on both arches**) · 62 harness properties · 56 benchmarks · the
-aarch64 execution gate · the committed-lock gate. See
+**Gate counts at v1.6.14** (a next agent must not let these shrink; each is enforced):
+702 test assertions (**on both arches**) · 66 harness properties · 56 benchmarks (two
+reported-not-gated, declared) · the aarch64 execution gate · the committed-lock gate. See
 [state.md](state.md) for the full current-state handoff.
 
 ---
@@ -53,145 +58,19 @@ Grouped by where the fix lands: **16 kybernet**, 2 argonaut, 1 sigil, 1 libro, 1
 cyrius. The dep ones cannot ship from here — dep first, **the user tags it**, consumer
 second (see the release order below).
 
-- [ ] **HIGH-2 (HIGH) — Landlock rulesets are frozen at ABI v1, so `truncate(2)` is completely unrestricted for every confined service while the sandbox reports "applied"**
-      `src/lib/sandbox.cyr:107` — incomplete sandbox coverage — a silent capability
-      gap in the LIVE per-service confinement path.
-      TRIGGER: Any service with a `security.landlock` block, on any kernel >= 6.2.
-      The shipped harness fixture `kyb-landlock` (qemu/build-initramfs.sh:419-428)
-      grants /usr read-exec and /dev read-write and runs as ROOT; a process under
-      that policy can still `truncate("/etc/shadow", 0)` or
-      `truncate("/boot/vmlinuz", 0)`.
-      CONSEQUENCE: Landlock-confined services are not confined against file
-      destruction. Because the uid drop is opt-in and (see HIGH-3) mutually
-      exclusive with a capability policy, the overwhelmingly common shape is a ROOT
-      service under Landlock — for which DAC imposes nothing either — so path-based
-      `truncate()` reaches every file on the filesystem. Zeroing /etc, the kernel
-      image or a dm-verity hash device is a bricked or unbootable board, and
-      `kyb_pre_exec` reports the sandbox successfully applied throughout.
-      IOCTL_DEV's absence additionally leaves arbitrary device ioctls unchecked on
-      any /dev node the ruleset lets the service open. This is the same shape as the
-      previous audit's HIGH-3 (seccomp with no arch
-      FIX: Negotiate the ABI instead of hardcoding v1. Call
-      `syscall(SYS_LANDLOCK_CREATE_RULESET, 0, 0, 1)` once; on a negative return
-      keep the existing Ok(1) "no Landlock" arm. Otherwise build the mask
-      incrementally: v1 bits always, `| TRUNCATE (1<<14)` when v>=3, `| IOCTL_DEV
-      (1<<15)` when v>=5. Adding the bits unconditionally is NOT a fix and this was
-      tested: an unknown access right makes `landlock_create_ruleset` return -22
-      EINVAL, so on a 5.13..6.1 kernel `sandbox_apply` would return Err and every
-      confined service would refuse to start. Do NOT add REFER (1<<13) as a
-      "missing" bit — probed and refuted: with REFER unhandled the kernel denies ALL
-      cross-directory rename/link (measured EXDEV), so its a
-
-- [ ] **HIGH-3 (HIGH) — `capabilities` and `uid`/`gid` cannot be used together — the capability drop strips CAP_SETUID/CAP_SETGID before the privilege drop needs them, so the service never starts**
-      `src/lib/service_sandbox.cyr:113` — ordering defect in the privilege-drop
-      sequence (capability surrender precedes the setuid that requires it).
-      TRIGGER: `"security": {"capabilities": ["cap_net_bind_service"], "uid": 65534,
-      "gid": 65534}` — the canonical "listen on :443 as an unprivileged user"
-      policy. Also fires for `"capabilities": []` (the documented "drop everything"
-      form, keep_mask = 0), which is the hardening an operator is most likely to
-      pair with a uid.
-      CONSEQUENCE: The service refuses to start. For `type: oneshot`/`forking` the
-      parent sees the 126 and logs `FAILED to start: <name>`; for `type: simple`
-      argonaut returns the forked pid, so kybernet logs `started: <name>` and the
-      dead child surfaces later as a SIGCHLD/restart-queue loop with nothing naming
-      the privilege drop — quieter, not milder. If it is the only enabled service,
-      `failed > 0 && started == 0` can drop the board to the emergency shell. In the
-      workaround shape (C) the service does start, as uid N with ZERO capabilities —
-      CapAmb is 0, no_new_privs makes file capabilities inert, so execve computes
-      pP' = 0 and the `capabilities` key is a silent no-op for any non-root service
-      — while forcing th
-      FIX: Reorder, or make the capability step preserve what the drop needs: (1)
-      `prctl(PR_SET_KEEPCAPS, 1)`; (2) drop the bounding set to keep_mask; (3)
-      setgroups/setgid/setuid; (4) `capset(effective = permitted = inheritable =
-      keep_mask)`; (5) `PR_CAP_AMBIENT_RAISE` each cap in keep_mask so it survives
-      execve; (6) `prctl(PR_SET_KEEPCAPS, 0)`. Steps 5-6 are what actually delivers
-      a capability to a non-root service. Add a harness fixture combining both keys
-      and asserting CapEff/CapPrm and Uid from inside the child — rule 27 in person:
-      kyb-confined has `capabilities` and no uid, kyb-nonroot has uid and no
-      capabilities, and no fixture has ever combined them. CHANGELOG's justification
-      of this ordering re
-
-- [ ] **HIGH-5 (HIGH) — Every SIGHUP leaks 53,640 bytes of arena, 65% of it a read buffer and a service-definition set that `reload_config` explicitly refuses to apply**
-      `src/main.cyr:149` — unbounded per-signal allocation; work performed only to
-      be discarded.
-      TRIGGER: `kill -HUP 1` from any root process. SIGHUP is not queued, so the
-      rate is one reload per reactor iteration; a shell loop drives thousands per
-      second. No attacker is required either: a config-management agent that HUPs
-      PID 1 once a minute costs ~77 MB/day in a process CLAUDE.md says runs for
-      months.
-      CONSEQUENCE: Root-triggerable memory exhaustion of PID 1, and slow unbounded
-      growth under entirely legitimate use. 5,003 reloads per 256 MiB chunk; every
-      allocated byte is written (JSON tree + service defs), so this is real RSS, not
-      just VA. PID 1 is OOM-exempt, so the terminal state is the same kernel panic
-      as HIGH-4. Even a REFUSED reload (absent, truncated or malformed config) still
-      leaks ~16.4 kB per HUP while correctly keeping the running config.
-      FIX: Two independent halves. (a) Make the read buffer static: `var
-      _cfg_read_buf[16385];` in BSS — it is a fixed 16 KiB by construction and the
-      `n > cap` truncation refusal is unaffected. This was checked for aliasing and
-      is safe: `_jp_parse_string_a` pre-scans for the closing quote and copies each
-      decoded string into its own allocation before `str_new_a`, so no tree node
-      points into the read buffer. (b) Give `reload_config` a narrow load path that
-      parses only the keys it is documented to apply (boot_timeout_ms,
-      shutdown_timeout_ms, log_to_console, emergency_require_auth,
-      emergency_password_hash) and never calls `svc_defs_from_json` — the function's
-      own header already says structural changes need
-
-- [ ] **HIGH-6 (HIGH) — `"health_check": {"type": "command"}` blocks PID 1's reactor in an unbounded `waitpid`, ignores the configured `timeout_ms`, and execs with an empty envp** **Fix lands in `argonaut`.**
-      `lib/argonaut_health.cyr:141` — unbounded blocking call on the reactor path;
-      stdlib exec that also fails open (standing rule 17, on a path the rule's
-      author did not enumerate).
-      TRIGGER: `{"health_check":{"type":"command","target":"/usr/bin/mycheck","timeo
-      ut_ms":2000}}` where the command blocks — a flock, a dead NFS mount, a socket
-      read, a full pipe. Secondary trigger: `target` is a bare name (`"true"`,
-      `"systemctl is-active foo"`) — `execve` does not search $PATH and envp is
-      empty, so it is ENOENT -> exit 127 -> unhealthy, deterministically, forever.
-      CONSEQUENCE: The reactor is stuck inside `sys_waitpid(pid, &stbuf, 0)`.
-      Nothing else in PID 1 runs: no SIGCHLD reaping (zombies to PID exhaustion), no
-      SIGTERM/SIGINT/SIGPWR handling (the box cannot shut down or reboot), no
-      watchdog, no restart queue, no notify drain. The board looks alive and is
-      dead, and the `timeout_ms` the operator configured to bound exactly this is
-      silently discarded. With a bare command name the check fails on every tick and
-      kybernet restarts a perfectly healthy service forever on a config that reads
-      as correct. The child also inherits PID 1's blocked mask across execve, so
-      SIGTERM/SIGINT are inert in every health-check command.
-      FIX: Replace `exec_vec_str` in `check_command` with argonaut 1.13.2's own
-      `run_safe_cmd_timeout(cmd, ms)` — the bounded, status-checked, PATH-resolving,
-      mask-resetting replacement that already exists in this tree at
-      lib/argonaut_process_mgmt.cyr:166 and that CLAUDE.md rule 17 mandates —
-      passing the `timeout_ms` the caller already hands it. Note kybernet's own
-      edge-boot path already made exactly this move (edge_boot.cyr:197/201/260 carry
-      the comments explaining why) while leaving argonaut's health path on the
-      unbounded stdlib call. Then add a `qemu/build-initramfs.sh` fixture with
-      `"type": "command"` that deliberately sleeps past its timeout, and assert in
-      the `kybernet.harness=loop` pass that the
-
-- [ ] **HIGH-8 (HIGH) — dm-verity verification gets a hardcoded 10 s bound when `max_boot_ms` is unset — contradicting the documented "0 means unbounded" contract — and its expiry is reported as "veritysetup missing" and powers the board off**
-      `src/lib/edge_boot.cyr:530` — an unconfigured default overriding a documented
-      "unbounded" contract to reach a poweroff; timeout conflated with tool-absent.
-      TRIGGER: A correctly-provisioned edge board — `readonly_rootfs: true`, device
-      triple set, valid 64-hex root_hash — with `max_boot_ms` simply not written,
-      and a rootfs large enough or a device slow enough that `veritysetup verify`
-      needs more than 10 s. No typo, no missing tool, no corruption.
-      CONSEQUENCE: veritysetup is SIGKILLed mid-verify at 10 s; rc -1 -> vres 3 ->
-      `_eb_refuse` -> `do_shutdown(SHUTDOWN_POWEROFF)`. A board whose rootfs is
-      intact and whose config is correct powers off and stays off — the precise harm
-      standing rule 19 exists to prevent, one field over from where 1.5.7 fixed it
-      by flipping argonaut's 3000 ms `max_boot_ms` default to 0. The operator's only
-      diagnostic is `edge-boot REFUSED: veritysetup missing or unrunnable`, which is
-      actively wrong: veritysetup was present, ran, and was killed — and this is the
-      one path where they have no filesystem to debug from. Recovery is
-      `kybernet.edge=off` (downgraded to permissive, which then hits HIGH-7 and
-      drops to the emergency shell
-      FIX: Separate the three questions collapsed here. (1) Give the verify its own
-      bound rather than borrowing `max_boot_ms`'s absence — an explicit
-      `edge.verify_timeout_ms`, defaulting either to unbounded (matching
-      `_eb_over_budget`'s reading of 0) or to a value derived from device size,
-      validated at load per rule 19. (2) Add a fourth return from
-      `_eb_verity_verify` for TIMEOUT, distinct from 127/spawn-failure, so the kmsg
-      says "verification exceeded its budget" rather than naming a tool that was
-      present. (3) Decide deliberately whether a timeout under `readonly_rootfs`
-      should power off at all — a bounded PID-1 exec is required (rules 17/22), but
-      mapping its expiry onto the same refusal as a corrupt
+- [ ] **HIGH-6 — FIXED IN argonaut 1.13.9, AWAITING A TAG.** `health_check.type =
+      "command"` blocked PID 1's reactor in an unbounded `waitpid`, discarded the
+      configured `timeout_ms`, and exec'd with an empty envp so a bare command name
+      was ENOENT forever. Found while fixing it: it **could never run a command with
+      an argument at all** — `str_split` returns views into the original buffer
+      (measured: word[0] of `"/bin/sleep 5"` has str_len 10 and its next byte is 32,
+      not 0) and `execve`'s argv needs NUL-terminated strings, so argv[0] was the
+      whole command line. Both the old and new code had that defect, which is why
+      the pre-1.13.9 suite only ever tried single-word targets.
+      argonaut's `check_command` now uses `run_safe_cmd_timeout` and splits in place
+      in a static buffer; its suite went 23 -> 33 assertions. **kybernet still pins
+      argonaut 1.13.8**: the 1.13.9 tag does not exist yet and a manifest naming an
+      untagged version fails CI resolution. Bump after the user tags it.
 
 - [ ] **MEDIUM-1 (MEDIUM) — A `landlock` block whose rules all resolve to no access installs NO ruleset and returns Ok(0) "applied" — the service runs with zero filesystem confinement**
       `src/lib/sandbox.cyr:212` — fails open — "nothing to do" indistinguishable
@@ -601,6 +480,17 @@ second (see the release order below).
 
 ---
 
+- [ ] **`check_command` allocates 232 bytes per health check, on PID 1's reactor
+      path.** Measured during the 1.6.14 work (`alloc_used()` delta over two calls
+      = 464 B). At a 5 s interval that is ~4 MB/day/service in the arena init never
+      resets — the same class as 1.6.3 / 1.6.5 / 1.6.6 / 1.6.12 / 1.6.13 HIGH-4.
+      It comes from `str_from` boxes, `safe_cmd_new`, `run_safe_cmd_timeout`'s argv
+      buffer and `_resolve_safe_binary`'s path builder, so it is pre-existing and
+      shared with the edge-boot callers — which run once per boot, where it does not
+      matter. Removing it means reworking `SafeCommand`'s allocation rather than
+      patching one call site, so it was filed rather than rushed into 1.13.9.
+      Lands in argonaut.
+
 ## v1.6.x — code that does nothing, and docs that say it does
 
 - [ ] **Port `agnos-init.sh`'s `setup_directories()` to a kybernet oneshot service.**
@@ -631,19 +521,6 @@ second (see the release order below).
           `default_services(BOOT_DESKTOP)`, so making it depend on a new `agnos-init`
           needs either an argonaut change or a config that replaces the default set.
 
-- [ ] **`is_mounted` is the benchmark that keeps moving, and it is layout-sensitive.**
-      Third intervention now. 1.6.1: it scanned the host's REAL mount table and read
-      +641% on a CI runner; fixed with a 2 KiB synthetic table. 1.6.8: measured
-      ~+12.6% (paired against a clean 1.6.7 worktree, same box: ~4130 vs ~4650 ns)
-      from a release that never touched `mount.cyr` — almost certainly `.rodata`
-      shift, since that release rewrote 52 log literals from UTF-8 to ASCII. It also
-      oscillates between two stable modes on unchanged code. It scans 2 KiB and is
-      the most cache-sensitive benchmark in the suite, so it measures binary layout
-      as much as it measures the function. Either make it layout-insensitive (much
-      smaller working set, or report a median across process restarts) or accept it
-      is not a gateable figure and exempt it with the reason stated. The same
-      question applies to `strlen(52 chars)`, which showed the identical shape at
-      1.6.3 and was never explained.
 - [ ] **`seccomp: basic` is measured against a dynamically linked binary only.**
       The dev box stages Arch's dynamic busybox; CI installs `busybox-static`, whose
       glibc start-up issues `readlinkat("/proc/self/exe")` and `prctl` that the
@@ -760,6 +637,21 @@ Moved into the v1.6.1 gate line. Recording why here so the claim is not re-made:
 
 One line per release. Detail lives in [CHANGELOG.md](../../CHANGELOG.md).
 
+- **v1.6.14** — All five HIGH findings from the P(-1) audit. Landlock was frozen at
+  ABI v1, so `truncate(2)` was **entirely unchecked** for every confined service while
+  the sandbox reported "applied" — measured: open denied, truncate allowed, a 16-byte
+  file reduced to 0. `capabilities` and `uid` could not be used together at all: the
+  capability drop surrendered CAP_SETUID/CAP_SETGID before the privilege drop needed
+  them, so the canonical "bind a low port as an unprivileged user" policy was accepted
+  by the parser and exited 126 every time; the fix raises AMBIENT capabilities, the
+  only set that survives execve of a plain binary. Every SIGHUP leaked ~38 KB, and did
+  so even with no config file. dm-verity verification borrowed an undocumented
+  hardcoded 10 s, so a board with an INTACT rootfs powered off blaming a veritysetup
+  that was present and running. argonaut 1.13.9 fixes the health-command exec (found
+  en route: it could never run a command with an argument, on either implementation).
+  Also settled the benchmark question three releases old, by proving with inert
+  padding that `strlen`/`is_mounted` measure layout. 681 -> 702 assertions,
+  62 -> 66 harness properties.
 - **v1.6.13** — The P(-1) audit, ten releases late, and the arch half of the product
   could not boot. 31 findings (2 CRITICAL, 9 HIGH, 13 MEDIUM, 7 LOW); 9 closed, 1
   mitigated, 21 deferred with evidence. **CRITICAL-1: `sys_signalfd()` issues

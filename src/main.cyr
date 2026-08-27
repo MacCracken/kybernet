@@ -139,14 +139,72 @@ var g_notify_badpid = 0;        # MAINPID malformed, or outside the sender's cgr
 # on a reload that would replace a running board's services, boot mode and
 # edge policy wholesale, and at boot it would quietly turn an edge board into
 # a normal one. Callers decide; neither may confuse the two.
-fn load_config() {
+# Scratch for the config read. GLOBAL scope, so [2049] is 2049 SLOTS = 16392
+# BYTES — the 16384 cap plus the headroom byte, rounded up to a slot. See
+# CLAUDE.md standing rule 2 for why that is not [16385].
+#
+# ⚠ ALLOCATED ONCE AND CACHED, NOT PER CALL. 1.6.14 HIGH-5.
+#
+# This was `alloc(cap + 1)` on every invocation, in the arena PID 1 never
+# resets — so `kill -HUP 1` (deliverable to init precisely BECAUSE
+# setup_signals blocks it) leaked 16,392 bytes a shot, and did so even with no
+# config file at all, since the alloc preceded the read. Measured ~12,500
+# reloads/s of CPU, i.e. the first 256 MiB chunk gone in under half a second.
+# A config-management agent HUPing once a minute cost ~77 MB/day in a process
+# that runs for months.
+#
+# ⚠ NOT A `var buf[2049]` STATIC, AND THE REASON IS MEASURED. The obvious fix
+# is a BSS array, and it works — but it grows static data by 16,392 bytes, and
+# that shifted binary layout enough to regress `is_mounted` by 15-19% on the
+# bench gate. Isolated deliberately: shrinking just this buffer, with every
+# other 1.6.14 change in place, made that regression vanish. `is_mounted` scans
+# a 2 KiB table and is the most cache-sensitive benchmark in the suite (see
+# roadmap.md), so 16 KB of new BSS is enough to move it.
+#
+# Allocating ONCE and caching the pointer costs nothing per reload, keeps BSS
+# where it was, and still closes the unchecked-`alloc()` hazard — the old code
+# handed `file_read_all` a pointer it never tested, which at real mmap
+# exhaustion is a write through NULL in PID 1.
+#
+# Standing rule 8 note: this caches an arena pointer in a global, which is
+# unsafe across `alloc_reset()`. PID 1 never resets (lifetime = process) and
+# neither the test nor the bench binary calls load_config, so nothing can
+# observe a stale pointer. If that ever changes, `_cfg_read_buf_p` must be
+# cleared alongside the cgroup cache in `arena_reset_clean()`.
+var _cfg_read_buf_p = 0;
+
+fn _cfg_read_buf() {
+    if (_cfg_read_buf_p == 0) {
+        # 16384 cap + 1 headroom byte. Checked: alloc() returns 0 on mmap
+        # failure (alloc.cyr:188), and handing a NULL to file_read_all is the
+        # unchecked-return hazard this fix also closes.
+        _cfg_read_buf_p = alloc(16385);
+    }
+    return _cfg_read_buf_p;
+}
+
+# `want_services` = 0 skips svc_defs_from_json entirely. SIGHUP needs the
+# scalar values and explicitly refuses to apply service definitions, so
+# building them cost 18,264 bytes per reload to produce a set thrown away one
+# branch later. `_cfg_saw_services` records how many the JSON DECLARED, so the
+# reload can still say "NOT applied" without constructing anything.
+var _cfg_saw_services = 0;
+
+fn load_config() { return _load_config_inner(1); }
+
+fn _load_config_inner(want_services) {
+    _cfg_saw_services = 0;
     # One byte of headroom so a full read is distinguishable from a truncated
     # one. `file_read_all` stops at maxlen and returns maxlen with no error
     # (io.cyr:471-476), so without this a config that outgrew the buffer came
     # back as invalid JSON and took the defaults path — a silent 16 KiB
     # cliff with no diagnostic.
     var cap = 16384;
-    var buf = alloc(cap + 1);
+    var buf = _cfg_read_buf();
+    if (buf == 0) {
+        klog("config: could not allocate the config read buffer - using defaults");
+        return argonaut_config_default();
+    }
     var n = file_read_all("/etc/kybernet/config.json", buf, cap + 1);
     if (n <= 0) {
         klog("no config found, using defaults");
@@ -264,8 +322,21 @@ fn load_config() {
     }
 
     # Services (the v1.5.0 headline). See src/lib/svc_config.cyr.
+    #
+    # Skipped entirely on a reload: `reload_config` refuses to apply service
+    # definitions by design (they carry live pids, states and restart counts
+    # for processes still running), so constructing 13 ServiceDefinitions in
+    # order to log "NOT applied" was 18,264 bytes of pure waste per SIGHUP.
+    # Count what the JSON declared instead, so the operator still gets told.
+    if (want_services == 0) {
+        var raw = json_v_obj_get(root, "services");
+        if (raw != 0 && json_v_is_arr(raw) == 1) { _cfg_saw_services = json_v_arr_len(raw); }
+        return cfg;
+    }
+
     var svcs = svc_defs_from_json(root);
     var scount = vec_len(svcs);
+    _cfg_saw_services = scount;
     if (scount > 0) {
         var dst = config_services(cfg);
         for (var i = 0; i < scount; i = i + 1) { vec_push(dst, vec_get(svcs, i)); }
@@ -307,7 +378,7 @@ fn reload_config() {
     var prev_hash = g_emerg_hash;
     var prev_req = g_emerg_require_auth;
 
-    var new_cfg = load_config();
+    var new_cfg = _load_config_inner(0);
     if (new_cfg == 0) {
         # ⚠ KEEP THE RUNNING CONFIG. load_config used to answer
         # `argonaut_config_default()` here, so a SIGHUP with a truncated or
@@ -357,7 +428,7 @@ fn reload_config() {
                 klog("config reload: boot_mode change requires a reboot - NOT applied");
             }
         }
-        if (vec_len(config_services(new_cfg)) > 0) {
+        if (_cfg_saw_services > 0) {
             klog("config reload: service definitions require a reboot - NOT applied");
         }
     }

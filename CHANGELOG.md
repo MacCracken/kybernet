@@ -7,6 +7,172 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.6.14] — 2026-08-27
+
+**All five HIGH findings from the 2026-08-26 P(-1) audit.** Four land here; the
+fifth is argonaut's and is fixed in argonaut 1.13.9, awaiting a tag. Suite
+681 → 702 assertions. Harness 62 → 66 properties, two new fixtures.
+
+Every fix below was verified by *running* it — three of the four by reproducing
+the defect first and watching it disappear, which is how this repo has learned to
+tell a fix from a plausible edit.
+
+### Fixed — HIGH-2: Landlock governed everything except destroying files
+
+`_landlock_handled_mask()` was frozen at the thirteen ABI-v1 access bits, which
+omit `LANDLOCK_ACCESS_FS_TRUNCATE` (1 << 14, ABI v3 / Linux 6.2). A Landlock
+ruleset is silent about operations it does not name, so **every confined service
+could `truncate("/boot/vmlinuz", 0)`** while `sandbox_from_config` returned Ok(0)
+"applied". Measured on the dev box against the real `sandbox_apply`:
+`open(victim, O_WRONLY)` → EACCES (Landlock *is* enforcing) while
+`truncate(victim, 0)` → 0, a 16-byte file reduced to 0. Because the uid drop is
+opt-in — and, per HIGH-3, was mutually exclusive with a capability policy — the
+common shape is a **root** service under Landlock, for which DAC stops nothing
+either, so this reached every file on the filesystem.
+
+⚠ Adding the bits unconditionally is not a fix, it is an outage: an access right
+the kernel does not know makes `landlock_create_ruleset` return -EINVAL, so on a
+5.13..6.1 kernel every confined service would refuse to start. kybernet now
+negotiates — `landlock_create_ruleset(NULL, 0, VERSION)` once, cached — and adds
+TRUNCATE at ABI ≥ 3 and IOCTL_DEV at ≥ 5. Grants are intersected with the handled
+mask, so the read-write level can name TRUNCATE unconditionally (services must
+still be able to truncate their *own* files) and the bit is simply dropped on an
+older kernel. REFER (1 << 13) stays deliberately **out**: unhandled, the kernel
+denies all cross-directory rename/link, so its absence is fail-*closed*.
+
+Verified both ways: with the ABI pinned to 1 through a test seam the victim file
+is truncated to 0 bytes; with negotiation it stays 16 and truncate returns EACCES.
+`qemu/landlock-fixture.cyr` now attempts a truncate against a dedicated victim —
+it only ever called `sys_open(O_RDONLY)`, which is why the harness could not see
+this (rule 27, in the fixture rule 27 already asked for).
+
+### Fixed — HIGH-3: `capabilities` and `uid` could not be used together at all
+
+The two most important security keys had an unusable intersection, and the
+failure was total rather than partial. The capability step surrendered everything
+outside the keep-list from the EFFECTIVE set; the kernel gates setgid/setgroups
+on CAP_SETGID and setuid on CAP_SETUID (`ns_capable_setid`, **not** euid == 0).
+So the moment a policy named any keep-list, the privilege drop one step later
+failed EPERM, `kyb_pre_exec` returned 1, and argonaut exited the child 126 — the
+service never started. `{"capabilities": ["cap_net_bind_service"], "uid": 65534}`,
+the canonical "bind a low port as an unprivileged user" policy, was accepted by
+the config parser and could never run. `"capabilities": []` — the hardening most
+likely to be paired with a uid — failed identically.
+
+Keeping CAP_SETUID/CAP_SETGID on the keep-list is not a fix either: it works, and
+leaves the service holding the two capabilities you least want it able to regain,
+while **still** delivering zero capabilities to a non-root service.
+
+New `drop_caps_and_privileges()` does the only sequence that works:
+PR_SET_KEEPCAPS → raise INHERITABLE while CAP_SETPCAP is still held → bounding-set
+drop → setgroups/setgid/setuid → re-raise EFFECTIVE from the preserved PERMITTED →
+**PR_CAP_AMBIENT_RAISE** per kept cap → clear KEEPCAPS. The ambient step is the
+one that matters: it is the only set that survives execve of an unprivileged
+binary, so without it a non-root service reaches `main()` with nothing.
+
+Measured end to end under a user namespace: the old sequence fails
+`PRIV_SETGROUPS_FAIL`; the new one gives uid/gid 65534, permitted mask exactly
+`1 << 10`, ambient CAP_NET_BIND_SERVICE set and CAP_SYS_ADMIN clear. New
+`kyb-capuid` harness fixture asserts Uid, CapAmb and CapBnd **from inside the
+child** — `kyb-confined` had capabilities and no uid, `kyb-nonroot` had a uid and
+no capabilities, and nothing had ever crossed them.
+
+### Fixed — HIGH-5: every SIGHUP leaked ~38 KB of a never-reset arena
+
+`kill -HUP 1` is deliverable to PID 1 precisely *because* `setup_signals` blocks
+it. Each reload allocated a 16 KiB read buffer — before the read, so it leaked
+even with **no config file at all** — and then built every `ServiceDefinition`
+only for `reload_config` to log "service definitions require a reboot - NOT
+applied" and throw them away. Measured against the repo's own staged config:
+`svc_defs_from_json` costs **21,680 bytes per reload**, now **0**, and the narrow
+path still reports all 15 services so the operator is still told. The read buffer
+is static, which also removes an unchecked `alloc()` whose NULL would have been
+handed straight to `file_read_all` at real exhaustion.
+
+A config-management agent HUPing once a minute cost ~77 MB/day in a process that
+runs for months; a shell loop drives thousands per second.
+
+⚠ The buffer is **allocated once and cached**, not a `var buf[2049]` in BSS. The
+BSS version works and was written first — and grew static data by 16,392 bytes,
+which shifted binary layout enough to move `is_mounted` by 15-19% on the bench
+gate. Isolated deliberately: shrinking only that buffer, with every other 1.6.14
+change in place, made the flag vanish. Allocating once costs nothing per reload,
+keeps BSS flat (+96 bytes rather than +16,480) and still closes the unchecked
+`alloc()` whose NULL would have gone straight to `file_read_all`.
+
+### Changed — two benchmarks are now reported, not gated, and the reason is measured
+
+`bash scripts/bench-history.sh` flagged `strlen(52 chars)` at +51% on a release
+that touches neither `strlen` nor any string. Direct measurement, same box,
+minutes apart: **1.6.14 45/50/46 ns vs 1.6.13 31/32/32**. Reproducible, so not
+noise — and the box was genuinely busy, which the calibration correctly reported
+as 1159/1000 while still not explaining it.
+
+The cause was demonstrated rather than assumed. Inserting a purely **inert** BSS
+pad into `src/bench.cyr` — an array nothing reads, writes or calls — moved
+`strlen(52 chars)` from 46 to **63 ns/op** at 32 slots and back to 46 at 48. A
++37% swing from code that does not execute is larger than the "regression" being
+investigated. The benchmark's literal had also moved 4,740 bytes and changed
+alignment (mod8 5 → 1).
+
+So `strlen(52 chars)` and `is_mounted(/proc, 2KiB fixed table)` measure where the
+linker put things. roadmap.md had asked for exactly this decision — make them
+layout-insensitive or accept they are not gateable and exempt them **with the
+reason stated** — after three interventions on one and two on the other. They are
+exempted, printed as `layout ... NOT gated` on every run so nobody forgets they
+are unguarded, still recorded to the CSV, and still counted (so deleting one
+still fails the suite-shrank check).
+
+⚠ Verified the gate can still turn red: doubling the work in `memeq (2 calls)`,
+which is not exempt, was flagged `+118%` and blocked the cut. Adding a name to
+`LAYOUT_SENSITIVE` requires the same inert-padding experiment in the commit that
+adds it.
+
+### Fixed — HIGH-8: a correct board with an intact rootfs powered itself off
+
+dm-verity verification borrowed `max_boot_ms`, and when that was unset fell back
+to `var vbudget = 10000` — a hardcoded ten seconds, undocumented, with no
+independent knob. That directly contradicts the contract `svc_config.cyr` spends
+eleven lines establishing and `_eb_over_budget` honours everywhere else ("0 means
+no budget configured"). `veritysetup verify` hashes the whole image; ten seconds
+buys roughly 200-450 MB off an SD card. Past that, veritysetup was SIGKILLed,
+`run_safe_cmd_timeout` returned -1, and that folded into the *tool-missing*
+bucket — so a board whose rootfs was intact and whose config was correct powered
+off reporting **"veritysetup missing or unrunnable"**, naming a tool that was
+present and running, on the one path where the operator has no filesystem to
+debug from.
+
+Verification now has its own `edge.verify_timeout_ms`, validated at load
+(1000..3600000, rejected not clamped, per rule 19) and defaulting to 300 s —
+generous enough for a slow device, still bounded, because rules 17/22 forbid an
+unbounded exec in PID 1 and phase 6c runs with nothing reaping. `max_boot_ms`,
+when set, still caps it. `_eb_verity_verify` gained a fourth verdict for TIMEOUT,
+distinguished by timing the call, so the message says the budget was exceeded
+instead of blaming a missing binary. Also added the `_eb_over_budget` checkpoint
+before the verify exec that this file's header had claimed for three releases and
+did not have.
+
+### Fixed in argonaut 1.13.9 — HIGH-6, awaiting a tag
+
+`health_check.type = "command"` blocked PID 1's reactor in an unbounded
+`waitpid`, discarded the configured `timeout_ms`, exec'd with an empty envp so a
+bare command name was ENOENT forever, and — found while fixing it — **could never
+run a command with an argument at all**, because `str_split` returns views into
+the original buffer and `execve`'s argv needs NUL-terminated strings. See
+argonaut's CHANGELOG [1.13.9].
+
+⚠ **kybernet still pins argonaut 1.13.8 in this release.** The tag does not exist
+yet, and a `cyrius.cyml` naming an untagged version fails CI resolution. Bump
+after the dep is tagged; the finding stays open in the roadmap until then.
+
+### Gate counts
+
+681 → 702 assertions; 62 → 66 harness properties; two new fixtures
+(`kyb-capuid`, `kyb-capuid-read`) so `services parsed` and
+`removed service cgroups` move 13 → 15.
+
+---
+
 ## [1.6.13] — 2026-08-26
 
 **The P(-1) audit, ten releases late — and the arch half of the product could not

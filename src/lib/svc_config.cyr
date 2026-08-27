@@ -303,6 +303,10 @@ fn edge_apply_defaults(ec) {
     store64(ec + 16, 0);   # tpm_attestation
     store64(ec + 24, 0);   # max_boot_ms — 0 = unbounded, NOT argonaut's 3000
     store64(ec + 32, 0);   # pcr_bindings — 0 = none, NOT argonaut's "7+14"
+    # verify_timeout_ms lives in a kybernet global (argonaut's EdgeBootConfig
+    # has no slot for it), so it is reset here alongside the rest — an absent
+    # or malformed edge block must not leave a previous value standing.
+    edge_set_verify_timeout(_EB_VERIFY_TIMEOUT_DEFAULT);
     return 0;
 }
 
@@ -328,6 +332,33 @@ fn edge_config_from_json(root, ec) {
     var mb = _cfg_int(eb, "max_boot_ms", 0);
     if (mb < 0) { return 0; }
     if (mb > 0) { store64(ec + 24, mb); }
+
+    # ⚠ dm-verity VERIFICATION HAS ITS OWN BOUND. 1.6.14 HIGH-8.
+    #
+    # It used to borrow `max_boot_ms` and, when that was unset, fall back to a
+    # hardcoded 10,000 ms buried in edge_boot.cyr — so the one key documented
+    # as safe to omit silently imposed a ten-second limit on hashing an entire
+    # rootfs image. On a slow device that is ~200-450 MB, after which
+    # veritysetup was SIGKILLed and the board powered off with the misleading
+    # message "veritysetup missing or unrunnable".
+    #
+    # Validated HERE, at load, with a loud reason (rule 19): an out-of-range
+    # value must be a config error the operator can read, not a phase-6c
+    # poweroff. The floor keeps a typo from making every verify time out; the
+    # ceiling keeps one from stalling PID 1 for an hour before the reactor
+    # exists (rules 17/22). 0 / absent = the 300 s default.
+    var vt = _cfg_int(eb, "verify_timeout_ms", 0);
+    if (vt < 0) { return 0; }
+    if (vt > 0) {
+        if (vt < 1000 || vt > 3600000) {
+            klog("config: edge.verify_timeout_ms outside 1000..3600000 - REJECTED");
+            kmsg("kybernet: config: edge.verify_timeout_ms out of range");
+            return 0;
+        }
+        edge_set_verify_timeout(vt);
+    } else {
+        edge_set_verify_timeout(_EB_VERIFY_TIMEOUT_DEFAULT);
+    }
 
     var spec = _cfg_str(eb, "pcr_bindings", 0);
     if (spec != 0) {

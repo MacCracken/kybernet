@@ -108,8 +108,29 @@ fn kyb_pre_exec(svc_def) {
         if (is_err_result(set_no_new_privs()) == 1) { return 1; }
     }
 
-    # 2. capabilities
-    if (caps != 0) {
+    # Does this policy also ask for a uid/gid drop? The answer changes HOW the
+    # capabilities are surrendered, so it has to be known before step 2.
+    var want_uid = 0 - 1;
+    var want_gid = 0 - 1;
+    if (sc != 0) {
+        want_uid = kyb_policy_uid(sc);
+        want_gid = kyb_policy_gid(sc);
+    }
+    var has_privdrop = 0;
+    if (want_uid != 0 - 1 || want_gid != 0 - 1) { has_privdrop = 1; }
+
+    # 2. capabilities — STANDALONE ONLY. 1.6.14 HIGH-3.
+    #
+    # ⚠ When a uid/gid drop is ALSO configured, the capability surrender must
+    # not happen here: the kernel gates setgid on CAP_SETGID and setuid on
+    # CAP_SETUID (`ns_capable_setid`, not euid == 0), so dropping them now
+    # makes the privilege drop at step 4 fail EPERM and the service never
+    # starts at all. From 1.6.9 to 1.6.13 the intersection of the two most
+    # important security keys — `{"capabilities": [...], "uid": N}`, the
+    # canonical "bind a low port as an unprivileged user" policy — was
+    # accepted by the parser and could never run. The two are done together in
+    # step 4 instead, in the one order that works.
+    if (caps != 0 && has_privdrop == 0) {
         if (is_err_result(drop_caps_from_set(caps)) == 1) { return 1; }
     }
 
@@ -175,14 +196,24 @@ fn kyb_pre_exec(svc_def) {
     # is the same reasoning as the Landlock arm above, and the opposite of what
     # `drop_privileges`' own PRIV_NOT_ROOT arm does when kybernet is run as a
     # non-root test harness — which cannot happen in PID 1.
-    if (sc != 0) {
-        var want_uid = kyb_policy_uid(sc);
-        var want_gid = kyb_policy_gid(sc);
-        if (want_uid != 0 - 1 || want_gid != 0 - 1) {
-            var du = want_uid;
-            var dg = want_gid;
-            if (du == 0 - 1) { du = 0; }        # gid-only: leave uid alone
-            if (dg == 0 - 1) { dg = 0; }        # uid-only: leave gid alone
+    if (has_privdrop == 1) {
+        var du = want_uid;
+        var dg = want_gid;
+        if (du == 0 - 1) { du = 0; }        # gid-only: leave uid alone
+        if (dg == 0 - 1) { dg = 0; }        # uid-only: leave gid alone
+
+        if (caps != 0) {
+            # Both keys set: the combined path. It raises INHERITABLE and drops
+            # the bounding set while CAP_SETPCAP is still held, then setuids
+            # under PR_SET_KEEPCAPS, then raises AMBIENT — which is the only
+            # set that survives execve of an unprivileged binary, and therefore
+            # the only way a non-root service actually receives a capability.
+            var cpr = drop_caps_and_privileges(capset_keep_mask(caps), du, dg);
+            if (is_err_result(cpr) == 1) {
+                kmsg("kybernet: pre-exec: CAPABILITY+PRIVILEGE DROP FAILED - refusing to exec");
+                return 1;
+            }
+        } else {
             var pr = drop_privileges(du, dg);
             if (is_err_result(pr) == 1) {
                 kmsg("kybernet: pre-exec: PRIVILEGE DROP FAILED - refusing to exec as root");

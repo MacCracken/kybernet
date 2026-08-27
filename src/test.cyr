@@ -2129,6 +2129,36 @@ fn test_edge_config_rejects() {
     assert_eq(edge_config_from_json(json_v_parse(
           _doc3("{\"edge\":{\"pcr_bindings\":\"7+99\"}}", "", "")), ec), 0,
       "edge: PCR index above 23 rejected");
+
+    # ⚠ verify_timeout_ms — 1.6.14 HIGH-8. dm-verity verification borrowed
+    # max_boot_ms and, when that was unset, a hardcoded 10 s buried in
+    # edge_boot.cyr. On a slow device that is a few hundred MB, after which
+    # veritysetup was SIGKILLed and a board with an INTACT rootfs powered off
+    # reporting "veritysetup missing" — a tool that was present the whole time.
+    # Bounds are rejections at LOAD, never clamps (rule 19).
+    assert_eq(edge_config_from_json(json_v_parse(
+          _doc3("{\"edge\":{\"verify_timeout_ms\":999}}", "", "")), ec), 0,
+      "edge: verify_timeout_ms below the 1000 floor rejected");
+    assert_eq(edge_config_from_json(json_v_parse(
+          _doc3("{\"edge\":{\"verify_timeout_ms\":3600001}}", "", "")), ec), 0,
+      "edge: verify_timeout_ms above the 3600000 ceiling rejected");
+    assert_eq(edge_config_from_json(json_v_parse(
+          _doc3("{\"edge\":{\"verify_timeout_ms\":-1}}", "", "")), ec), 0,
+      "edge: negative verify_timeout_ms rejected");
+
+    assert_eq(edge_config_from_json(json_v_parse(
+          _doc3("{\"edge\":{\"verify_timeout_ms\":60000}}", "", "")), ec), 1,
+      "edge: an in-range verify_timeout_ms is accepted");
+    assert_eq(edge_verify_timeout(), 60000, "edge: verify_timeout_ms actually applied");
+
+    # An absent key must restore the default, not leave the previous value
+    # standing — the exact shape edge_apply_defaults was written to fix.
+    assert_eq(edge_config_from_json(json_v_parse(
+          _doc3("{\"edge\":{}}", "", "")), ec), 1, "edge: empty block accepted");
+    assert_eq(edge_verify_timeout(), 300000, "edge: absent key restores the 300s default");
+    assert_eq(edge_config_from_json(json_v_parse(_doc3("{}", "", "")), ec), 1,
+      "edge: no block at all accepted");
+    assert_eq(edge_verify_timeout(), 300000, "edge: no block restores the default too");
     assert_eq(edge_config_from_json(json_v_parse(
           _doc3("{\"edge\":{\"pcr_bindings\":\"0+23\"}}", "", "")), ec), 1,
       "edge: PCR boundary indices 0 and 23 accepted");
@@ -2698,6 +2728,55 @@ fn test_seccomp_agnostik_bridge() {
     return 0;
 }
 
+# ⚠ THE MASK IS ABI-DEPENDENT, AND BOTH DIRECTIONS MATTER. 1.6.14 HIGH-2.
+#
+# Adding TRUNCATE/IOCTL_DEV unconditionally is not a fix, it is an outage: an
+# access right the kernel does not know makes `landlock_create_ruleset` return
+# -EINVAL, so on a 5.13..6.1 kernel every confined service would refuse to
+# start. These pin an ABI through the test seam so the mask can be asserted for
+# kernels this host is not running — which is the whole point, since the dev
+# box and CI both report ABI >= 5 and would never exercise the older arms.
+fn test_landlock_abi_mask() {
+    println("--- landlock ABI negotiation (1.6.14) ---");
+    var TRUNC = 16384;
+    var IOCTL = 32768;
+    var V1 = 8191;
+
+    _landlock_set_abi_for_test(1);
+    assert_eq(_landlock_handled_mask(), V1, "abi1: exactly the 13 v1 bits");
+    assert_eq(_landlock_handled_mask() & TRUNC, 0, "abi1: no TRUNCATE");
+
+    _landlock_set_abi_for_test(2);
+    assert_eq(_landlock_handled_mask() & TRUNC, 0, "abi2: still no TRUNCATE");
+
+    _landlock_set_abi_for_test(3);
+    assert_eq(_landlock_handled_mask() & TRUNC, TRUNC, "abi3: TRUNCATE handled");
+    assert_eq(_landlock_handled_mask() & IOCTL, 0, "abi3: no IOCTL_DEV yet");
+
+    _landlock_set_abi_for_test(5);
+    assert_eq(_landlock_handled_mask() & TRUNC, TRUNC, "abi5: TRUNCATE handled");
+    assert_eq(_landlock_handled_mask() & IOCTL, IOCTL, "abi5: IOCTL_DEV handled");
+
+    # REFER (1 << 13) must stay OUT: with it unhandled the kernel denies all
+    # cross-directory rename/link, so its absence is fail-CLOSED. Adding it
+    # would LOOSEN the sandbox unless every rule also granted it.
+    _landlock_set_abi_for_test(9);
+    assert_eq(_landlock_handled_mask() & 8192, 0, "abi9: REFER deliberately unhandled");
+
+    # A negative cached probe is "no Landlock" — the mask must not gain bits.
+    _landlock_set_abi_for_test(0 - 38);
+    assert_eq(_landlock_handled_mask(), V1, "no landlock: v1 bits only, no EINVAL bait");
+
+    # The write level must GRANT truncate, or adding the bit to the handled
+    # mask would break services that legitimately truncate their own files.
+    assert_eq(_access_to_flags(2) & TRUNC, TRUNC, "read-write grants TRUNCATE");
+    assert_eq(_access_to_flags(1) & TRUNC, 0, "read-only does not grant TRUNCATE");
+    assert_eq(_access_to_flags(3) & TRUNC, 0, "read-exec does not grant TRUNCATE");
+
+    _landlock_set_abi_for_test(0);
+    return 0;
+}
+
 fn test_sandbox_rules() {
     println("--- sandbox rules ---");
     var b = sandbox_builder_new();
@@ -2791,6 +2870,7 @@ fn main() {
     test_log_console_gate();
     test_health_interval_from_services();
     test_seccomp_agnostik_bridge();
+    test_landlock_abi_mask();
     test_sandbox_rules();
     return assert_summary();
 }

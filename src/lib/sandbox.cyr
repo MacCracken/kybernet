@@ -27,7 +27,16 @@ enum LandlockAccess {
     LANDLOCK_ACCESS_FS_MAKE_FIFO = 1024;
     LANDLOCK_ACCESS_FS_MAKE_BLOCK = 2048;
     LANDLOCK_ACCESS_FS_MAKE_SYM = 4096;
+    # ⚠ REFER (1 << 13) IS DELIBERATELY ABSENT AND MUST STAY ABSENT.
+    # With REFER unhandled the kernel denies ALL cross-directory rename/link
+    # (measured: EXDEV), so its omission is fail-CLOSED. Adding it would
+    # LOOSEN the sandbox unless every rule also granted it. Not a gap.
+    LANDLOCK_ACCESS_FS_TRUNCATE = 16384;
+    LANDLOCK_ACCESS_FS_IOCTL_DEV = 32768;
     LANDLOCK_RULE_PATH_BENEATH = 1;
+    # landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)
+    # returns the ABI version the running kernel supports.
+    LANDLOCK_CREATE_RULESET_VERSION = 1;
 }
 
 # O_PATH and O_CLOEXEC for opening path references
@@ -90,28 +99,80 @@ fn sandbox_rule_count(builder) {
 }
 
 # Convert access level to Landlock access flags
+# ⚠ THE WRITE LEVEL MUST ALSO GRANT TRUNCATE, or adding the bit to the handled
+# mask above would BREAK working services rather than confine hostile ones: a
+# service granted read-write on its own data directory would lose the ability
+# to truncate its own files (ftruncate, and every `open(O_TRUNC)`). The grant
+# is intersected with the handled mask in `_landlock_add_path`, so on a kernel
+# below ABI v3 this extra bit is simply dropped and the behaviour is exactly
+# what it was before 1.6.14.
+#
+# Kept as a `switch` of `case N: return K` bodies — see standing rule 9. Do not
+# rewrite this to accumulate flags across cases in a loop.
 fn _access_to_flags(access) {
     switch (access) {
         case 1: return LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR;
         case 2: return LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR
-        | LANDLOCK_ACCESS_FS_WRITE_FILE | LANDLOCK_ACCESS_FS_MAKE_REG;
+        | LANDLOCK_ACCESS_FS_WRITE_FILE | LANDLOCK_ACCESS_FS_MAKE_REG
+        | LANDLOCK_ACCESS_FS_TRUNCATE;
         case 3: return LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR
         | LANDLOCK_ACCESS_FS_EXECUTE;
         default: return 0;
     }
 }
 
-# Handled access: every filesystem operation we control. `sandbox_apply`
-# declares the ruleset over this full mask. (It said "both sandbox_apply and
-# sandbox_from_ruleset" until 1.6.11, when the latter was removed as dead.)
+# Landlock ABI version the RUNNING kernel supports, or negative -errno when
+# there is no Landlock at all. Probed once and cached: this runs in the child
+# between fork and exec, once per service, and the answer cannot change.
+#
+# 0 = not probed yet. A real ABI is always >= 1, so 0 is an unambiguous
+# sentinel and a negative cached value is a remembered failure.
+var _ll_abi_cache = 0;
+
+fn _landlock_abi() {
+    if (_ll_abi_cache != 0) { return _ll_abi_cache; }
+    _ll_abi_cache = syscall(SYS_LANDLOCK_CREATE_RULESET, 0, 0,
+      LANDLOCK_CREATE_RULESET_VERSION);
+    return _ll_abi_cache;
+}
+
+# Test seam: src/test.cyr pins an ABI so the mask can be asserted for kernels
+# this host is not running. Pass 0 to return to probing.
+fn _landlock_set_abi_for_test(v) { _ll_abi_cache = v; return 0; }
+
+# Handled access: every filesystem operation this ruleset GOVERNS. Anything
+# absent from this mask is not checked at all — a Landlock ruleset is silent
+# about operations it does not name.
+#
+# ⚠ THIS WAS FROZEN AT ABI v1 UNTIL 1.6.14, AND `truncate(2)` WAS THE HOLE.
+#
+# The thirteen v1 bits (EXECUTE..MAKE_SYM = 0x1FFF) omit
+# LANDLOCK_ACCESS_FS_TRUNCATE (1 << 14, ABI v3 / Linux 6.2), so every
+# Landlock-confined service could `truncate("/boot/vmlinuz", 0)` while
+# `sandbox_from_config` returned Ok(0) "applied". Measured on this host:
+# `open(victim, O_WRONLY)` -> EACCES (Landlock IS enforcing) while
+# `truncate(victim, 0)` -> 0, a 16-byte file reduced to 0. With the bit added
+# the same truncate returns EACCES. Because the uid drop is opt-in, the common
+# shape is a ROOT service under Landlock — DAC stops nothing either, so this
+# reached every file on the filesystem.
+#
+# ⚠ THE BITS CANNOT BE ADDED UNCONDITIONALLY — THAT IS NOT A FIX, IT IS AN
+# OUTAGE. An access right the kernel does not know makes
+# `landlock_create_ruleset` return -EINVAL, so on a 5.13..6.1 kernel
+# `sandbox_apply` would return Err and EVERY confined service would refuse to
+# start. Hence the version negotiation above.
 fn _landlock_handled_mask() {
-    return LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_WRITE_FILE
+    var m = LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_WRITE_FILE
     | LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR
     | LANDLOCK_ACCESS_FS_REMOVE_DIR | LANDLOCK_ACCESS_FS_REMOVE_FILE
     | LANDLOCK_ACCESS_FS_MAKE_CHAR | LANDLOCK_ACCESS_FS_MAKE_DIR
     | LANDLOCK_ACCESS_FS_MAKE_REG | LANDLOCK_ACCESS_FS_MAKE_SOCK
     | LANDLOCK_ACCESS_FS_MAKE_FIFO | LANDLOCK_ACCESS_FS_MAKE_BLOCK
     | LANDLOCK_ACCESS_FS_MAKE_SYM;
+    var abi = _landlock_abi();
+    if (abi >= 3) { m = m | LANDLOCK_ACCESS_FS_TRUNCATE; }
+    if (abi >= 5) { m = m | LANDLOCK_ACCESS_FS_IOCTL_DEV; }
+    return m;
 }
 
 # Create a Landlock ruleset over the full handled-access mask.
@@ -134,10 +195,17 @@ fn _landlock_add_path(ruleset_fd, path, allowed) {
     var path_fd = sys_open(path, O_PATH_FLAG | O_CLOEXEC_FLAG, 0);
     if (path_fd < 0) { return path_fd; }
 
+    # ⚠ INTERSECT WITH THE HANDLED MASK. `allowed_access` must be a SUBSET of
+    # the ruleset's `handled_access_fs` or `landlock_add_rule` returns -EINVAL.
+    # This is what lets `_access_to_flags` name TRUNCATE unconditionally while
+    # the ruleset only handles it from ABI v3 up: on an older kernel the bit is
+    # dropped here instead of failing the whole service.
+    var granted = allowed & _landlock_handled_mask();
+
     # LandlockPathBeneathAttr: { allowed_access: u64, parent_fd: i32 }
     var beneath = alloc(16);
     memset(beneath, 0, 16);
-    store64(beneath, allowed);
+    store64(beneath, granted);
     store32(beneath + 8, path_fd);
 
     var ret = syscall(SYS_LANDLOCK_ADD_RULE, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, beneath, 0);

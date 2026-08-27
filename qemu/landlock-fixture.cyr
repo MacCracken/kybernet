@@ -41,6 +41,13 @@ include "lib/process.cyr"
 
 # Deliberately NOT granted by the service's rule set.
 var OUTSIDE_PATH = "/etc/kybernet/config.json";
+# A dedicated victim, also outside the rule set, staged with 16 known bytes.
+# ⚠ A SEPARATE FILE ON PURPOSE. The truncate probe below has to attempt a
+# DESTRUCTIVE operation to be meaningful, and pointing it at config.json would
+# — in the exact case where the sandbox is broken — corrupt the running board's
+# config mid-boot and produce a cascade of unrelated failures downstream of the
+# one that matters. A dedicated victim keeps the failure signal clean.
+var VICTIM_PATH = "/etc/kyb-landlock-victim";
 # Inside the granted set: this binary's own directory.
 var INSIDE_PATH = "/usr/bin/kyb-landlock-fixture";
 
@@ -66,7 +73,40 @@ fn can_read(path) {
     return 1;
 }
 
+# ⚠ THE OPERATION THIS FIXTURE COULD NOT SEE UNTIL 1.6.14.
+#
+# A Landlock ruleset governs only the operations named in `handled_access_fs`.
+# kybernet's mask was frozen at ABI v1, which has no
+# LANDLOCK_ACCESS_FS_TRUNCATE (1 << 14, ABI v3), so every confined service
+# could `truncate("/boot/vmlinuz", 0)` while `sandbox_from_config` reported
+# "applied". This fixture only ever called `sys_open(O_RDONLY)`, so it could
+# not have noticed — standing rule 27, in the fixture rule 27 already asked
+# for. `truncate` is a distinct syscall from `open`, and denying one says
+# nothing about the other.
+#
+# SYS_TRUNCATE is 76 on x86_64 and 45 on aarch64, so it needs the same
+# per-arch treatment standing rule 1 demands of every syscall number. The
+# harness boots x86_64 only, but this file is compiled by whatever
+# build-initramfs.sh is running on.
+#ifdef CYRIUS_ARCH_X86
+var SYS_TRUNCATE_NR = 76;
+#endif
+#ifdef CYRIUS_ARCH_AARCH64
+var SYS_TRUNCATE_NR = 45;
+#endif
+
+fn can_truncate(path) {
+    if (syscall(SYS_TRUNCATE_NR, path, 0) < 0) { return 0; }
+    return 1;
+}
+
 fn main() {
+    if (can_truncate(VICTIM_PATH) == 1) {
+        say("LL-TRUNCATE=ALLOWED");
+    } else {
+        say("LL-TRUNCATE=DENIED");
+    }
+
     if (can_read(OUTSIDE_PATH) == 1) {
         say("LL-OUTSIDE=ALLOWED");
     } else {
