@@ -45,7 +45,13 @@ front pins this — kybernet / argonaut / libro / agnostik / sigil / agnostic.
 `owl` reads `.cyr` files. **`cyim` is NOT installed here** despite sibling-repo references —
 use ordinary file edits.
 
-⚠ **This toolchain mis-emits two syscalls on aarch64** (above). `scripts/aarch64-exec-gate.sh`
+⚠ **This toolchain mis-emits two syscalls on aarch64** (above). **Filed upstream on
+2026-08-27** as `docs/development/issues/2026-08-27-aarch64-esysxlat-eats-native-signalfd4-and-ppoll.md`
+in the cyrius repo, with a runnable repro — cyrius is off-limits to this repo and
+filing an issue is the only permitted action there. Root cause: `SYS_FSYNC = 74`
+(x86 number, awaiting translation) and `SYS_SIGNALFD4 = 74` (native aarch64 number,
+expecting passthrough) are both defined in `lib/syscalls_aarch64_linux.cyr`, and the
+ELF-aarch64 rewrite cannot tell them apart. No consumer workaround exists. `scripts/aarch64-exec-gate.sh`
 carries them as a DECLARED known-broken list and fails if the observed set drifts in
 either direction — including a declared break that gets fixed, so the declaration cannot
 go stale. When a fixed cyrius is pinned, drop the entries and the gate turns green on its
@@ -115,6 +121,21 @@ deferred items is among them: check their evidence, not their severity label.
 ## In flight
 
 **v1.6.14 is NOT tagged.** All gates green locally. The user tags.
+
+⚠ **v1.6.13 was tagged and never published** — its release run went red and the tag is
+being withdrawn. **1.6.14 carries its content**; the 1.6.13 CHANGELOG section stays as
+the record of what those changes were. CI red means it never shipped: do not invent a
+follow-up patch release for work that never reached a user.
+
+⚠ **What made it red was a gate in this repo, not the code.** `release.yml`'s aarch64
+boot probe ran with an empty declared-broken list and failed the whole workflow, so an
+upstream cyrius defect in one architecture blocked a fully-gated x86_64 binary from
+shipping, with the only escape a hand-set repo variable. It now has three outcomes —
+clean publishes both, the DECLARED breakage drops the aarch64 artifact and says why in
+the release body, anything else hard-fails. All three were simulated against the real
+gate before committing. **The lesson is the one this repo keeps relearning: a gate has
+to be exercised in the state it will actually meet.** The probe was verified to detect
+the defect and never verified against the release path it gates.
 
 ⚠ **argonaut 1.13.9 is written, tested and clean in `../argonaut`, and NOT TAGGED.**
 33 suites pass; `health_exec.tcyr` went 23 → 33. kybernet cannot consume it until the

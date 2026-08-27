@@ -9,6 +9,42 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [1.6.14] — 2026-08-27
 
+⚠ **This release also carries everything in [1.6.13], which was tagged but never
+published.** Its release run went red and the tag was withdrawn, so 1.6.13 does not
+exist as a release — CI red means it never shipped. The 1.6.13 section below is kept
+as the accurate record of what those changes were; they ship here.
+
+⚠ **The thing that made both runs red was a gate in this repo, not a defect in the
+code.** `release.yml`'s aarch64 boot probe ran with an empty declared-broken list and
+failed the whole workflow on any breakage, with the only escape being a repo variable
+set by hand. So an upstream cyrius bug that kybernet cannot fix, in one architecture,
+blocked a fully-gated x86_64 binary from shipping at all. Refusing to publish a dead
+aarch64 artifact was right; refusing to publish anything was not proportionate. Fixed
+below.
+
+### Fixed — the release could not release
+
+The aarch64 boot probe now has **three** outcomes instead of two:
+
+1. **clean** — publish both architectures;
+2. **exactly the declared known breakage** (`sys_signalfd`, `sys_pause` — one cyrius
+   codegen defect, filed upstream with a repro and no consumer workaround) — **drop
+   the aarch64 artifact, publish x86_64, and say why in the release body**;
+3. **anything else** — hard fail, because a new or different breakage is a regression.
+
+The omission is loud, which is what standing rule 32 is actually about: quietly
+delivering less than advertised is the defect, not delivering less. The release notes
+gain an "⚠ No aarch64 binary in this release" section naming the syscalls, the
+upstream filing and the fact that x86_64 is unaffected and fully gated.
+
+All three states were simulated locally against the real gate before this was
+committed — state 2 exits 0 and sets the drop flag, state 3 exits 1, state 1 publishes
+both — and the Archive step was run with the artifact absent to confirm it still
+produces `SHA256SUMS` and satisfies `fail_on_unmatched_files`.
+
+When a fixed cycc is pinned, dropping the two names from `AARCH64_KNOWN_BROKEN` makes
+state 1 start publishing both arches again on its own.
+
 **All five HIGH findings from the 2026-08-26 P(-1) audit.** Four land here; the
 fifth is argonaut's and is fixed in argonaut 1.13.9, awaiting a tag. Suite
 681 → 702 assertions. Harness 62 → 66 properties, two new fixtures.
@@ -208,14 +244,19 @@ Reproduced under `qemu-aarch64 -strace` against a probe compiled from kybernet's
 halt is a busy-spin and `return 1` from `kybernet_run` — an init exit, i.e. a kernel
 panic — becomes reachable.
 
-The load-bearing fix is upstream in cyrius, which CLAUDE.md places off-limits to this
-repo. kybernet closed the two things that are its own: the aarch64 execution gate below,
+The load-bearing fix is upstream in cyrius, which is off-limits to this repo — filing
+an issue is the only permitted action there, and that was done on 2026-08-27 as
+`2026-08-27-aarch64-esysxlat-eats-native-signalfd4-and-ppoll.md` with a runnable repro. kybernet closed the two things that are its own: the aarch64 execution gate below,
 and `release.yml` now **REFUSES to publish** an aarch64 artifact that fails a
 boot-critical syscall probe. A binary whose only outcome is poweroff is not a degraded
 artifact; it is a non-functional one wearing a name that says otherwise — the same defect
-that file's own comment calls "worse than one that never claimed it". A maintainer who
-wants to ship the x86_64 half alone must say so deliberately via `ALLOW_BROKEN_AARCH64=1`,
-which drops the artifact rather than publishing a dead one.
+that file's own comment calls "worse than one that never claimed it".
+
+⚠ **As first written that refusal failed the ENTIRE release, and it is what made both
+the 1.6.13 and 1.6.14 tags go red.** The `ALLOW_BROKEN_AARCH64` repo variable it
+described no longer exists — see [1.6.14] for the three-state replacement, which drops
+only the aarch64 artifact and publishes the rest. Recorded here rather than quietly
+edited out, because the gate that blocked the release was written in this release.
 
 ### Fixed — CRITICAL-2: the PCR comparison dereferences a hex digest as a pointer
 

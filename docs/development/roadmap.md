@@ -5,8 +5,9 @@ release actually did. This file carries only what is **not** done.
 
 This file now carries two intakes. The 1.5.9 sweep opened **38** items (counted at the
 `1.6.0` tag) and **14 of those remain** — fifteen releases of attrition. The
-2026-08-26 P(-1) audit added 21, of which **17 remain**. Plus one new item opened by
-the 1.6.14 work. Total open: **32**. Every number is `grep -c '^- \[ \]'` against
+2026-08-26 P(-1) audit added 21, of which **17 remain**. Plus two opened by the
+1.6.14 work (one new argonaut finding, one cyrius filing split out of CRITICAL-1).
+Total open: **33**. Every number is `grep -c '^- \[ \]'` against
 this file at the relevant tag, not an estimate.
 
 ⚠ The item count went UP at v1.6.13, and that is the audit working rather than the
@@ -617,6 +618,28 @@ Moved into the v1.6.1 gate line. Recording why here so the claim is not re-made:
       HIGH-1 was filed deferred as "blocked upstream", and the correct fix was to add the
       seam to argonaut. sigil is first-party. This is a sigil release, then a kybernet
       bump.
+- [ ] **⚠ FILED 2026-08-27: the aarch64 ESYSXLAT collision behind CRITICAL-1 and
+      MEDIUM-9.** `docs/development/issues/2026-08-27-aarch64-esysxlat-eats-native-signalfd4-and-ppoll.md`
+      in the cyrius repo, with a runnable repro under `issues/repros/`. **cyrius is
+      off-limits to this repo — filing an issue is the only permitted action, and
+      that is done.** Root cause read out of `src/backend/aarch64/emit.cyr`:
+      `lib/syscalls_aarch64_linux.cyr` defines `SYS_FSYNC = 74` (the x86 number,
+      deliberately, awaiting translation `74→82` at `emit.cyr:1125`) and
+      `SYS_SIGNALFD4 = 74` (the NATIVE aarch64 number, expecting passthrough) —
+      two constants, one value, opposite expectations, and the flat rewrite cannot
+      tell them apart. Same shape for `SYS_PPOLL = 73` vs the `flock 73→32` row at
+      `:1033`, whose own comment already warns about re-catching a remapped
+      `poll(73)` while leaving a DIRECT `syscall(SYS_PPOLL, …)` — which is
+      `sys_pause()` — unprotected. **No consumer workaround exists**, established by
+      five failed attempts recorded in the filing (literal, global, runtime-computed,
+      and both x86 numbers, which have no rows). Proposed fix (A) is the ≥1000
+      private-alias band the tree already uses for `SYS_CHDIR = 1049` /
+      `SYS_FCHOWNAT = 1054`. kybernet's side is contained: the aarch64 execution gate
+      carries these as a DECLARED known-broken pair, and `release.yml` refuses to
+      publish a binary that fails the boot-critical probe. **Close this item by
+      pinning a fixed cycc and dropping the two entries from
+      `AARCH64_KNOWN_BROKEN`** — the gate then fails if they are dropped early.
+
 - [ ] **cyrius stdlib filings, genuinely off-limits from here.** ioctl / termios /
       poll — `2026-08-24-sys-ioctl-wrapper-missing.md`, behind `src/lib/termios.cyr` and
       `_read_line_fd`'s `sleep_ms` poll loop. And `fl_alloc`'s unchecked `_fl_mmap`

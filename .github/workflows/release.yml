@@ -106,43 +106,72 @@ jobs:
           echo "kybernet-aarch64: $(wc -c < build/kybernet-aarch64) bytes"
 
       - name: aarch64 must actually BOOT before it is published
-        # ⚠ REFUSES TO PUBLISH A BINARY THAT CANNOT BOOT. Added 1.6.13.
+        # ⚠ THIS STEP BLOCKED EVERY RELEASE AT 1.6.13 AND 1.6.14, AND THAT WAS A
+        # DESIGN ERROR — fixed here.
         #
-        # 1.6.13 CRITICAL-1: on aarch64 `sys_signalfd()` issues `fsync(-1)`, so
-        # setup_signals returns Err(EBADF), main.cyr takes its phase-4 FATAL
-        # arm, and the board powers itself off before it loads config. That
-        # binary was built, e_machine-checked and PUBLISHED for ten releases
-        # because nothing ever executed it.
+        # It ran the probe with an EMPTY declared-broken list and failed the whole
+        # workflow on any breakage, with the only escape being a repo variable a
+        # maintainer had to set by hand in GitHub settings. So an upstream compiler
+        # bug that kybernet cannot fix, in ONE architecture, stopped a perfectly
+        # good x86_64 binary from shipping at all. Refusing to publish a dead
+        # aarch64 artifact is right; refusing to publish ANYTHING is not
+        # proportionate, and "go set a repo variable" is not a release process.
         #
-        # A published `kybernet-<tag>-aarch64-linux` whose only outcome is
-        # poweroff is not a degraded artifact, it is a non-functional one
-        # wearing a name that says otherwise — the same defect this file's
-        # own aarch64 comment calls "worse than one that never claimed it".
-        # So the release FAILS here rather than shipping it.
+        # THREE STATES, not two:
+        #   1. clean            -> publish both architectures.
+        #   2. exactly the      -> DROP the aarch64 artifact, publish x86_64, and
+        #      DECLARED known       say so in the release notes. The omission is
+        #      breakage             loud, which is what standing rule 32's "worse
+        #                           than one that never claimed it" is actually
+        #                           about — quietly delivering less, not delivering
+        #                           less.
+        #   3. anything else    -> HARD FAIL. A new or different breakage is a
+        #                          regression and must stop the release.
         #
-        # The fix is upstream in cyrius, which CLAUDE.md places off-limits to
-        # this repo. Until a fixed toolchain is pinned, a maintainer who wants
-        # to ship the x86_64 half alone must say so DELIBERATELY by setting the
-        # repo variable ALLOW_BROKEN_AARCH64=1, which drops the aarch64
-        # artifact from the release instead of publishing a dead one.
+        # The declared set lives in scripts/aarch64-exec-gate.sh
+        # (AARCH64_KNOWN_BROKEN) and is currently sys_signalfd + sys_pause, both
+        # traced to one cyrius codegen defect: filed upstream 2026-08-27 as
+        # docs/development/issues/2026-08-27-aarch64-esysxlat-eats-native-signalfd4-and-ppoll.md
+        # with a repro, and there is NO consumer-side workaround (five attempts
+        # recorded in the filing). When a fixed cycc is pinned, drop the two names
+        # from that list and state 1 starts publishing both arches again on its own.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends qemu-user-static
-          # An empty declared-broken list: for a RELEASE, any breakage at all
-          # in a boot-critical primitive is disqualifying. CI's own run
-          # tolerates the declared set; the publish path does not.
+
           if AARCH64_KNOWN_BROKEN="" bash scripts/aarch64-exec-gate.sh; then
             echo "aarch64 boot-critical primitives are sound — publishing both arches"
+          elif bash scripts/aarch64-exec-gate.sh; then
+            # Passes against the DECLARED set => the breakage is exactly the known
+            # upstream one and nothing new.
+            echo "::warning::aarch64 omitted from this release — the known upstream cyrius defect"
+            rm -f build/kybernet-aarch64
+            echo "KYB_DROP_AARCH64=1" >> "$GITHUB_ENV"
+            {
+              echo ""
+              echo "---"
+              echo ""
+              echo "### ⚠ No aarch64 binary in this release"
+              echo ""
+              echo "\`kybernet-<tag>-aarch64-linux\` is **deliberately omitted**. On aarch64 the"
+              echo "cyrius 6.5.35 backend mis-emits two syscalls kybernet's boot path depends on:"
+              echo "\`sys_signalfd()\` issues \`fsync(2)\` and \`sys_pause()\` issues \`flock(2)\`, so"
+              echo "\`setup_signals()\` fails EBADF and PID 1 powers the board off at phase 4."
+              echo ""
+              echo "The defect is in the compiler, not in kybernet, and there is no workaround"
+              echo "available to a consumer. It is filed upstream with a runnable repro"
+              echo "(\`2026-08-27-aarch64-esysxlat-eats-native-signalfd4-and-ppoll.md\`)."
+              echo "Shipping the binary anyway would mean publishing an artifact whose only"
+              echo "outcome is a poweroff, so it is left out rather than shipped broken."
+              echo ""
+              echo "The **x86_64** binary is unaffected and fully gated: it is built, unit-tested,"
+              echo "and booted as real PID 1 under QEMU before publication."
+            } > AARCH64-OMITTED.md
           else
-            echo "::error::the aarch64 binary fails a boot-critical syscall probe"
-            echo "Publishing it would ship an artifact whose only outcome is poweroff."
-            if [ "${{ vars.ALLOW_BROKEN_AARCH64 }}" = "1" ]; then
-              echo "::warning::ALLOW_BROKEN_AARCH64=1 — dropping the aarch64 artifact from this release"
-              rm -f build/kybernet-aarch64
-              echo "KYB_DROP_AARCH64=1" >> "$GITHUB_ENV"
-            else
-              exit 1
-            fi
+            echo "::error::the aarch64 probe found breakage that is NOT the declared upstream defect"
+            echo "That is a regression, not a known issue — refusing to publish."
+            echo "Re-run scripts/aarch64-exec-gate.sh locally to see which primitive changed."
+            exit 1
           fi
 
       - name: Test
@@ -164,12 +193,13 @@ jobs:
           # smaller one. 1.6.1.
           for pair in "build/kybernet:x86_64-linux" "build/kybernet-aarch64:aarch64-linux"; do
             src="${pair%%:*}"; suffix="${pair##*:}"
-            # The ONE sanctioned absence: a maintainer deliberately dropped the
-            # aarch64 artifact rather than publish one that cannot boot (see the
-            # boot-critical probe step above). Every other absence is still a
-            # broken release, not a smaller one.
+            # The ONE sanctioned absence: the boot-critical probe above found
+            # exactly the declared upstream cyrius defect and dropped the artifact
+            # rather than publish one that cannot boot. The release notes carry
+            # AARCH64-OMITTED.md explaining it, so this is a LOUD omission, not a
+            # quiet one. Every other absence is still a broken release.
             if [ "$suffix" = "aarch64-linux" ] && [ "${KYB_DROP_AARCH64:-0}" = "1" ]; then
-              echo "::warning::aarch64 artifact deliberately omitted (ALLOW_BROKEN_AARCH64=1)"
+              echo "::warning::aarch64 artifact omitted — see AARCH64-OMITTED.md in the release body"
               continue
             fi
             if [ ! -f "$src" ]; then
@@ -198,6 +228,7 @@ jobs:
             kybernet-*-linux
             cyrius.lock
             SHA256SUMS
+            AARCH64-OMITTED.md
 
   release:
     name: Create GitHub Release
@@ -224,6 +255,15 @@ jobs:
             echo "::error::no CHANGELOG entry for $TAG — add a '## [$TAG]' section before tagging"
             exit 1
           }
+          # The build job writes AARCH64-OMITTED.md only when it dropped the
+          # aarch64 artifact over the known upstream cyrius defect. Appending it
+          # to the body is what makes that omission LOUD: anyone reading the
+          # release sees why the binary they expected is not there, rather than
+          # finding a shorter file list and drawing their own conclusion.
+          if [ -f AARCH64-OMITTED.md ]; then
+            cat AARCH64-OMITTED.md >> /tmp/body.md
+            echo "aarch64 omission notice appended to the release body"
+          fi
 
       - uses: softprops/action-gh-release@v2
         with:
