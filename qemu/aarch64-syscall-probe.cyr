@@ -1,0 +1,64 @@
+# qemu/aarch64-syscall-probe.cyr — do the syscalls PID 1's boot path depends
+# on actually REACH the kernel entry point they name on aarch64?
+#
+# WHY THIS EXISTS (1.6.13 CRITICAL-1)
+# -----------------------------------
+# kybernet cross-builds, publishes and release-gates an aarch64 binary, and
+# until 1.6.13 no gate had ever executed a single aarch64 instruction of it.
+# What that hid: `sys_signalfd()` issues `fsync(-1)` on aarch64. The cyrius
+# aarch64 backend emits an inline compatibility ladder at every syscall site
+# that rewrites certain numbers, and aarch64's NATIVE signalfd4 (74) collides
+# with x86_64's fsync (74), so the ladder eats it. `setup_signals()` therefore
+# returns Err(EBADF), main.cyr takes its phase-4 FATAL arm, and every aarch64
+# board powers itself off before it loads config. The published artifact was
+# 100% non-functional and every gate was green.
+#
+# The unit suite cannot catch this: it tests pure logic, and `setup_signals`
+# is a live syscall. So this probe asserts the PRIMITIVE, from inside a real
+# aarch64 process, by its OBSERVABLE RESULT rather than by reading a table —
+# reading tables is what produced the bug. The stdlib's aarch64 numbers are
+# CORRECT; it is the emitted code that is not, so only execution can tell.
+#
+# Output is one `PROBE:<name>:<ok|BROKEN>` line per check, for the shell gate
+# in scripts/aarch64-exec-gate.sh to read. `pause` is special: when it is
+# CORRECT it blocks forever, so it is checked LAST and its verdict is the
+# ABSENCE of a trailing line (the gate applies the timeout).
+
+fn main(): i64 {
+    # ---- signalfd: phase 4. The one that makes PID 1 unbootable. ----
+    var set = sigset_new();
+    sigset_add(set, SIGCHLD);
+    sigset_add(set, SIGTERM);
+    var sfd = sys_signalfd(0 - 1, set, SFD_NONBLOCK | SFD_CLOEXEC);
+    if (sfd >= 0) {
+        sys_write(1, "PROBE:signalfd:ok\n", 18);
+        sys_close(sfd);
+    } else {
+        # -9 = EBADF, the signature of fsync(-1).
+        sys_write(1, "PROBE:signalfd:BROKEN\n", 22);
+    }
+
+    # ---- epoll + timerfd: the rest of the reactor's fd set. ----
+    var ep = sys_epoll_create();
+    if (ep >= 0) { sys_write(1, "PROBE:epoll_create:ok\n", 22); sys_close(ep); }
+    else { sys_write(1, "PROBE:epoll_create:BROKEN\n", 26); }
+
+    var tf = sys_timerfd_create(1, 0);
+    if (tf >= 0) { sys_write(1, "PROBE:timerfd_create:ok\n", 24); sys_close(tf); }
+    else { sys_write(1, "PROBE:timerfd_create:BROKEN\n", 28); }
+
+    # ---- the notify socket. ----
+    var sk = sys_socket(1, 2, 0);
+    if (sk >= 0) { sys_write(1, "PROBE:socket:ok\n", 16); sys_close(sk); }
+    else { sys_write(1, "PROBE:socket:BROKEN\n", 20); }
+
+    # ---- pause: drop_to_emergency()'s halt, and the backstop after every
+    #      do_shutdown(). MUST BLOCK. If it returns, the "halt forever" is a
+    #      busy-spin and `return 1` from kybernet_run becomes reachable — which
+    #      is PID 1 exiting, i.e. a kernel panic (standing rule 4).
+    sys_write(1, "PROBE:pause:entering\n", 21);
+    sys_pause();
+    # Only reached when pause did NOT block.
+    sys_write(1, "PROBE:pause:BROKEN\n", 19);
+    return 0;
+}

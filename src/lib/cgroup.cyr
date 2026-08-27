@@ -492,6 +492,11 @@ fn cgroup_apply_limits(service, limits) {
 # ⚠ THIS IS THE AUTHORISATION CHECK FOR sd_notify's `MAINPID=`, AND WITHOUT IT
 # AUTHENTICATION IS NOT ENOUGH. SO_PASSCRED proves which process SENT a
 # datagram; it says nothing about the pid named INSIDE it. A service that is
+# Scratch for cgroup_has_pid's cgroup.procs read. GLOBAL scope, so [1025] is
+# 1025 SLOTS = 8200 BYTES (8192 cap + 1 headroom byte, rounded to a slot).
+# See the sizing note inside cgroup_has_pid. 1.6.13.
+var _CG_PROCS_BUF[1025];
+
 # authenticated, attributed and entirely legitimate can still claim
 # `MAINPID=<somebody else's pid>` — and honouring that would point kybernet's
 # supervision, and eventually its kill path, at an unrelated process.
@@ -515,9 +520,30 @@ fn cgroup_has_pid(service, pid) {
     # with no error (rule 30), so without it a full read is indistinguishable
     # from a truncated one — and a truncated membership list could answer "no"
     # for a pid that is genuinely present.
+    #
+    # ⚠ THE BUFFER IS STATIC, NOT alloc()d. 1.6.13 HIGH-4.
+    #
+    # This is on the reactor's hot path: it runs once per `MAINPID=` sd_notify
+    # datagram, and any service can send those as fast as it likes. PID 1 never
+    # resets the arena (its lifetime IS the process), so an alloc() here is
+    # never reclaimed — 8,200 reachable bytes per datagram, which is a
+    # service-triggerable memory-exhaustion primitive against init, and in an
+    # unkillable PID 1 the end state is "Out of memory and no killable
+    # processes", a kernel panic.
+    #
+    # It is the same defect class this repo has now shipped five times
+    # (1.6.3 notify_read, 1.6.5 reap_zombies, 1.6.6 argonaut's two per-tick
+    # leaks, 1.6.12 the audit chain) and 16x larger than the 1.6.3 one it was
+    # written after. A static buffer costs nothing: PID 1's reactor is
+    # single-threaded, this function does not recurse, and the contents are
+    # dead the moment it returns.
+    #
+    # ⚠ SIZING: at GLOBAL scope `var X[N]` is N SLOTS (N*8 bytes), not N bytes
+    # — measured on 6.5.35, and the opposite of the local-scope rule. 1025
+    # slots = 8200 bytes, i.e. the 8192 cap plus the headroom byte, rounded up
+    # to a slot. See CLAUDE.md standing rule 2.
     var cap = 8192;
-    var buf = alloc(cap + 1);
-    if (buf == 0) { return 0; }
+    var buf = &_CG_PROCS_BUF;
     var n = file_read_all(str_data(path), buf, cap + 1);
     if (n <= 0) { return 0; }
     if (n > cap) { return 0; }          # truncated — refuse rather than guess

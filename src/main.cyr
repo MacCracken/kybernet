@@ -1451,7 +1451,34 @@ fn handle_notify_msg() {
 # Wrapper over the pure `health_interval_from_services` (src/lib/svc_config.cyr),
 # which is where the logic lives so src/test.cyr can reach it — main.cyr is not
 # included by the test binary (standing rule 34).
+#
+# ⚠ THE SOURCE IS THE LIVE REGISTERED SET, NOT THE CONFIG HALF. 1.6.13 HIGH-1.
+#
+# This read `config_services(g_config)`, which is only the services parsed out
+# of /etc/kybernet/config.json. argonaut_init_new ALSO registers
+# `default_services(mode)`, and those defaults DO carry health checks — 5 s for
+# the compositor, 10 s for daimon and the shells, 15 s for the gateway
+# (lib/argonaut_services.cyr:143-236). None of them was ever counted, so a
+# board running the AGNOS defaults — which is every board that has not written
+# its own service list — polled at the 30 s fallback.
+#
+# That is not merely a slow probe. argonaut sizes each service's watchdog
+# deadline from that service's OWN interval, so a service asking for 5 s gets a
+# deadline that expires four times over between two 30 s polls, and PID 1
+# SIGKILLs a service that is perfectly healthy. Same failure mode 1.6.7 fixed
+# for a hardcoded 30 s, arrived at by a different route.
+#
+# This is also literally the bug 1.5.0 fixed for the START path one function
+# away (see start_services' comment: "walking config_services(config) alone
+# meant the defaults argonaut had just registered were never started"). The
+# health path kept the old shape. Called after argonaut_init_new, so
+# init_service_defs is populated; the config half remains the fallback for the
+# window before that.
 fn _health_interval_for_config() {
+    if (g_init != 0) {
+        var live = init_service_defs(g_init);
+        if (live != 0) { return health_interval_from_services(live); }
+    }
     if (g_config == 0) { return 30; }
     return health_interval_from_services(config_services(g_config));
 }

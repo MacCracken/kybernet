@@ -148,8 +148,32 @@ if [ -n "$_newest_src" ] || [ "${PROJECT_DIR}/cyrius.cyml" -nt "${PROJECT_DIR}/b
     exit 1
 fi
 
-# Build / rebuild the initramfs if the binary is newer than the cpio.
-if [ ! -f "$INITRAMFS" ] || [ "${PROJECT_DIR}/build/kybernet" -nt "$INITRAMFS" ] || [ "${PROJECT_DIR}/cyrius.cyml" -nt "$INITRAMFS" ]; then
+# Build / rebuild the initramfs when anything it is BUILT FROM is newer.
+#
+# ⚠ THIS ONLY CHECKED build/kybernet AND cyrius.cyml UNTIL 1.6.13 (MEDIUM-13).
+# Every fixture INPUT was exempt: edit a service definition, a security block,
+# a credential or the generator script itself, re-run the harness, and it
+# booted the PREVIOUS initramfs and reported a confident pass for a fixture
+# that was never staged. That is rule 43's defect — the gate grading something
+# other than what you just changed — surviving in the half of the pipeline
+# rule 43 did not cover, and it bites hardest during exactly the fixture work
+# rule 27 demands for every new config key.
+#
+# Rebuilding (rather than failing as rule 43 does for the binary) is correct
+# here: the initramfs is a derived artifact this script owns and builds itself,
+# whereas build/kybernet is built by a documented command this script must not
+# duplicate.
+_initramfs_stale() {
+    [ ! -f "$INITRAMFS" ] && return 0
+    local f
+    for f in "${PROJECT_DIR}/build/kybernet" "${PROJECT_DIR}/cyrius.cyml" \
+             "${SCRIPT_DIR}/build-initramfs.sh" "${SCRIPT_DIR}/mkcred-fixture.cyr" \
+             "${SCRIPT_DIR}/notify-fixture.cyr" "${SCRIPT_DIR}/landlock-fixture.cyr"; do
+        [ -e "$f" ] && [ "$f" -nt "$INITRAMFS" ] && return 0
+    done
+    return 1
+}
+if _initramfs_stale; then
     bash "${SCRIPT_DIR}/build-initramfs.sh"
 fi
 
@@ -237,7 +261,16 @@ WALL_MS=$(( (END_NS - START_NS) / 1000000 ))
 # measure the code, not the machine it happens to be on. Timestamp the serial
 # stream host-side and take the span between kybernet's own first and last
 # lines. WALL_MS stays as a loose liveness ceiling; KYB_MS is the real gate.
-_ts_of() { grep -aF "$1" "$TLOG" 2>/dev/null | head -1 | awk '{print $1}'; }
+# ⚠ `|| true` IS LOAD-BEARING — standing rule 40, in the one place where
+# breaking it costs the most. This runs under `set -euo pipefail`, so a grep
+# that matches NOTHING exits 1, pipefail propagates it, and `set -e` ABORTS THE
+# SCRIPT. "Matches nothing" is exactly the case where kybernet FAILED TO BOOT —
+# so the harness died here, silently, before printing a single assertion,
+# skipping all five passes and deleting its logs, in precisely the scenario it
+# exists to diagnose. The `KYB_MS=-1` branch below was unreachable dead code.
+# Verified: `X=$(_ts_of nomatch)` under `set -euo pipefail` exits 1 without
+# reaching the next line. 1.6.13 MEDIUM-11.
+_ts_of() { grep -aF "$1" "$TLOG" 2>/dev/null | head -1 | awk '{print $1}' || true; }
 T_START=$(_ts_of "kybernet: starting")
 T_END=$(_ts_of "kybernet: shutdown")
 if [ -n "$T_START" ] && [ -n "$T_END" ]; then
@@ -257,7 +290,16 @@ fail=0
 # quiet pass put a third caller above the definitions. A shell function used
 # before its definition is not a syntax error; it is an unbound command at
 # runtime, inside a failure branch, under `set -e`. Keep these first.
-ARNESS_STRICT="${HARNESS_STRICT:-0}"
+# ⚠ THIS LINE READ `ARNESS_STRICT=` UNTIL 1.6.13 (MEDIUM-12) — a dropped H, in
+# the assignment whose entire purpose is to give HARNESS_STRICT a default
+# before the first caller. `_skip_or_fail` reads `$HARNESS_STRICT`, so on any
+# box that did not already export it the first SKIP hit an UNBOUND VARIABLE
+# under `set -u` and killed the harness inside a failure branch. It stayed
+# invisible because a machine with every tool installed never skips, and CI
+# exports HARNESS_STRICT=1 — so the only configuration that could hit it was a
+# developer box missing cryptsetup or busybox, which is also the configuration
+# least likely to be believed over "works in CI".
+HARNESS_STRICT="${HARNESS_STRICT:-0}"
 
 # Assert a captured boot did not panic PID 1.
 #

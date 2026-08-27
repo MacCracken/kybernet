@@ -32,21 +32,44 @@ jobs:
             CYRIUS_VERSION="$CYRIUS_VERSION" sh
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
-      - name: Resolve dependencies
-        run: cyrius deps
+      - name: Resolve dependencies + verify the COMMITTED lock
+        # ⚠ THIS REPLACED A BARE `cyrius deps`, AND THE ORDER WAS THE BUG.
+        #
+        # `cyrius deps --verify` CANNOT CATCH A STALE COMMITTED LOCK, because
+        # this step resolved first. `cyrius deps` REWRITES cyrius.lock from
+        # disk; the verify step below then checked the resolve against the file
+        # the resolve had just written. That is tautological — "70 verified, 0
+        # failed" no matter what was committed.
+        #
+        # Not hypothetical: 1.6.12 was first committed with cyrius.cyml at
+        # argonaut tag = "1.13.8" and a lock still pinning 1.13.7's commit
+        # (7204b60), because the tag did not exist yet at commit time. Replayed
+        # against that exact tree, the resolve silently rewrote the pin in place
+        # and verify reported success. CI would have gone green on it.
+        #
+        # verify-lock.sh saves the committed lock, resolves, compares SORTED
+        # (cyrius does not emit the hash lines in a stable order, so a byte diff
+        # is a false positive), and RESTORES the committed bytes on every exit
+        # path — so the steps below still see exactly what the commit contained.
+        # It also fails when a declared git dep has no commit line at all, which
+        # is the `path`-override shape that shipped kybernet 1.5.4 unpinned.
+        #
+        # Verified able to go red on all four defect classes by injection:
+        # a stale tag, a dropped commit line, a repointed sha, and a drifted
+        # hash line. Verified green twice on the correct lock, for ordering
+        # stability, and verified non-mutating.
+        run: bash scripts/verify-lock.sh
 
       - name: Verify dep hashes
         # cyrius.lock pins sigil/agnostik/libro/argonaut hashes (plus patra
-        # and sakshi pulled in transitively by libro).
-        # CI fails if a resolved file's sha256 doesn't match the locked
-        # entry. Skip on the first push that introduces a new dep
-        # before cyrius.lock is generated and committed.
-        run: |
-          if [ -f cyrius.lock ]; then
-            cyrius deps --verify
-          else
-            echo "::warning::cyrius.lock not committed — skipping hash verification"
-          fi
+        # and sakshi pulled in transitively by libro). CI fails if a resolved
+        # file's sha256 doesn't match the locked entry.
+        #
+        # Unconditional: the lock gate above hard-fails on a missing
+        # cyrius.lock, so the old `if [ -f cyrius.lock ]` bootstrap branch was
+        # unreachable — and an unreachable skip branch on a hash-verification
+        # step is exactly the shape standing rule 32 forbids.
+        run: cyrius deps --verify
 
       - name: Format check
         # `cyrius fmt <file> --check` sets the exit code (0 clean / 1 drift)
@@ -160,6 +183,32 @@ jobs:
           [ "$amach" = "b700" ] || {
             echo "ERROR: kybernet-aarch64 e_machine=$amach, expected b700 (aarch64)"; exit 1; }
           echo "kybernet-aarch64: $(wc -c < build/kybernet-aarch64) bytes"
+
+      - name: aarch64 execution gate
+        # ⚠ THE ONLY GATE THAT EXECUTES AARCH64 CODE. Added 1.6.13 (HIGH-9).
+        #
+        # Before this, kybernet cross-built, e_machine-checked and PUBLISHED an
+        # aarch64 artifact without ever running one aarch64 instruction of it.
+        # README and CLAUDE.md both state both architectures are release-gated;
+        # the whole arch half shipped on the cross-compiler exiting 0.
+        #
+        # What that hid is 1.6.13 CRITICAL-1: `sys_signalfd()` issues
+        # `fsync(-1)` on aarch64, so setup_signals returns Err(EBADF), main.cyr
+        # takes its phase-4 FATAL arm, and every aarch64 board powers itself
+        # off before loading config. The published binary was 100%
+        # non-functional and every gate was green. It also hid three
+        # assertions in src/test.cyr that hardcoded x86_64 constants —
+        # including the epoll_event data offset that WAS 1.4.2's CRITICAL-2.
+        #
+        # qemu-user-static is a declared apt install, not a host capability
+        # this happens to find (standing rule 39). The gate carries a DECLARED
+        # known-broken list and fails if the observed set drifts in either
+        # direction — a new break, or a declared one that got fixed and left a
+        # stale exception behind.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-user-static
+          bash scripts/aarch64-exec-gate.sh
 
       - name: Test
         # ⚠ THE COUNT IS ASSERTED, NOT JUST "0 failed". A suite that silently

@@ -62,16 +62,22 @@ jobs:
             CYRIUS_VERSION="$CYRIUS_VERSION" sh
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
-      - name: Resolve deps
-        run: cyrius deps
+      - name: Resolve deps + verify the COMMITTED lock
+        # Same gate as ci.yml, and THIS is the path where it matters most: a
+        # stale lock caught on a PR is an inconvenience, a stale lock on the
+        # release path is a published artifact built against a dependency the
+        # tag does not name.
+        #
+        # `cyrius deps --verify` alone cannot see it — `cyrius deps` rewrites
+        # cyrius.lock from disk and the verify then checks the resolve against
+        # the file it just wrote. See scripts/verify-lock.sh for the 1.6.12
+        # case this was written from, and CHANGELOG.md [1.6.13].
+        run: bash scripts/verify-lock.sh
 
       - name: Verify dep hashes
-        run: |
-          if [ -f cyrius.lock ]; then
-            cyrius deps --verify
-          else
-            echo "::warning::cyrius.lock not committed — skipping hash verification"
-          fi
+        # Unconditional — the lock gate above hard-fails on a missing
+        # cyrius.lock, so the old bootstrap skip branch was unreachable.
+        run: cyrius deps --verify
 
       - name: Build x86_64 (DCE)
         run: |
@@ -99,6 +105,46 @@ jobs:
           CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr build/kybernet-aarch64
           echo "kybernet-aarch64: $(wc -c < build/kybernet-aarch64) bytes"
 
+      - name: aarch64 must actually BOOT before it is published
+        # ⚠ REFUSES TO PUBLISH A BINARY THAT CANNOT BOOT. Added 1.6.13.
+        #
+        # 1.6.13 CRITICAL-1: on aarch64 `sys_signalfd()` issues `fsync(-1)`, so
+        # setup_signals returns Err(EBADF), main.cyr takes its phase-4 FATAL
+        # arm, and the board powers itself off before it loads config. That
+        # binary was built, e_machine-checked and PUBLISHED for ten releases
+        # because nothing ever executed it.
+        #
+        # A published `kybernet-<tag>-aarch64-linux` whose only outcome is
+        # poweroff is not a degraded artifact, it is a non-functional one
+        # wearing a name that says otherwise — the same defect this file's
+        # own aarch64 comment calls "worse than one that never claimed it".
+        # So the release FAILS here rather than shipping it.
+        #
+        # The fix is upstream in cyrius, which CLAUDE.md places off-limits to
+        # this repo. Until a fixed toolchain is pinned, a maintainer who wants
+        # to ship the x86_64 half alone must say so DELIBERATELY by setting the
+        # repo variable ALLOW_BROKEN_AARCH64=1, which drops the aarch64
+        # artifact from the release instead of publishing a dead one.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-user-static
+          # An empty declared-broken list: for a RELEASE, any breakage at all
+          # in a boot-critical primitive is disqualifying. CI's own run
+          # tolerates the declared set; the publish path does not.
+          if AARCH64_KNOWN_BROKEN="" bash scripts/aarch64-exec-gate.sh; then
+            echo "aarch64 boot-critical primitives are sound — publishing both arches"
+          else
+            echo "::error::the aarch64 binary fails a boot-critical syscall probe"
+            echo "Publishing it would ship an artifact whose only outcome is poweroff."
+            if [ "${{ vars.ALLOW_BROKEN_AARCH64 }}" = "1" ]; then
+              echo "::warning::ALLOW_BROKEN_AARCH64=1 — dropping the aarch64 artifact from this release"
+              rm -f build/kybernet-aarch64
+              echo "KYB_DROP_AARCH64=1" >> "$GITHUB_ENV"
+            else
+              exit 1
+            fi
+          fi
+
       - name: Test
         run: |
           cyrius test src/test.cyr 2>&1 | tee /tmp/test_output
@@ -118,14 +164,30 @@ jobs:
           # smaller one. 1.6.1.
           for pair in "build/kybernet:x86_64-linux" "build/kybernet-aarch64:aarch64-linux"; do
             src="${pair%%:*}"; suffix="${pair##*:}"
+            # The ONE sanctioned absence: a maintainer deliberately dropped the
+            # aarch64 artifact rather than publish one that cannot boot (see the
+            # boot-critical probe step above). Every other absence is still a
+            # broken release, not a smaller one.
+            if [ "$suffix" = "aarch64-linux" ] && [ "${KYB_DROP_AARCH64:-0}" = "1" ]; then
+              echo "::warning::aarch64 artifact deliberately omitted (ALLOW_BROKEN_AARCH64=1)"
+              continue
+            fi
             if [ ! -f "$src" ]; then
               echo "::error::$src missing — kybernet release-gates both architectures"
               exit 1
             fi
             cp "$src" "kybernet-${TAG}-${suffix}"
           done
-          file "kybernet-${TAG}-aarch64-linux" | grep -q "aarch64" || {
-            echo "::error::the aarch64 artifact is not an aarch64 ELF"; exit 1; }
+          # ⚠ `od`, not `file`. `file` is base-image-only and installed by
+          # nothing here (standing rule 39 — Ubuntu 24.04 already split `xxd`
+          # out from under a gate this way), and grepping its prose is looser
+          # than reading the field it prints. 0xB7 = EM_AARCH64, little-endian,
+          # so header bytes 18..19 are "b700". Matches ci.yml. 1.6.13.
+          if [ "${KYB_DROP_AARCH64:-0}" != "1" ]; then
+            amach=$(od -An -tx1 -j18 -N2 "kybernet-${TAG}-aarch64-linux" | tr -d ' \n')
+            [ "$amach" = "b700" ] || {
+              echo "::error::the aarch64 artifact has e_machine=$amach, expected b700"; exit 1; }
+          fi
           sha256sum kybernet-*.tar.gz kybernet-*-linux 2>/dev/null > SHA256SUMS
 
       - uses: actions/upload-artifact@v4

@@ -74,6 +74,12 @@ var _eb_expected_pcrs = 0;    # vec of Str (64-hex digests), 0 = none
 # verify), so the recovery path has to be on the kernel cmdline. 1.5.7.
 var _eb_mode_off = 0;
 var _eb_mode_permissive = 0;
+# Set when phase 6c examined the verification result, found it NOT verified,
+# and DELIBERATELY allowed the boot to continue — either because
+# readonly_rootfs was not required, or because permissive mode suppressed the
+# refusal. Phase 7's STAGE_VERIFY_ROOTFS must honour that decision instead of
+# reaching the opposite verdict on the same fact. 1.6.13 HIGH-7.
+var _eb_verity_waived = 0;
 
 fn edge_set_devices(root_dev, hash_dev, root_hash, luks_dev) {
     _eb_root_device = root_dev;
@@ -298,22 +304,60 @@ fn _eb_verity_verify(budget_ms) {
 #
 # So: operators get fleet drift in dmesg, before it can cost them a boot.
 # Returns the number of MISMATCHES (0 = all matched or nothing to compare).
-fn _eb_compare_pcrs(values) {
+# ⚠ `indices` IS NOT OPTIONAL AND THE `str_from` BELOW IS NOT COSMETIC.
+#
+# 1.6.13 CRITICAL-2. sigil does NOT hand back a boxed `Str` here. Its producer
+# (lib/sigil-tpm.cyr:676-679) builds the digest as a RAW NUL-terminated cstr —
+# `alloc(hlen + 1)` + `memcpy` + `store8(p + hlen, 0)` — and
+# `tpm_pcr_value_new` stores that pointer verbatim. This function then handed
+# it to `edge_is_all_zero_hex` and `str_eq`, both of which are `Str` readers:
+# `str_len(s)` is `load64(s + 8)` and `str_data(s)` is `load64(s)`. On a
+# 64-character hex buffer that reads eight ASCII digits AS A POINTER
+# (0x3434333332323131 ~ 3.76e18, far above the x86_64 canonical user-VA
+# ceiling) and dereferences it. Measured: EXIT=139, SIGSEGV — in PID 1 at
+# phase 6c that is "Attempted to kill init".
+#
+# It fired on the SUCCESS path, not an error path: the crash needs only a
+# configured baseline and a readable TPM, not a mismatch. Standing rule 3, and
+# the reason it survived is standing rule 27 — no qemu fixture sets
+# `tpm_attestation: true`, so this function had never executed anywhere.
+#
+# 2. Baselines were matched POSITIONALLY against whatever order sigil returned,
+# and `tpm_pcr_value_index` was never consulted — so `pcr_bindings: "14+7"`
+# compared PCR 14's digest against PCR 7's baseline and reported two mismatches
+# that were really one transposition. sigil's own comparator
+# (lib/sigil-tpm.cyr:987-997) matches on index; kybernet was the outlier.
+# `indices` is the configured index list, in the order it was handed to
+# `tpm_read_pcr`, so entry i is the baseline for index i.
+fn _eb_compare_pcrs(values, indices) {
     if (_eb_expected_pcrs == 0) { return 0; }
     var n = vec_len(_eb_expected_pcrs);
     if (n == 0) { return 0; }
     if (values == 0) { return 0; }
 
     var have = vec_len(values);
+    var nidx = 0;
+    if (indices != 0) { nidx = vec_len(indices); }
     var mismatches = 0;
     for (var i = 0; i < n; i = i + 1) {
         if (i >= have) {
             klog("edge boot: PCR baseline configured for an index that was not read");
             mismatches = mismatches + 1;
         } else {
-            var got = tpm_pcr_value_value(vec_get(values, i));
+            var pv = vec_get(values, i);
+            # str_from(cstr) computes strlen and boxes it (16 bytes, once per
+            # configured PCR at boot — not a hot path).
+            var got = str_from(tpm_pcr_value_value(pv));
             var want = vec_get(_eb_expected_pcrs, i);
-            if (edge_is_all_zero_hex(got) == 1) {
+            # Refuse to compare a digest that is not the index this baseline
+            # was written for. Mis-attributed attestation is worse than none:
+            # it reports a mismatch the operator cannot explain, or — with two
+            # equal digests — a MATCH for a PCR that was never checked.
+            if (i < nidx && tpm_pcr_value_index(pv) != vec_get(indices, i)) {
+                klog("edge boot: PCR index mismatch - read order does not match pcr_bindings");
+                kmsg("kybernet: edge boot: PCR index mismatch vs pcr_bindings order");
+                mismatches = mismatches + 1;
+            } elif (edge_is_all_zero_hex(got) == 1) {
                 # Never a match. sigil zero-fills a PCR it could not parse,
                 # so all-zero means "unread", not "read as zero".
                 klog("edge boot: PCR read back all-zero - UNREADABLE, not a match");
@@ -349,6 +393,12 @@ fn _eb_refuse(klog_msg, kmsg_msg) {
     klog(klog_msg);
     kmsg(kmsg_msg);
     if (_eb_mode_permissive == 1) {
+        # A suppressed refusal is a DECISION TO CONTINUE, and phase 7 must not
+        # re-litigate it (1.6.13 HIGH-7). Without this, kybernet.edge=permissive
+        # printed "continuing despite the above" and then dropped the board into
+        # an emergency shell three lines later — the documented recovery path
+        # for a stale root hash failing to recover the board.
+        _eb_verity_waived = 1;
         klog("edge boot: PERMISSIVE - continuing despite the above");
         return 1;
     }
@@ -497,7 +547,7 @@ fn edge_boot_run(config) {
                   "edge-boot REFUSED: tpm_read_pcr failed");
             }
             klog("edge boot: PCR read complete");
-            _eb_pcr_mismatches = _eb_compare_pcrs(result_unwrap(pcr_res));
+            _eb_pcr_mismatches = _eb_compare_pcrs(result_unwrap(pcr_res), indices);
         } else {
             klog("edge boot: pcr_bindings empty - skipping PCR read");
         }
@@ -542,6 +592,7 @@ fn edge_boot_run(config) {
                 return _eb_refuse("FATAL: dm-verity verification FAILED — rootfs does not match root_hash",
                   "edge-boot REFUSED: dm-verity verification failed");
             }
+            _eb_verity_waived = 1;
             klog("WARNING: dm-verity verification FAILED, but readonly_rootfs not required");
         } else {
             _eb_verity_verified = 0;
@@ -549,6 +600,7 @@ fn edge_boot_run(config) {
                 return _eb_refuse("FATAL: dm-verity requested but veritysetup could not run",
                   "edge-boot REFUSED: veritysetup missing or unrunnable");
             }
+            _eb_verity_waived = 1;
             klog("edge boot: veritysetup unavailable - integrity NOT verified");
         }
     } elif (readonly_req == 1) {
@@ -584,3 +636,4 @@ fn edge_boot_tpm_present()    { return _eb_tpm_present; }
 fn edge_boot_dmverity_supp()  { return _eb_dmverity_supp; }
 fn edge_boot_pcr_count()      { return _eb_pcr_count; }
 fn edge_boot_verity_ok()      { return _eb_verity_verified; }
+fn edge_boot_verity_waived()  { return _eb_verity_waived; }

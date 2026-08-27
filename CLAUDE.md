@@ -6,7 +6,7 @@
 
 - **Type**: Cyrius binary (PID 1 init)
 - **License**: GPL-3.0-only
-- **Version**: 1.6.1
+- **Version**: 1.6.13
 - **Language**: Cyrius 6.5.35 (the whole AGNOS pack front — kybernet/argonaut/libro/agnostik/**sigil**/agnostic — pins 6.5.35; via `~/.cyrius/bin/cyrius`, `cyriusly use 6.5.35`. sigil was the last holdout at 6.5.21 and was brought up at its 3.12.10 tag — a dep that tests on a different compiler from the consumer linking it is a gate that proves nothing)
 - **Tools**: `owl` to read .cyr files. (`cyim` is referenced in sibling repos but is **not installed here** — use ordinary file edits.)
 
@@ -21,7 +21,7 @@ The helmsman that steers the Argo. Manages system boot, essential mounts, signal
 ```sh
 cyrius deps                                  # Resolve deps from cyrius.cyml into lib/
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet   # Build (DCE recommended)
-cyrius test src/test.cyr                     # Run 676 tests
+cyrius test src/test.cyr                     # Run 681 tests
 cyrius bench src/bench.cyr                   # Run benchmarks
 bash scripts/bench-history.sh                # Record bench history + ≥15% regression gate (MANDATORY on every release)
 cyrius build --aarch64 src/main.cyr build/kybernet-aarch64   # Cross-build aarch64
@@ -37,7 +37,7 @@ kybernet/
 ├── VERSION, CLAUDE.md, README.md, CHANGELOG.md, LICENSE
 ├── src/
 │   ├── main.cyr           # Globals + boot sequence + event loop + harness gate
-│   ├── test.cyr           # Integration tests (676 assertions)
+│   ├── test.cyr           # Integration tests (681 assertions)
 │   ├── bench.cyr          # Microbenchmarks
 │   └── lib/
 │       ├── log.cyr        # klog / klog2 / kmsg / slog (factored out at 1.2.0)
@@ -113,7 +113,7 @@ Do **not** add a `path = "../<dep>"` alongside `git`/`tag`. When `path` resolves
 
 1. Make changes to `src/main.cyr` or `src/lib/*.cyr`
 2. Build: `CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet`
-3. Test: `cyrius test src/test.cyr` (676 tests must pass)
+3. Test: `cyrius test src/test.cyr` (681 tests must pass)
 4. Cross-build: `cyrius build --aarch64 src/main.cyr build/kybernet-aarch64` (verify both arches)
 5. Harness (needs KVM): `bash qemu/boot-test.sh` — 62 properties across five passes: boot markers + budget, the reactor gate, dm-verity verification, the emergency-auth prompt against BOTH credential formats, and the quiet gate (log_to_console=false)
 5b. **On a version bump: `bash scripts/bench-history.sh`** — records per-benchmark ns/op to `benches/history.csv` and exits non-zero on a ≥15% regression vs the previous run. Review and explain (or fix) any flagged delta before cutting.
@@ -128,7 +128,7 @@ Do **not** add a `path = "../<dep>"` alongside `git`/`tag`. When `path` resolves
 Apply on every change touching src/:
 
 1. **No literal `syscall(N, ...)` with integer `N`.** Use a stdlib wrapper (`sys_*`) or `#ifdef CYRIUS_ARCH_*`-gated enum. x86_64 numbers route to wildly different syscalls on aarch64; the cross-build won't catch it.
-2. **`var X[N]` is N BYTES, not slots.** Sites holding N i64 ptrs need `[N * 8]`. Write the math inline at the declaration.
+2. **⚠ `var X[N]` MEANS DIFFERENT THINGS AT LOCAL AND GLOBAL SCOPE, AND THIS RULE STATED ONLY HALF OF IT.** **Local** `var X[N]` is N **BYTES** — a local holding N i64 ptrs needs `[N * 8]`. **Global** `var X[N]` is N **SLOTS**, i.e. N * 8 bytes. Measured on 6.5.35, not read: two adjacent globals declared `[4]` are **32** bytes apart and two adjacent locals declared `[4]` are **8**; at `[16]` the same probe gives **128** and **16**. Write the math inline at the declaration *and say which scope you are in*. The practical consequences: a global sized `[N * 8]` for N pointers is **8x over-allocated** (safe, wasteful, and a sign the author applied the local rule); a global `[N]` intended as N bytes is 8x larger than needed (also safe); and `var HANDLED_SIGNALS[1]` in `src/lib/signals.cyr` holding a `store64` is **correct** because it is a global — the 1.4.2 audit refuted that finding for the wrong reason and the right one was never written down. No memory-safety defect has been found from this, because both errors over-allocate; the cost is that every buffer audit since 1.1.5 has been reasoning from a rule that is false half the time. 1.6.13 LOW-7.
 3. **`Str` vs `cstr`.** Argonaut surface is mostly `Str` (boxed); kybernet logging + cgroup path helpers are cstr-only. Any `vec_get`-derived service/health/watchdog name needs `str_data()` before being passed to `klog2 / slog / cgroup_*`.
 4. **PID-1 exit paths must call `do_shutdown()` or log-and-continue.** Never `return 0` from `kybernet_run` directly — the kernel panics on init exit ("Attempted to kill init!").
 5. **Mount-table size and stride must stay in sync.** Update the backing array AND the per-entry stride comment together. `test_mount_required_flag` is the canary.
@@ -202,15 +202,23 @@ Apply on every change touching src/:
 
 43. **⚠ A GATE THAT DOES NOT BUILD WHAT IT TESTS CAN GREEN A BINARY THAT WAS NEVER COMPILED.** `qemu/boot-test.sh` has never built `build/kybernet`; it stages whatever is already there and rebuilds only the *initramfs*. So "edit `src/`, run `bash qemu/boot-test.sh`" tested the PREVIOUS binary and reported a confident pass for code that was never compiled. ⚠ **This was found by an inject-the-defect run producing 62 OK / 0 FAIL when it had to fail** — and that is the point: the verification discipline this repo leans on hardest runs through exactly this channel, so a stale binary does not merely hide a defect, it *forges the evidence that no defect exists*. CI cannot see it (the workflow builds immediately before invoking the harness), which makes it a **dev-box-only false green** — worse rather than better, because the dev box is where iteration happens and where a wrong green costs the most. The script now FAILS if any `src/**.cyr` or `cyrius.cyml` is newer than the binary, naming the file and the build command. It fails rather than rebuilding, per rule 32: a second build path could drift from the documented `CYRIUS_DCE=1` one, and the gate whose job is to notice staleness must not also be the thing papering over it. Corollary for anything scripted: **bash re-reads a script from disk as it executes**, so editing `boot-test.sh` while it runs corrupts the parse mid-flight (observed: `line 123: d: command not found`) — never edit a gate that is currently running. 1.6.12.
 
+44. **⚠ AN ARCHITECTURE YOU SHIP IS AN ARCHITECTURE YOU MUST EXECUTE — COMPILING IT IS NOT TESTING IT.** kybernet cross-built, `e_machine`-checked and PUBLISHED `kybernet-aarch64` for ten releases while **no gate ever ran one aarch64 instruction of it**, and the binary could not boot: `sys_signalfd()` issues `fsync(-1)` on aarch64, so `setup_signals` returns Err(EBADF), phase 4 takes its FATAL arm, and the board powers itself off before loading config (1.6.13 CRITICAL-1). The cross-build exiting 0 was the entire evidence base for half the product. Worse, the blindness was self-concealing: three assertions in `src/test.cyr` hardcoded x86_64 constants — including the `epoll_event` data offset that WAS 1.4.2's CRITICAL-2 — so the one test guarding that CRITICAL could only ever pass on the arch where the bug did not exist. `scripts/aarch64-exec-gate.sh` runs the suite under `qemu-user` (**two seconds**, and it was available the whole time) plus `qemu/aarch64-syscall-probe.cyr`, which asserts the boot-critical primitives by OBSERVABLE RESULT — the stdlib's aarch64 numbers are *correct* and the emitted code is not, so only execution can tell and reading a table is what produced the bug. Its known-broken list is DECLARED and fails on drift in either direction, including a declared break that got fixed, because a stale exception is how a gate goes quiet.
+
+45. **⚠ `cyrius deps --verify` CANNOT CATCH A STALE COMMITTED LOCK, BECAUSE THE RESOLVE RUNS FIRST.** `cyrius deps` REWRITES `cyrius.lock` from disk; verifying afterwards checks the resolve against the file the resolve just wrote, and reports "70 verified, 0 failed" no matter what was committed. CLAUDE.md documented this shape for `path` overrides, but it is a property of the **step order** and applies to every release. 1.6.12 was committed with `cyrius.cyml` at argonaut `1.13.8` and a lock still pinning 1.13.7's commit; replayed against that tree the resolve silently re-pinned it and verify said success. `scripts/verify-lock.sh` saves the committed lock, resolves, compares **sorted** (cyrius does not emit the hash lines in a stable order, so a byte diff is a false positive that would get the gate deleted within a release), and RESTORES the committed bytes on every exit path — non-mutating, like `cyrius fmt --check`. Note cyrius *does* refuse a different sha for the SAME tag; what it silently accepts is a different TAG, which is exactly the release-time case.
+
+46. **BUILD THE TEST INPUT THE WAY THE PRODUCER BUILDS IT — a test that constructs its input conveniently tests the convenient path.** Every edge test fed `edge_is_all_zero_hex` a boxed `Str` via `str_from(...)`. sigil does not produce one: its PCR digest is a RAW NUL-terminated cstr (`alloc`+`memcpy`+NUL). So the suite proved the `Str` path worked while the only path production ever takes read eight ASCII hex characters AS A POINTER and SIGSEGV'd PID 1 on the *success* path of an attesting edge board (1.6.13 CRITICAL-2, measured: exit 139). This is standing rule 3 arriving through the test suite rather than the code, and rule 27's sibling: the reason it survived is that no fixture set `tpm_attestation: true`, so the function had never executed anywhere. When a value crosses a repo boundary, go read what the OTHER side allocates.
+
 ## Release gates
 
 Every version bump runs all of these, in this order, and they must all be green before cutting:
 
 ```sh
+bash scripts/verify-lock.sh                         # the COMMITTED lock == a fresh resolve
 rm -rf lib && cyrius deps && cyrius deps --verify   # expect: N verified, 0 failed
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet
 cyrius build --aarch64 src/main.cyr build/kybernet-aarch64
-cyrius test src/test.cyr                            # 676 tests, 0 failed
+cyrius test src/test.cyr                            # 681 tests, 0 failed
+bash scripts/aarch64-exec-gate.sh                   # EXECUTES aarch64 (needs qemu-user)
 bash scripts/bench-history.sh                       # ≥15% regression gate
 bash qemu/boot-test.sh                              # needs KVM
 ```
@@ -226,4 +234,4 @@ Plus a **sibling-free reproduction** — the only gate that catches a tag which 
 - Do not add C, Rust, or assembly files — everything is Cyrius
 - Do not reference `../cyrius/` repo — use installed toolchain at `~/.cyrius/`
 - Do not bump a dep tag to a value > the highest existing git tag (CI clones from `git + tag`; an unreleased VERSION-file value fails resolution — see 1.1.0 CHANGELOG note)
-- Test after every change (676 tests + harness when KVM available)
+- Test after every change (681 tests + harness when KVM available)

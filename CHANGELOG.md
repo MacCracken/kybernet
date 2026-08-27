@@ -7,6 +7,180 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.6.13] — 2026-08-26
+
+**The P(-1) audit, ten releases late — and the arch half of the product could not
+boot.** Nine independent audit lenses over the full tree with adversarial verification:
+84 agents, 37 candidates, **31 findings** (2 CRITICAL, 9 HIGH, 13 MEDIUM, 7 LOW). Ten
+were re-verified by hand, including both CRITICALs, each reproduced by execution.
+Full report: [`docs/audit/2026-08-26-audit.md`](docs/audit/2026-08-26-audit.md).
+Suite 676 → 681 assertions, **and the suite now runs on aarch64 for the first time**.
+Harness 62 properties. Two new gates.
+
+⚠ **This audit does NOT close everything it found, unlike 1.1.5 and 1.4.2.** Both
+CRITICALs are addressed; 21 findings are deferred with their evidence into
+`docs/development/roadmap.md`. Five need a change in a first-party dep this repo may
+not tag, one needs a redesign of the privilege drop that must not ship without a
+fixture proving it, and the rest are real but bounded. Recorded here so the shortfall
+cannot be mistaken for an oversight.
+
+### Fixed — CRITICAL-1: every aarch64 board powers itself off at phase 4
+
+`sys_signalfd()` issues **`fsync(-1)`** on aarch64. The cyrius aarch64 backend emits an
+inline syscall-translation ladder, and aarch64's NATIVE `signalfd4` (74) collides with
+x86_64's `fsync` (74), so the ladder eats it. `setup_signals()` returns `Err(EBADF)`,
+`main.cyr` takes its phase-4 FATAL arm, and the board powers itself off before it loads
+config, before argonaut, before any service. The published `kybernet-<tag>-aarch64-linux`
+was 100% non-functional, and every gate was green.
+
+Reproduced under `qemu-aarch64 -strace` against a probe compiled from kybernet's own
+`src/lib/signals.cyr`. A sweep of all 34 `sys_*` wrappers kybernet reaches found
+**exactly two** wrong — `sys_signalfd -> fsync` and `sys_pause -> flock` — with the other
+32 correct, including the ones that legitimately rename (`rmdir -> unlinkat`,
+`epoll_wait -> epoll_pwait`, `open -> openat`). The x86_64 control is clean on all 34.
+`sys_pause -> flock` returns immediately instead of blocking, so every deliberate PID-1
+halt is a busy-spin and `return 1` from `kybernet_run` — an init exit, i.e. a kernel
+panic — becomes reachable.
+
+The load-bearing fix is upstream in cyrius, which CLAUDE.md places off-limits to this
+repo. kybernet closed the two things that are its own: the aarch64 execution gate below,
+and `release.yml` now **REFUSES to publish** an aarch64 artifact that fails a
+boot-critical syscall probe. A binary whose only outcome is poweroff is not a degraded
+artifact; it is a non-functional one wearing a name that says otherwise — the same defect
+that file's own comment calls "worse than one that never claimed it". A maintainer who
+wants to ship the x86_64 half alone must say so deliberately via `ALLOW_BROKEN_AARCH64=1`,
+which drops the artifact rather than publishing a dead one.
+
+### Fixed — CRITICAL-2: the PCR comparison dereferences a hex digest as a pointer
+
+`_eb_compare_pcrs` read sigil's PCR digest as a boxed `Str`. sigil does not produce one:
+its digest is a RAW NUL-terminated cstr (`alloc` + `memcpy` + NUL,
+`lib/sigil-tpm.cyr:676-679`), stored verbatim by `tpm_pcr_value_new`. `str_len(s)` is
+`load64(s + 8)` and `str_data(s)` is `load64(s)`, so on a 64-character hex buffer this
+read eight ASCII digits **as a pointer** (`0x3434333332323131`, far above the x86_64
+canonical user-VA ceiling) and dereferenced it. Measured: **exit 139, SIGSEGV** — in PID 1
+at phase 6c that is "Attempted to kill init".
+
+It fired on the **success** path: the crash needs only a configured baseline and a
+readable TPM, not a mismatch. The string is present in both DCE'd production binaries.
+It survived because no qemu fixture sets `tpm_attestation: true`, so the function had
+never executed anywhere — standing rule 27, and the reason rule 46 now exists.
+
+Fixed by wrapping with `str_from()`. While there: baselines were matched **positionally**
+and `tpm_pcr_value_index` was never consulted, so `pcr_bindings: "14+7"` compared PCR 14's
+digest against PCR 7's baseline; sigil's own comparator matches on index and kybernet was
+the outlier. New `test_edge_compare_pcrs_cstr` builds the digest exactly the way sigil's
+producer does — **verified to kill the whole test binary with SIGSEGV on the unfixed
+source.**
+
+### Added — `scripts/aarch64-exec-gate.sh`: the first gate that EXECUTES aarch64 code
+
+Runs the unit suite under `qemu-user` and asserts `0 failed` **and the count**, then runs
+`qemu/aarch64-syscall-probe.cyr`, which checks the boot-critical primitives by observable
+result rather than by reading a table — the stdlib's aarch64 numbers are *correct* and the
+emitted code is not, so only execution can tell. Its known-broken list is **declared** and
+the gate fails on drift in **either** direction, including a declared break that got fixed
+and left a stale exception behind. Verified red on both.
+
+`src/test.cyr`'s three x86_64-only assertions are arch-gated, and the epoll one now reads
+`EPOLL_EVENT_DATA_OFF` instead of a hardcoded `+4` — so the single test guarding 1.4.2's
+CRITICAL-2 now asserts the real property on both arches instead of only on the one where
+that bug never existed. **681 passed, 0 failed on aarch64.** The whole thing takes two
+seconds and `qemu-aarch64` was installed the entire time.
+
+### Added — `scripts/verify-lock.sh`: `deps --verify` cannot see a stale committed lock
+
+`cyrius deps` rewrites `cyrius.lock` from disk, so verifying afterwards checks the resolve
+against the file the resolve just wrote — "70 verified, 0 failed" regardless of what was
+committed. 1.6.12 was committed with `cyrius.cyml` at argonaut `1.13.8` and a lock still
+pinning 1.13.7's commit, and CI would have gone green on it.
+
+Two halves: an offline check that every declared git dep has a `commit` line whose **tag
+field** matches the manifest (this also covers the `path`-override shape that shipped
+1.5.4 unpinned), and a resolve-and-compare that is **sorted**, because cyrius does not emit
+the hash lines in a stable order and a byte diff is a false positive. Non-mutating — the
+committed bytes are restored on every exit path. Verified green twice on the correct lock
+and red on all four defect classes: a stale tag, a dropped commit line, a repointed sha,
+and a drifted hash line. Wired into both workflows, replacing the tautological ordering.
+
+### Fixed — HIGH-1: PID 1 SIGKILLs healthy services on a default boot
+
+`_health_interval_for_config` read only `config_services(g_config)`. `argonaut_init_new`
+also registers `default_services(mode)`, and those defaults **do** carry health checks —
+5 s for the compositor, 10 s for daimon and the shells, 15 s for the gateway. None was
+counted, so a board running the AGNOS defaults polled at the 30 s fallback while argonaut
+sized each watchdog deadline from that service's own interval. A 5 s deadline expires four
+times over between two 30 s polls. This is literally the bug 1.5.0 fixed for the START
+path one function away; the health path kept the old shape. Now reads
+`init_service_defs(g_init)`.
+
+### Fixed — HIGH-4: a service-triggerable OOM primitive against PID 1
+
+`cgroup_has_pid` did `alloc(8193)` on every accepted `MAINPID=` sd_notify datagram, on the
+reactor hot path, in the one arena PID 1 never resets. Any service can send those as fast
+as it likes; the end state in an unkillable PID 1 is "Out of memory and no killable
+processes". Fifth instance of this class here (1.6.3, 1.6.5, 1.6.6, 1.6.12) and **16x
+larger than the 1.6.3 leak it was written after**. Now a static `_CG_PROCS_BUF`; `.bss`
+grew 132,848 → 141,056 bytes and per-datagram growth is zero.
+
+### Fixed — HIGH-7: `kybernet.edge=permissive` dropped the board to an emergency shell
+
+`_stage_verify_rootfs` re-derived a refusal phase 6c had deliberately declined. Phase 6c
+has **three** outcomes, not two: verified; not verified and refused (it powers off, so
+phase 7 never runs); and not verified but deliberately continued — because
+`readonly_rootfs` was not required, or because permissive mode suppressed the refusal.
+Reproduced on live PID-1 QEMU boots of 1.6.12: the serial log reads "PERMISSIVE —
+continuing despite the above" and then, three lines later, "required boot stage failed"
+and "ENTERING EMERGENCY MODE". The documented recovery path for a board locked out by a
+stale root hash did not recover the board — and the operator it strands cannot edit a
+config file on the rootfs that failed to verify. The default edge shape hit it too
+(`readonly_rootfs` defaults to false), turning "tell me if my rootfs drifted" into "refuse
+to boot", the inversion rule 19 exists to close.
+
+Phase 6c now records `_eb_verity_waived`; the stage returns `STAGE_SKIP` there — **not
+`STAGE_OK`**, because verification was attempted and did not succeed, and a false COMPLETE
+is what `boot_stages.cyr` exists to prevent. The file's own header says 1.5.7 removed this
+exact class ("Two gates, opposite verdicts, on one boot"); it came back one predicate down.
+
+### Fixed — three harness gate defects, all of the "cannot fail" family
+
+- **`_ts_of` aborted the entire run when kybernet failed to boot.** It ends in
+  `grep | head | awk` under `set -euo pipefail`, so a grep matching nothing exits 1 and
+  `set -e` kills the script — and "matches nothing" is exactly the case where PID 1 did
+  not start. The harness died before printing one assertion, skipped all five passes and
+  deleted its logs, in precisely the scenario it exists to diagnose; the `KYB_MS=-1`
+  fallback was unreachable dead code. Standing rule 40, in the place it costs most.
+  Verified: `X=$(_ts_of nomatch)` exits 1 without reaching the next line.
+- **`ARNESS_STRICT=`** — a dropped `H`, in the assignment whose only job is to give
+  `HARNESS_STRICT` a default before the first caller. On any box that had not exported it,
+  the first SKIP hit an unbound variable under `set -u`. Invisible because a machine with
+  every tool never skips and CI exports it, so the only configuration that could hit it
+  was a developer box missing `cryptsetup` or `busybox`.
+- **The initramfs staleness check ignored every fixture INPUT**, covering only
+  `build/kybernet` and `cyrius.cyml`. Edit a service definition or a credential generator,
+  re-run, and it booted the previous initramfs and reported a confident pass for a fixture
+  that was never staged — rule 43's defect surviving in the half rule 43 did not cover,
+  and it bites hardest during exactly the fixture work rule 27 demands.
+
+### Fixed — LOW-7: standing rule 2 was half wrong, and had been since 1.1.5
+
+`var X[N]` means **different things at local and global scope**. Measured on 6.5.35: two
+adjacent globals declared `[4]` are **32** bytes apart and two adjacent locals **8**; at
+`[16]`, **128** and **16**. So a local is N BYTES and a **global is N SLOTS (N*8 bytes)**.
+No memory-safety defect has come from this because both errors over-allocate — but every
+buffer audit since 1.1.5 reasoned from a rule that is false half the time, and the 1.4.2
+audit's refutation of the `HANDLED_SIGNALS` finding gave the wrong reason for the right
+answer. Rule 2 now states both halves with the measurement.
+
+### Added — standing rules 44, 45, 46
+
+44 (ship an arch, execute that arch), 45 (`deps --verify` is tautological after a
+resolve), 46 (build the test input the way the PRODUCER builds it). Also: `release.yml`'s
+last `file`-prose grep became an `od` read of `e_machine`, matching `ci.yml` — `file` is
+base-image-only and installed by nothing (standing rule 39).
+
+---
+
 ## [1.6.12] — 2026-08-26
 
 **argonaut 1.13.8 redep — three things that were unobservable, unschedulable or

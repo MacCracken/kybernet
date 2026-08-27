@@ -32,8 +32,17 @@ var g_log_fd = 0;
 
 fn test_constants() {
     println("--- constants ---");
+    # ⚠ ARCH-GATED. These asserted x86_64's numbers unconditionally, so the
+    # suite could only ever be run on x86_64 — and that is exactly why nothing
+    # ever ran it anywhere else (1.6.13 HIGH-9). aarch64 read=63, mount=40.
+    #ifdef CYRIUS_ARCH_X86
     assert_eq(SYS_READ, 0, "SYS_READ");
     assert_eq(SYS_MOUNT, 165, "SYS_MOUNT");
+    #endif
+    #ifdef CYRIUS_ARCH_AARCH64
+    assert_eq(SYS_READ, 63, "SYS_READ");
+    assert_eq(SYS_MOUNT, 40, "SYS_MOUNT");
+    #endif
     assert_eq(SIGCHLD, 17, "SIGCHLD");
     assert_eq(EPOLLIN, 1, "EPOLLIN");
     assert_eq(TOKEN_SIGNAL, 1, "TOKEN_SIGNAL");
@@ -79,7 +88,17 @@ fn test_epoll() {
     println("--- epoll ---");
     var ev = epoll_event_new(EPOLLIN, 42);
     assert_eq(load32(ev), EPOLLIN, "ev events");
-    assert_eq(load64(ev + 4), 42, "ev data");
+    # ⚠ READ AT THE ARCH'S OWN OFFSET, NOT A HARDCODED 4.
+    #
+    # `struct epoll_event` is PACKED on x86_64 (stride 12, data at +4) and
+    # NATURAL everywhere else including aarch64 (stride 16, data at +8) —
+    # standing rule 12, added because getting it wrong was 1.4.2's CRITICAL-2.
+    # This assertion hardcoded the x86_64 offset, so the one test guarding that
+    # CRITICAL could only ever pass on the architecture the bug did not affect;
+    # on aarch64 it read `42 << 32`. Using EPOLL_EVENT_DATA_OFF makes it assert
+    # the real property — that epoll_event_new writes `data` where THIS arch's
+    # kernel reads it — on both. 1.6.13 HIGH-9.
+    assert_eq(load64(ev + EPOLL_EVENT_DATA_OFF), 42, "ev data");
     var ts = timerspec_new(10, 1);
     assert_eq(load64(ts), 10, "interval");
 
@@ -2172,6 +2191,80 @@ fn test_edge_validators() {
     return 0;
 }
 
+# ⚠ THIS TEST EXISTS BECAUSE EVERY OTHER EDGE TEST BOXES ITS INPUT.
+#
+# 1.6.13 CRITICAL-2. `test_edge_validators` above feeds `edge_is_all_zero_hex`
+# via `str_from(...)` — a boxed `Str`. sigil does not produce one: its PCR
+# digest is a RAW NUL-terminated cstr (`alloc` + `memcpy` + NUL,
+# lib/sigil-tpm.cyr:676-679) stored verbatim by `tpm_pcr_value_new`. So the
+# suite proved the Str path worked while the only path production ever takes
+# dereferenced eight ASCII hex characters as a pointer and SIGSEGV'd PID 1.
+#
+# The rule this enforces: build the input the way the PRODUCER builds it.
+# Verified to fail on the unfixed source — the whole test binary dies with
+# signal 11, so this cannot regress quietly.
+fn _test_sigil_style_cstr(hex_cstr) {
+    # byte-for-byte what lib/sigil-tpm.cyr:676-679 does
+    var n = strlen(hex_cstr);
+    var p = alloc(n + 1);
+    memcpy(p, hex_cstr, n);
+    store8(p + n, 0);
+    return p;
+}
+
+fn test_edge_compare_pcrs_cstr() {
+    println("--- edge PCR compare over sigil's RAW cstr (1.6.13) ---");
+    var d7  = "aabbccddeeff00112233445566778899aabbccddeeff001122334455667788ff";
+    var d14 = "1122334455667788990011223344556677889900112233445566778899001122";
+
+    # One configured index, digest matches: 0 mismatches, and crucially
+    # this must RETURN AT ALL rather than fault.
+    var idx = vec_new();
+    vec_push(idx, 7);
+    var vals = vec_new();
+    vec_push(vals, tpm_pcr_value_new(7, TPM_SHA256, _test_sigil_style_cstr(d7)));
+    edge_set_expected_pcrs(0);
+    var exp = vec_new();
+    vec_push(exp, str_from(d7));
+    edge_set_expected_pcrs(exp);
+    assert_eq(_eb_compare_pcrs(vals, idx), 0, "pcr: raw cstr digest matches baseline");
+
+    # Same shape, different digest: exactly one mismatch.
+    var vals2 = vec_new();
+    vec_push(vals2, tpm_pcr_value_new(7, TPM_SHA256, _test_sigil_style_cstr(d14)));
+    assert_eq(_eb_compare_pcrs(vals2, idx), 1, "pcr: raw cstr digest mismatch counted");
+
+    # sigil's zero-fill means UNREADABLE, never "read as zero" — over a raw
+    # cstr, which is the form that reaches this in production.
+    var zero = "0000000000000000000000000000000000000000000000000000000000000000";
+    var vals3 = vec_new();
+    vec_push(vals3, tpm_pcr_value_new(7, TPM_SHA256, _test_sigil_style_cstr(zero)));
+    assert_eq(_eb_compare_pcrs(vals3, idx), 1, "pcr: all-zero raw cstr is UNREADABLE, not a match");
+
+    # A digest returned for a DIFFERENT index than the baseline was written
+    # for must not be compared positionally. Both digests here are valid; the
+    # defect being caught is attributing PCR 14's value to PCR 7's baseline.
+    var idx2 = vec_new();
+    vec_push(idx2, 7);
+    vec_push(idx2, 14);
+    var exp2 = vec_new();
+    vec_push(exp2, str_from(d7));
+    vec_push(exp2, str_from(d14));
+    edge_set_expected_pcrs(exp2);
+    var swapped = vec_new();
+    vec_push(swapped, tpm_pcr_value_new(14, TPM_SHA256, _test_sigil_style_cstr(d14)));
+    vec_push(swapped, tpm_pcr_value_new(7, TPM_SHA256, _test_sigil_style_cstr(d7)));
+    assert_eq(_eb_compare_pcrs(swapped, idx2), 2, "pcr: transposed read order is refused, not compared");
+
+    var ordered = vec_new();
+    vec_push(ordered, tpm_pcr_value_new(7, TPM_SHA256, _test_sigil_style_cstr(d7)));
+    vec_push(ordered, tpm_pcr_value_new(14, TPM_SHA256, _test_sigil_style_cstr(d14)));
+    assert_eq(_eb_compare_pcrs(ordered, idx2), 0, "pcr: correctly ordered pair matches");
+
+    edge_set_expected_pcrs(0);
+    return 0;
+}
+
 fn test_edge_boot_gating() {
     println("--- edge boot gating ---");
     # 1.2.0 — verify the gate logic for the THREE deterministic skip
@@ -2689,6 +2782,7 @@ fn main() {
     test_unsafe_service_name_refused();
     test_edge_config_rejects();
     test_edge_validators();
+    test_edge_compare_pcrs_cstr();
     test_edge_boot_gating();
     test_notify_edge_cases();
     test_knotify_multiline();

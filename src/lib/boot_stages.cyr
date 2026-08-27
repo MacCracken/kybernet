@@ -86,8 +86,38 @@ fn _stage_verify_rootfs(config) {
     # now. A deployment that configured no root device asked for no
     # verification, so that is a SKIP, not a pass and not a failure.
     if (edge_root_device() == 0) { return STAGE_SKIP; }
-    if (edge_boot_verity_ok() == 0) { return STAGE_FAIL; }
-    return STAGE_OK;
+    if (edge_boot_verity_ok() == 1) { return STAGE_OK; }
+
+    # ⚠ AND THE SAME DEFECT CAME BACK ONE PREDICATE DOWN. 1.6.13 HIGH-7.
+    #
+    # Everything above this line was written at 1.5.7 to stop this stage
+    # reaching a verdict phase 6c had already declined to reach — and then
+    # `verity_ok() == 0 -> STAGE_FAIL` did exactly that again, because "not
+    # verified" is not the same fact as "refused". Phase 6c has THREE outcomes,
+    # not two: verified; not verified and refused (it powers the board off, so
+    # this stage never runs); and not verified but DELIBERATELY CONTINUED —
+    # because readonly_rootfs was not required, or because permissive mode
+    # suppressed the refusal.
+    #
+    # Reproduced on live PID-1 QEMU boots of 1.6.12: with
+    # `kybernet.edge=permissive` the serial log read "PERMISSIVE - continuing
+    # despite the above" and then, three lines later, "required boot stage
+    # failed" and "ENTERING EMERGENCY MODE". The documented recovery path for a
+    # board locked out by a stale root hash did not recover the board — which is
+    # the one failure the escape hatch exists to prevent, and the operator it
+    # strands cannot edit a config file on the rootfs that failed to verify.
+    # The default edge shape hit it too: readonly_rootfs defaults to FALSE, so
+    # "tell me if my rootfs drifted" became "refuse to boot" (rule 19's
+    # inversion).
+    #
+    # SKIP, not OK: verification was attempted and did not succeed, so
+    # reporting COMPLETE would be the false-COMPLETE this file exists to
+    # prevent. SKIP records honestly that kybernet did not verify this boot.
+    if (edge_boot_verity_waived() == 1) {
+        klog("boot: rootfs integrity NOT verified - phase 6c waived the refusal");
+        return STAGE_SKIP;
+    }
+    return STAGE_FAIL;
 }
 
 # "Initialize Landlock, seccomp, and MAC policies."
