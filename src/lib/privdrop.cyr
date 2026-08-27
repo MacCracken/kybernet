@@ -22,8 +22,18 @@ fn drop_privileges(uid, gid) {
     if (sys_geteuid() != 0 && uid > 0) { return Err(PRIV_NOT_ROOT); }
     if (sys_geteuid() != 0 && gid > 0) { return Err(PRIV_NOT_ROOT); }
 
-    # Drop supplementary groups first
-    if (gid > 0 && is_err(sys_setgroups(0, 0)) == 1) {
+    # Drop supplementary groups first.
+    #
+    # ⚠ GATED ON EITHER ID, NOT ON gid ALONE. 1.6.15 MEDIUM-6.
+    #
+    # This was `gid > 0 && ...`, so a uid-only drop left the process holding
+    # PID 1's supplementary group list as well as GID 0. kybernet's config
+    # parser now refuses `uid` without `gid` outright, which is the real fix;
+    # this is defence in depth for the other callers (`privdrop_from_context`,
+    # `secure_from_context`) that do not go through that parser. It costs
+    # nothing: PID 1's empty group list is a property of the boot path, not an
+    # invariant kybernet enforces, so clearing it is always correct here.
+    if ((uid > 0 || gid > 0) && is_err(sys_setgroups(0, 0)) == 1) {
         return Err(PRIV_SETGROUPS_FAIL);
     }
 
@@ -234,8 +244,12 @@ fn drop_caps_and_privileges(keep_mask, uid, gid) {
     }
 
     # 4. The privilege drop itself.
-    if (gid > 0) {
+    # Supplementary groups go on EITHER id being dropped — see the note in
+    # drop_privileges (1.6.15 MEDIUM-6). setgid itself still needs a real gid.
+    if (uid > 0 || gid > 0) {
         if (is_err(sys_setgroups(0, 0)) == 1) { return Err(PRIV_SETGROUPS_FAIL); }
+    }
+    if (gid > 0) {
         if (is_err(sys_setgid(gid)) == 1) { return Err(PRIV_SETGID_FAIL); }
     }
     if (uid > 0) {

@@ -1,17 +1,21 @@
 # Kybernet Roadmap
 
-**Current: v1.6.14** — [CHANGELOG.md](../../CHANGELOG.md) is the record of what each
+**Current: v1.6.15** — [CHANGELOG.md](../../CHANGELOG.md) is the record of what each
 release actually did. This file carries only what is **not** done.
 
 This file now carries two intakes. The 1.5.9 sweep opened **38** items (counted at the
-`1.6.0` tag) and **14 of those remain** — fifteen releases of attrition. The
-2026-08-26 P(-1) audit added 21, of which **17 remain**. Plus two opened by the
-1.6.14 work (one new argonaut finding, one cyrius filing split out of CRITICAL-1).
-Total open: **33**. Every number is `grep -c '^- \[ \]'` against
+`1.6.0` tag) and **14 of those remain** — sixteen releases of attrition. The
+2026-08-26 P(-1) audit added 21, of which **10 remain**. Plus two opened by the
+1.6.14 work (one argonaut allocation finding, one cyrius filing split out of
+CRITICAL-1). Total open: **26**. Every number is `grep -c '^- \[ \]'` against
 this file at the relevant tag, not an estimate.
 
 ⚠ The item count went UP at v1.6.13, and that is the audit working rather than the
-project regressing. v1.6.14 closed all five of the audit's HIGH findings — four here
+project regressing. v1.6.15 closed all ten MEDIUMs — six here, two in deps awaiting
+tags, one by filing upstream, and **one deliberately left partial** (MEDIUM-10: the
+obvious fix breaks a contract libro's own suite asserts, and half-closing it is
+exactly what that finding complained about). v1.6.14 closed all five of the audit's
+HIGH findings — four here
 and one in argonaut 1.13.9, which is written and tested but **not yet tagged**, so
 kybernet still pins 1.13.8 and HIGH-6 stays open below until it is. v1.6.14 also
 closed the long-standing `is_mounted` / `strlen(52 chars)` benchmark question, by
@@ -32,8 +36,8 @@ something outside this repo.
 `cyrius lint` reports **0 untracked deferrals and 0 warnings** across the tree, and as
 of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into fiction.
 
-**Gate counts at v1.6.14** (a next agent must not let these shrink; each is enforced):
-702 test assertions (**on both arches**) · 66 harness properties · 56 benchmarks (two
+**Gate counts at v1.6.15** (a next agent must not let these shrink; each is enforced):
+718 test assertions (**on both arches**) · 66 harness properties · 56 benchmarks (two
 reported-not-gated, declared) · the aarch64 execution gate · the committed-lock gate. See
 [state.md](state.md) for the full current-state handoff.
 
@@ -73,264 +77,59 @@ second (see the release order below).
       argonaut 1.13.8**: the 1.13.9 tag does not exist yet and a manifest naming an
       untagged version fails CI resolution. Bump after the user tags it.
 
-- [ ] **MEDIUM-1 (MEDIUM) — A `landlock` block whose rules all resolve to no access installs NO ruleset and returns Ok(0) "applied" — the service runs with zero filesystem confinement**
-      `src/lib/sandbox.cyr:212` — fails open — "nothing to do" indistinguishable
-      from "applied".
-      TRIGGER: `"security": { "landlock": [ {"path": "/etc", "access": "none"} ],
-      "landlock_optional": false }` — an operator expressing "deny /etc". Or
-      `"landlock": []` as a placeholder. Both are accepted and both produce a
-      completely unconfined service.
-      CONSEQUENCE: The exact outcome service_sandbox.cyr's own header calls "worse
-      than not running it": the operator sees a service that started, kyb_pre_exec
-      reported success, and the filesystem policy they wrote is not merely weaker
-      than intended, it is absent. Note the asymmetry with the sibling key
-      documented ten lines away: `"capabilities": []` means "drop everything", the
-      maximally restrictive reading; `"landlock": []` means "restrict nothing". No
-      harness fixture sets an empty or all-"none" block (rule 27), so this has never
-      run in a gate.
-      FIX: An empty effective rule set must still create the ruleset and call
-      `landlock_restrict_self` — a ruleset with zero PATH_BENEATH rules denies every
-      handled access, which is what "none"/[] should mean. Delete the `count == 0`
-      early return in `sandbox_apply` (its only production caller is
-      `sandbox_from_config`; `sandbox_basic_service` is bench/test-only, so the
-      blast radius is contained) and the `rlen == 0` early return in
-      `sandbox_from_config` for the config-derived path, since the caller already
-      gates on `ll != 0`. ⚠ Document the consequence rather than let it be
-      discovered: restricting over an empty rule set denies FS_EXECUTE beneath every
-      path, so such services will then fail to execve — the
+- [ ] **MEDIUM-10 — PARTIAL. 224 -> 192 bytes per audit record; the remaining 176
+      needs a libro API change.** argonaut 1.13.10 caches the two constant Strs
+      (`source` is always "argonaut"; `event_type_str` returns a literal), which is
+      32 of the 224. The rest is inside libro's `entry_new`: an 88-byte struct plus
+      the timestamp, hash and algorithm Strs.
+      ⚠ **The obvious fix was implemented and REVERTED, so do not simply retry it.**
+      Having a streaming chain reuse one scratch entry — sound in principle, since a
+      streaming chain retains nothing and the struct is dead once `_chain_retain` has
+      taken its hash — breaks `chain_append`'s contract that the returned entry
+      belongs to the caller. libro's own suite asserts two returned entries are
+      independent, and four tests go red (verified, then reverted; libro is unchanged
+      at 2.8.12). That is a real contract, not a test artifact.
+      THE DESIGN THAT WORKS: an opt-in libro API — an append that returns the head
+      HASH rather than an entry, using a per-chain scratch internally — which
+      existing callers ignore and argonaut's `audit_log_record` adopts. That is a
+      libro MINOR release with consumer review, not a patch. Separately,
+      `execute_health_check`'s 64-byte result should be written into a
+      caller-supplied slot on the polling path.
+      ⚠ This item is deliberately still OPEN. Its original complaint was that it had
+      been recorded as closed in four documents while still being there.
 
-- [ ] **MEDIUM-10 (MEDIUM) — The 1.6.12 audit-chain fix removed retention but not allocation — a streaming chain still costs ~224 of the 240 bytes per record, so the growth recorded as closed in four documents is still there** **Fix lands in `libro`.**
-      `src/main.cyr:1109` — unbounded per-tick allocation; a closed roadmap item
-      that was not actually closed.
-      TRIGGER: Any board where a service with a `health_check` reaches STATE_RUNNING
-      — the default AGNOS set. argonaut attaches a health check to all seven default
-      services. No attacker, no config, no unusual state.
-      CONSEQUENCE: Steady unbounded growth of PID 1's resident set over the multi-
-      month uptimes this project targets. Rate is tick-dependent: with no config
-      health check kybernet's poll timer sits at 30 s (see HIGH-1), giving ~9 MB/day
-      / ~800 MB over 90 days; a config declaring a fast interval puts it in the
-      20-25 MB/day range. The specific harm beyond the bytes is that the item is
-      recorded as closed in CHANGELOG.md, state.md, roadmap.md and CLAUDE.md, so the
-      next agent has no reason to look — the shape standing rule 9 was rewritten
-      about.
-      FIX: In libro: on a streaming chain (`load64(c + 32) == 1`), hash into a
-      single reusable per-chain entry slot instead of calling `entry_new`, since the
-      entry is by definition unreachable the moment the head hash is taken — linkage
-      stays byte-identical, which is the property 1.6.12 already verified. In
-      argonaut: have `audit_log_record` build its three `str_from` only when the
-      chain will retain, or hold them as cached `Str` constants (`source` is the
-      literal "argonaut" on every call and `event_type_str` returns a literal).
-      Separately, `execute_health_check`'s 64-byte result should be written into a
-      caller-supplied slot on the polling path — fixing the chain alone closes only
-      ~72%. Then correct CHAN
+- [ ] **MEDIUM-4 — FIXED IN argonaut 1.13.10, AWAITING A TAG.** The HTTP health
+      check's `connect(2)` was blocking and unbounded while its sibling
+      `tcp_connect_ip` had already been made bounded, so a `"type": "http"` check
+      against a blackholed target froze PID 1's reactor for the kernel's full
+      SYN-retry window (~127 s) per tick, regardless of `timeout_ms`. Both arms now
+      share one `connect_bounded`, so they cannot drift again. Measured: returns at
+      its 200 ms bound against 198.51.100.1. **Bump kybernet's argonaut pin once
+      1.13.10 is tagged.**
 
-- [ ] **MEDIUM-2 (MEDIUM) — A config service whose name collides with an argonaut default is parsed, counted in `services parsed: N`, and then silently discarded — the operator's binary never runs and their whole `security` block vanishes**
-      `src/main.cyr:270` — silent config drop; security policy discarded with no
-      diagnostic.
-      TRIGGER: `/etc/kybernet/config.json` containing a `services` entry named
-      `daimon` (or any of the other six) under any non-recovery boot mode.
-      CONSEQUENCE: kybernet reports `config: services parsed: 1` and starts a
-      service that is not the one in the config. Every field the operator set is
-      discarded — binary, args, restart policy, cgroup limits, and the `security`
-      block — with no log line admitting the collision. Note the honest scoping: the
-      built-in was never confined, so nothing ends up with MORE privilege than the
-      pre-existing baseline; what is silently lost is the operator's intended
-      hardening and their entire definition, and their binary never executes at all.
-      Reload is NOT affected (`reload_config` logs "service definitions require a
-      reboot - NOT applied" and never rebuilds the map), so this is boot-path only.
-      Structurally invisible to the
-      FIX: Detect the collision on kybernet's side, where the operator's intent is
-      known. Before pushing into `config_services`, check the name against
-      `default_services(config_boot_mode(cfg))` — or register config services first
-      and let argonaut's `map_has` guard drop the DEFAULT, which is what an operator
-      writing an override expects and is the only version that lets a `security`
-      block be added to a built-in at all. At minimum refuse the silence: log
-      `config: service "<name>" collides with a built-in — config definition
-      IGNORED` on console and dmesg, and make `services parsed: N` count only
-      definitions that actually reached the registry. Note roadmap.md:87-88 already
-      records the inability to override
+- [ ] **MEDIUM-8 — FIXED IN sigil 3.12.11, AWAITING A TAG.** `tpm2_pcrread` ran
+      through the stdlib's `exec_capture`, which is unbounded AND discards the
+      child's exit status. So a wedged TPM hung PID 1 at phase 6c forever — before
+      the reactor, nothing reaping, every signal blocked — and a missing or failing
+      tool came back as `Ok(0)`, which sigil's parser turns into a zero-filled PCR
+      bank: an attestation pass derived from a tool that never ran. New bounded,
+      status-checked `agnosys_run_capture_timeout`, with `tpm_read_pcr_timeout`
+      threading a caller budget; the existing arities are kept and are now bounded
+      by default rather than unbounded. ⚠ Worth re-reading when this is picked up:
+      the PCR read runs BEFORE the dm-verity verify, so an attacker who has already
+      tampered with the rootfs can plant a `tpm2_pcrread` that sleeps and wedge PID 1
+      before verification ever executes. **Bump kybernet's sigil pin once 3.12.11 is
+      tagged**, then have `edge_boot.cyr` pass the remaining `max_boot_ms` slice the
+      way the verity verify already does.
 
-- [ ] **MEDIUM-3 (MEDIUM) — `health_check` fields are parsed with zero validation while `interval_ms * retries + timeout_ms` drives a SIGKILL — `"retries": 0` gives a 2 s watchdog deadline and `"retries": -1` a negative one that fires unconditionally**
-      `src/lib/svc_config.cyr:97` — unvalidated config integer feeding a kill
-      decision; multiplicative derivation with no bounds or overflow check.
-      TRIGGER: `"health_check": {"type":"process-alive", "interval_ms":10000,
-      "timeout_ms":2000, "retries":0}` — a plausible spelling of "do not retry".
-      `elapsed` is uptime while `last_hc == 0` and non-negative thereafter, so any
-      negative `watchdog_ms` fires on the first watchdog tick after STATE_RUNNING;
-      `retries: 0` gives a 2000 ms deadline against a `last_hc` refreshed at best
-      every 10 s.
-      CONSEQUENCE: A healthy service is SIGKILLed by PID 1 on essentially every
-      watchdog tick, restart-queued 2 s later by src/main.cyr:1166, restarted, and
-      killed again — a permanent kill/restart flap driven by a config integer that
-      reads as reasonable, with the log saying only `watchdog killed: <name>` and
-      never why. Aggravating sub-case: a negative `timeout_ms` also reaches
-      `ag_sys_poll(&pollfd, 1, timeout_ms)` in argonaut's `tcp_connect_ip`, and
-      poll(2) treats a negative timeout as INFINITE — so a `"type":"tcp"` check
-      against a SYN-blackholed target blocks the reactor forever from one config
-      integer. `port: 999999` is harmless (truncated by the byte-swap). Note
-      `retries` as a health-failure THRESHOLD is al
-      FIX: Validate at load and REFUSE, never clamp, matching the `watchdog_ms` arm
-      50 lines up and rule 25's reasoning. Suggested bounds stated in-source next to
-      the parse: `1000 <= interval_ms <= 3600000`, `1 <= timeout_ms <= interval_ms`,
-      `1 <= retries <= 10`, `0 <= port <= 65535`, and reject when `interval_ms *
-      retries` overflows before the add, or when the derived deadline is less than
-      twice the health tick period the config will produce. Log the reason on
-      console and dmesg and drop the whole service. Add a harness fixture with
-      `"retries": 0` and assert the service is refused, not started.
-
-- [ ] **MEDIUM-4 (MEDIUM) — `"health_check": {"type": "http"}` uses a BLOCKING `connect(2)` with no timeout, stalling PID 1's reactor for the kernel's full SYN-retry window** **Fix lands in `argonaut`.**
-      `lib/argonaut_health.cyr:335` — unbounded (kernel-bounded) blocking syscall on
-      the reactor path.
-      TRIGGER: `"health_check": {"type": "http", "target":
-      "http://10.0.0.5:8080/healthz", "timeout_ms": 200}` where 10.0.0.5 silently
-      drops SYN — host down, firewall DROP rather than REJECT, cable pulled.
-      Ordinary for a service whose health endpoint lives on another box.
-      CONSEQUENCE: The reactor blocks inside `connect(2)` for ~127 s per health tick
-      despite the operator having configured `timeout_ms: 200`. kybernet blocks all
-      signals into a signalfd and installs no handler, so the connect cannot even be
-      cut short by EINTR. During each stall PID 1 reaps no zombies, handles no
-      SIGTERM/SIGCHLD, services no watchdog and drains no notify socket; with a poll
-      interval shorter than the stall the board is unresponsive essentially
-      continuously and a shutdown request sits unhandled for minutes. Less severe
-      than MEDIUM-4's sibling HIGH-6 only because the kernel eventually returns.
-      Scope note: `execute_ready_check` funnels into the same function, but
-      kybernet's parser never builds a r
-      FIX: In the HC_HTTP_GET arm, do what `tcp_connect_ip` already does:
-      `ag_sys_fcntl(fd, 4, 2048)` before `sys_connect`, treat -115 as EINPROGRESS,
-      bound it with `ag_sys_poll(&pollfd, 1, timeout)` plus the SO_ERROR check.
-      Better, factor the bounded connect out of `tcp_connect_ip` and call it from
-      both arms so the two cannot drift again. Then fixture `"type": "http"` against
-      a blackholed address and assert in the `harness=loop` pass that the reactor
-      keeps ticking.
-
-- [ ] **MEDIUM-5 (MEDIUM) — Every scalar key in the `security` block silently falls back to its default on a TYPE mismatch — a quoted uid and a non-string seccomp value discard the whole policy and the service starts as root, unfiltered, with no diagnostic**
-      `src/lib/svc_config.cyr:54` — fails open on malformed input; contradicts the
-      module's own documented "malformed security block rejects the service"
-      contract.
-      TRIGGER: A quoted number in the security block — `"uid": "65534"` instead of
-      `"uid": 65534` — the single most common JSON authoring mistake, or `"seccomp":
-      true` / `"seccomp": 1`.
-      CONSEQUENCE: An operator who wrote a uid drop and a seccomp profile gets a
-      service running as root with the full capability set and no filter, and every
-      observable signal says the config loaded cleanly. The board looks correctly
-      hardened and is not. The failure is also non-uniform and cannot be reasoned
-      about from outside: `no_new_privs` and `landlock_optional` fall back to their
-      RESTRICTIVE defaults while uid/gid/seccomp fall back to permissive ones. No
-      fixture and none of the 676 assertions covers a type mismatch inside
-      `security`.
-      FIX: Give the security block strict accessors that distinguish absent from
-      wrong-typed: if `json_v_obj_get(sec, key) != 0` and the type predicate fails,
-      klog the key name and `return 0` so the service is refused — the contract
-      svc_config.cyr:178-181 already claims and `_cfg_limit` already implements.
-      Apply to `uid`, `gid`, `seccomp`, `no_new_privs` and `landlock_optional`
-      alike; keys inside a security block are not the place for lenient parsing. Add
-      config-parse unit tests asserting each wrong-typed security key refuses the
-      service.
-
-- [ ] **MEDIUM-6 (MEDIUM) — A uid-only privilege drop leaves the service running as GID 0 — setgroups and setgid are both gated on `gid > 0`**
-      `src/lib/privdrop.cyr:26` — incomplete privilege drop (missing setgid on the
-      uid path) — CWE-273.
-      TRIGGER: `"security": { "uid": 65534 }` with no `gid` key — a config that
-      reads as "run this unprivileged".
-      CONSEQUENCE: The service is not unprivileged. It runs with real, effective,
-      saved-set and fs GID all 0, so group-class access to every root-group file
-      (the 0640/0660/0770 class) is retained and files it creates are group-root —
-      while `kyb_pre_exec` returns 0 and nothing is logged. A security primitive
-      reporting a success it did not achieve, the same class as the previous audit's
-      MEDIUM-1 in this same file. The shipped fixture cannot see it: kyb-nonroot
-      sets uid AND gid together and boot-test.sh asserts both, so the one uid path
-      that has a fixture is the one that works (rule 27). Latent today in the sense
-      that no shipped config sets `security.uid`, which roadmap.md records as an
-      open item — so this is a h
-      FIX: Prefer refusing at load: per rule 19, a config that cannot express a
-      complete drop should be a readable config error, so reject `uid` without `gid`
-      in svc_config.cyr:547-560 (or default the gid to the uid's). As defence in
-      depth also widen the gate to `uid > 0 || gid > 0` for `sys_setgroups(0, 0)` —
-      it costs nothing, and PID 1's empty group list is a property of the boot path
-      rather than an invariant kybernet enforces. Add a uid-only fixture asserting
-      the `Gid:` line of /proc/self/status from inside the child.
-
-- [ ] **MEDIUM-7 (MEDIUM) — `emergency_require_auth` with no usable credential prompts for a password nothing can match and then halts PID 1 forever — the guard that prevents this exists at only 1 of 3 `drop_to_emergency` call sites**
-      `src/main.cyr:457` — fail-closed into an unrecoverable halt; missing load-time
-      cross-validation.
-      TRIGGER: `"emergency_require_auth": true` plus either an omitted
-      `emergency_password_hash` or one `emerg_cred_usable` rejects (a digest one
-      character short, a PHC record from another tool, a wrong-typed value), AND a
-      required boot step failing so `init_should_drop_to_emergency` returns 1.
-      CONSEQUENCE: PID 1 prints `Password: `, waits up to 120 s, denies whatever is
-      typed (a timeout returns -1, which is neither >=0 nor -2, so `granted` stays
-      0), prints AUTHENTICATION FAILED and enters `while (1 == 1) { sys_pause(); }`
-      — permanently, with all signals blocked and PID 1 unkillable. The board is
-      dead until someone reaches the bootloader, across reboots. On aarch64 it is
-      worse still: per MEDIUM-9 the halt is a 100% CPU spin, not a halt. Note the
-      honest scoping: without require_auth the same failure forks a shell and blocks
-      in an unbounded `sys_waitpid` (src/main.cyr:559), so on an unattended board
-      neither path reaches the reactor — the real delta is that an operator AT the
-      console can recover i
-      FIX: Two halves. (a) In load_config, after :246, cross-check the pair: if
-      `g_emerg_require_auth == 1 && g_emerg_hash == 0`, log a hard config error to
-      console AND kmsg naming the consequence — rule 19, and the only place a typo
-      is still cheap. (b) Hoist the phase-6c guard into `drop_to_emergency` itself:
-      at :457, if `g_emerg_require_auth == 1 && g_emerg_hash == 0`, log `emergency
-      shell: authentication required but no credential configured - shell
-      suppressed`, close `con`, and `return 0`. That is the whole fix — callers that
-      must refuse to continue (phase 6c) already poweroff on their own after it
-      returns, and callers that can continue then continue. Add a fixture pairing
-      require_auth=true with a
-
-- [ ] **MEDIUM-8 (MEDIUM) — The `tpm2_pcrread` exec is unbounded — a wedged TPM hangs PID 1 forever at phase 6c, with nothing reaping and nothing servicing a watchdog** **Fix lands in `sigil`.**
-      `src/lib/edge_boot.cyr:494` — unbounded blocking exec in PID 1 before the
-      reactor (standing rules 17, 22).
-      TRIGGER: `tpm_attestation: true` with non-empty `pcr_bindings`,
-      `/usr/bin/tpm2_pcrread` present, and the TPM in a state where the tool blocks
-      — `/dev/tpm0` held open by another consumer, a tabrmd/D-Bus TCTI wait, or a
-      wedged firmware TPM. `edge_apply_defaults` leaves `max_boot_ms` at 0, so the
-      budget checkpoint typically does not even fire.
-      CONSEQUENCE: PID 1 blocks indefinitely at phase 6c — before the event loop, so
-      nothing reaps zombies, nothing services a watchdog, no service has started,
-      and no signal can be delivered. The board looks dead with the last console
-      line being `edge boot: reading PCRs`. One aggravator worth recording: the PCR
-      read runs BEFORE `_eb_verity_verify`, so an attacker who has already tampered
-      with the rootfs can plant a `tpm2_pcrread` that simply sleeps and wedge PID 1
-      before verification ever executes.
-      FIX: Do in sigil what argonaut 1.13.2 did for `run_safe_cmd`: give
-      `agnosys_run_capture` a bounded, status-checked variant
-      (`agnosys_run_capture_timeout`) modelled on `run_safe_cmd_timeout` — non-
-      blocking pipe drain against a deadline, `ret > 0` before any status read,
-      SIGKILL + reap on expiry, and the child's exit status actually returned so
-      `Ok(0)` can no longer mean "the tool never ran". Thread a timeout through
-      `tpm_run_capture` / `tpm_read_pcr` and have kybernet pass the remaining
-      `max_boot_ms` slice, the way edge_boot.cyr:530 already does for the verity
-      verify. This also closes LOW-3's structural half. Fix sigil's roadmap line
-      reference while there: it names edge_boot.cyr:473, the call is a
-
-- [ ] **MEDIUM-9 (MEDIUM) — aarch64: `sys_pause()` issues `flock(0,0)` and returns immediately, turning every deliberate PID-1 halt into a 100% CPU busy-spin and disarming four failure backstops** **Fix lands in `cyrius`.**
-      `src/main.cyr:497` — arch-dependent syscall number hijacked by the ESYSXLAT
-      ladder; a blocking primitive that does not block.
-      TRIGGER: Any aarch64 board reaching `drop_to_emergency` with
-      `emergency_require_auth` set and either a failed authentication or an
-      unopenable /dev/console. Currently masked by CRITICAL-1 (the boot dies at
-      phase 4); it becomes live the moment signalfd is fixed. x86_64 is unaffected.
-      CONSEQUENCE: What the code and its own comments call a halt is on aarch64 an
-      unkillable tight loop issuing `flock(0,0)` at syscall rate, pinning a core
-      forever — on exactly the fanless, battery-constrained edge hardware AGNOS
-      targets, with signals blocked and no way back, and with no diagnostic
-      distinguishing it from the intended halt. Separately, the four
-      post-`sys_reboot` guards stop guarding: if `sys_reboot` ever did return, :1523
-      falls through to `return 1` -> `sys_exit(1)` = "Attempted to kill init"
-      (standing rule 4's exact hazard, silently disarmed on this arch), and :1663
-      falls straight through into phases 7/8/9 and boots every service on an edge
-      board whose verification was just refused (the 1.4.
-      FIX: Upstream (FILE, do not patch — cyrius is off-limits here): spell
-      `sys_pause` on aarch64 with a source number the ladder does not claim, e.g.
-      the private-alias band `1073 -> 73` with the arm placed last, matching
-      `SYS_FCHOWNAT = 1054`. Consumer-side, and this is the actionable half: do not
-      rely on a bare `sys_pause()` for "stop forever". Replace both halt loops with
-      `while (1 == 1) { sleep_ms(60000); }` — verified to block correctly on BOTH
-      arches (strace shows a real `ppoll`, since chrono's x86 poll(7) IS in the
-      translated set, and `time` confirms the wall clock) — and apply the same loop
-      form at :665, :1523, :1545 and :1663 so a failed `sys_reboot` cannot fall
-      through. Add an assertion that
+- [x] **MEDIUM-9 — CLOSED BY FILING (2026-08-27).** aarch64 `sys_pause()` issues
+      `flock(0,0)` and returns immediately. Same cyrius codegen defect as CRITICAL-1,
+      same filing:
+      `docs/development/issues/2026-08-27-aarch64-esysxlat-eats-native-signalfd4-and-ppoll.md`.
+      cyrius is off-limits to this repo and filing an issue is the only permitted
+      action; there is no consumer-side workaround (five failed attempts are recorded
+      in the filing). Tracked to completion by the aarch64 execution gate's
+      `AARCH64_KNOWN_BROKEN` declaration, which fails if the entry ever becomes stale.
 
 - [ ] **LOW-1 (LOW) — A rejected `edge` block leaves kybernet's device/hash globals committed, so verification still runs after the operator is told edge verification is DISABLED**
       `src/lib/svc_config.cyr:366` — partially-committed parse — the caller's reset
@@ -660,6 +459,19 @@ Moved into the v1.6.1 gate line. Recording why here so the claim is not re-made:
 
 One line per release. Detail lives in [CHANGELOG.md](../../CHANGELOG.md).
 
+- **v1.6.15** — All ten deferred MEDIUMs. A `landlock` block that granted nothing
+  confined nothing while reporting "applied"; a config service whose name collided
+  with a built-in was counted, dropped and never mentioned; unvalidated health-check
+  integers derived a SIGKILL deadline, so `"retries": 0` flapped a healthy service
+  forever and a negative `timeout_ms` reached `poll(2)` as INFINITE; a quoted number
+  in `security` fell back to permissive defaults and started the service as root,
+  unfiltered; `"uid": N` alone left it as group root; and `require_auth` with no
+  credential prompted for a password nothing could match and then halted PID 1
+  permanently. Consumed argonaut 1.13.9 (closing HIGH-6). MEDIUM-4 and MEDIUM-8 are
+  fixed in argonaut 1.13.10 / sigil 3.12.11 awaiting tags, MEDIUM-9 was closed by
+  filing upstream, and **MEDIUM-10 is partial and stays open** — 224 -> 192 bytes,
+  with the remaining fix needing a libro API change that its own tests refuse.
+  702 -> 718 assertions.
 - **v1.6.14** — All five HIGH findings from the P(-1) audit. Landlock was frozen at
   ABI v1, so `truncate(2)` was **entirely unchecked** for every confined service while
   the sandbox reported "applied" — measured: open denied, truncate allowed, a 16-byte

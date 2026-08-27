@@ -94,11 +94,66 @@ fn _cfg_health_check(svc_obj) {
     if (is_err_result(tr) == 1) { return 0 - 1; }
 
     var target = _cfg_str(hc, "target", str_from(""));
-    return health_check_new(result_unwrap(tr), target,
-      _cfg_int(hc, "port", 0),
-      _cfg_int(hc, "interval_ms", 10000),
-      _cfg_int(hc, "timeout_ms", 2000),
-      _cfg_int(hc, "retries", 3));
+
+    # ⚠ THESE INTEGERS DRIVE A SIGKILL, AND WERE UNVALIDATED. 1.6.15 MEDIUM-3.
+    #
+    # argonaut sizes the watchdog deadline as `interval_ms * retries +
+    # timeout_ms` and kills the service when `now - last_hc` exceeds it. So a
+    # config integer that reads as entirely reasonable became a permanent
+    # kill/restart flap on a HEALTHY service, with the log saying only
+    # `watchdog killed: <name>` and never why:
+    #
+    #   "retries": 0   -> deadline collapses to timeout_ms (2 s by default),
+    #                     against a last_hc refreshed at best every interval_ms.
+    #   "retries": -1  -> a NEGATIVE deadline. `elapsed` is uptime while
+    #                     last_hc is 0 and non-negative after, so it fires on
+    #                     the first watchdog tick after STATE_RUNNING, always.
+    #   negative timeout_ms -> reaches `ag_sys_poll(&pollfd, 1, timeout_ms)` in
+    #                     argonaut's tcp_connect_ip, and poll(2) reads a
+    #                     negative timeout as INFINITE — one config integer
+    #                     blocks PID 1's reactor forever against a
+    #                     SYN-blackholed target.
+    #
+    # Bounded and REFUSED, never clamped — rule 25's reasoning, and matching the
+    # `watchdog_ms` arm that already does this. `timeout_ms <= interval_ms`
+    # because a probe that may run longer than its own period can never settle.
+    # The `interval_ms * retries` product is checked against a ceiling BEFORE
+    # the add, so the multiplication cannot overflow into a small deadline.
+    var port = _cfg_int(hc, "port", 0);
+    var iv   = _cfg_int(hc, "interval_ms", 10000);
+    var tmo  = _cfg_int(hc, "timeout_ms", 2000);
+    var rty  = _cfg_int(hc, "retries", 3);
+
+    if (iv < 1000 || iv > 3600000) {
+        klog("config: health_check.interval_ms outside 1000..3600000 - service REFUSED");
+        kmsg("kybernet: config: health_check.interval_ms out of range");
+        return 0 - 1;
+    }
+    if (tmo < 1 || tmo > iv) {
+        klog("config: health_check.timeout_ms must be 1..interval_ms - service REFUSED");
+        kmsg("kybernet: config: health_check.timeout_ms out of range");
+        return 0 - 1;
+    }
+    if (rty < 1 || rty > 10) {
+        klog("config: health_check.retries must be 1..10 - service REFUSED");
+        kmsg("kybernet: config: health_check.retries out of range (0 gives a 2s watchdog)");
+        return 0 - 1;
+    }
+    if (port < 0 || port > 65535) {
+        klog("config: health_check.port outside 0..65535 - service REFUSED");
+        kmsg("kybernet: config: health_check.port out of range");
+        return 0 - 1;
+    }
+    # Ceiling on the derived deadline itself. 3600000 * 10 is 36,000,000 ms —
+    # comfortably inside i64, so this cannot overflow; the bound exists so a
+    # watchdog deadline stays a watchdog rather than becoming unreachable.
+    if (iv * rty + tmo > 3600000) {
+        klog("config: health_check watchdog deadline exceeds 1h - service REFUSED");
+        kmsg("kybernet: config: health_check interval_ms*retries+timeout_ms too large");
+        return 0 - 1;
+    }
+
+    return health_check_new(result_unwrap(tr), target, port, iv, tmo, rty);
 }
 
 # Build one ServiceDefinition from a JSON object.
@@ -196,6 +251,44 @@ fn svc_def_from_json(obj) {
 # fmt_int_buf — so a -1 would be written as the string "-1", which the
 # kernel rejects with EINVAL, silently leaving the limit unset. Catching it
 # at parse time turns a silently-unlimited service into a rejected config.
+# ⚠ STRICT ACCESSORS FOR THE `security` BLOCK. 1.6.15 MEDIUM-5.
+#
+# The lenient `_cfg_*` helpers above return the FALLBACK on a type mismatch,
+# which is right for most of the config and wrong here. A quoted number —
+# `"uid": "65534"` instead of `"uid": 65534`, the single most common JSON
+# authoring mistake — silently fell back to "no uid configured", and
+# `"seccomp": true` silently fell back to no profile. The operator got a
+# service running as ROOT with the full capability set and no filter, and every
+# observable signal said the config had loaded cleanly.
+#
+# Worse, the failure was not even uniform: `no_new_privs` and
+# `landlock_optional` fall back to their RESTRICTIVE defaults while
+# uid/gid/seccomp fell back to permissive ones, so the direction of the mistake
+# depended on which key you fat-fingered.
+#
+# These return a sentinel the caller turns into a REFUSAL, matching the
+# contract this module already documents ("a malformed security block rejects
+# the service") and already honours for `limits` via `_cfg_limit`. A key inside
+# a security block is not the place for lenient parsing.
+#
+# `_cfg_sec_int`  -> value, `absent` when the key is missing, -2 on wrong type.
+# `_cfg_sec_bool` -> value, `absent` when the key is missing, -2 on wrong type.
+var CFG_SEC_BADTYPE = 0 - 2;
+
+fn _cfg_sec_int(obj, key, absent) {
+    var v = json_v_obj_get(obj, key);
+    if (v == 0) { return absent; }
+    if (json_v_is_int(v) == 0) { return CFG_SEC_BADTYPE; }
+    return json_v_int(v);
+}
+
+fn _cfg_sec_bool(obj, key, absent) {
+    var v = json_v_obj_get(obj, key);
+    if (v == 0) { return absent; }
+    if (json_v_is_bool(v) == 0) { return CFG_SEC_BADTYPE; }
+    return json_v_bool(v);
+}
+
 fn _cfg_limit(obj, key) {
     var v = json_v_obj_get(obj, key);
     if (v == 0) { return 0; }
@@ -575,8 +668,13 @@ fn svc_apply_security_json(sd, obj) {
     # exists to avoid), and a wrapped or truncated value would run the service
     # as somebody unrelated. Ceiling is 2^31-1, the kernel's uid_t range;
     # nobody/nogroup at 65534 is comfortably inside it.
-    var uid_v = _cfg_int(sec, "uid", 0 - 1);
-    var gid_v = _cfg_int(sec, "gid", 0 - 1);
+    var uid_v = _cfg_sec_int(sec, "uid", 0 - 1);
+    var gid_v = _cfg_sec_int(sec, "gid", 0 - 1);
+    if (uid_v == CFG_SEC_BADTYPE || gid_v == CFG_SEC_BADTYPE) {
+        klog("config: security.uid/gid must be a JSON number, not a string - service REFUSED");
+        kmsg("kybernet: config: security.uid/gid wrong type; service refused");
+        return 0;
+    }
     if (uid_v != 0 - 1) {
         if (uid_v < 0 || uid_v > 2147483647) {
             klog("config: security.uid out of range — service REFUSED");
@@ -589,12 +687,33 @@ fn svc_apply_security_json(sd, obj) {
             return 0;
         }
     }
+    # ⚠ A uid WITHOUT A gid IS NOT A COMPLETE DROP. 1.6.15 MEDIUM-6.
+    #
+    # `drop_privileges` gates BOTH `sys_setgroups(0, 0)` and `sys_setgid` on
+    # `gid > 0`, so `"security": {"uid": 65534}` — a config that reads as "run
+    # this unprivileged" — left the service with real, effective, saved-set and
+    # fs GID all 0. It kept group-class access to every root-group file (the
+    # 0640/0660/0770 class) and created files owned by group root, while
+    # `kyb_pre_exec` returned 0 and logged nothing: a security primitive
+    # reporting a success it did not achieve.
+    #
+    # Defaulting the gid to the uid would be a guess about identity, and this
+    # file already refuses to guess about identity one comment up. So it is a
+    # config error naming the missing key (rule 19), which the operator can fix
+    # in one line. The shipped fixture could not see this: kyb-nonroot sets uid
+    # AND gid, so the one uid path with a fixture was the one that works.
+    if (uid_v != 0 - 1 && gid_v == 0 - 1) {
+        klog("config: security.uid set without security.gid - INCOMPLETE drop, service REFUSED");
+        kmsg("kybernet: config: security.uid without gid leaves the service as group root; refused");
+        return 0;
+    }
     # --- landlock filesystem rules ---
     var llv = json_v_obj_get(sec, "landlock");
     if (llv != 0) {
         if (json_v_is_arr(llv) == 0) { return 0; }
         var sbx = sandbox_config_new();
         var rules = sandbox_fs_rules(sbx);
+        var granting = 0;
         var ln = json_v_arr_len(llv);
         for (var li = 0; li < ln; li = li + 1) {
             var r = json_v_arr_get(llv, li);
@@ -607,13 +726,49 @@ fn svc_apply_security_json(sd, obj) {
             if (acc_s == 0) { return 0; }
             var acc = _access_from_name(acc_s);
             if (acc < 0) { return 0; }
+            if (acc > 0) { granting = granting + 1; }
             vec_push(rules, filesystem_rule_new(str_data(path), acc));
+        }
+        # ⚠ A LANDLOCK BLOCK THAT GRANTS NOTHING IS REFUSED HERE. 1.6.15 MEDIUM-1.
+        #
+        # `"landlock": []`, or a block whose every rule is `"access": "none"`,
+        # used to produce a service with NO ruleset at all and `Ok(0)` "applied"
+        # — the operator's filesystem policy was not weaker than intended, it was
+        # absent, and `kyb_pre_exec` reported success. That is the outcome
+        # service_sandbox.cyr's own header calls worse than not running it.
+        #
+        # Note the asymmetry that makes this an easy mistake: `"capabilities": []`
+        # means "drop everything", the MOST restrictive reading, while
+        # `"landlock": []` was being read as "restrict nothing".
+        #
+        # Refused at LOAD rather than fixed at apply-time, deliberately. The
+        # fail-closed alternative — install a ruleset with zero PATH_BENEATH
+        # rules — denies FS_EXECUTE beneath every path, so the service cannot
+        # even execve and the operator gets an unexplained exit 126 from the one
+        # process that cannot tell them why. A config error naming the key is
+        # actionable; a service that mysteriously refuses to start is not
+        # (rule 19: a typo must be a readable config error, never a mid-boot
+        # surprise). An operator who genuinely wants "deny everything" writes no
+        # `landlock` key and gets the same result via seccomp/capabilities.
+        if (granting == 0) {
+            klog("config: security.landlock grants nothing (empty, or every rule \"none\") - REJECTED");
+            kmsg("kybernet: config: security.landlock grants no access; remove the key or grant a path");
+            return 0;
         }
         svc_def_set_landlock(sd, sbx);
     }
 
     # --- seccomp profile + no_new_privs ---
     var kind = SECCOMP_NONE;
+    # Strict, for the same reason as uid/gid: `"seccomp": true` or
+    # `"seccomp": 1` silently fell back to NO profile — an unfiltered service on
+    # a config that asked for a filter. 1.6.15 MEDIUM-5.
+    var sc_raw = json_v_obj_get(sec, "seccomp");
+    if (sc_raw != 0 && json_v_is_str(sc_raw) == 0) {
+        klog("config: security.seccomp must be a profile NAME string - service REFUSED");
+        kmsg("kybernet: config: security.seccomp wrong type; service refused");
+        return 0;
+    }
     var sc_s = _cfg_str(sec, "seccomp", 0);
     if (sc_s != 0) {
         kind = _seccomp_kind_from_name(sc_s);
@@ -621,7 +776,12 @@ fn svc_apply_security_json(sd, obj) {
     }
     # Defaults to on: a service that asked to be confined at all wants the
     # setuid-escalation door shut, and both Landlock and seccomp require it.
-    var nnp = _cfg_bool(sec, "no_new_privs", 1);
+    var nnp = _cfg_sec_bool(sec, "no_new_privs", 1);
+    if (nnp == CFG_SEC_BADTYPE) {
+        klog("config: security.no_new_privs must be true or false - service REFUSED");
+        kmsg("kybernet: config: security.no_new_privs wrong type; service refused");
+        return 0;
+    }
 
     # ⚠ DEFAULTS TO REQUIRED. A service that configured Landlock rules and
     # then ran on a kernel without Landlock used to start with NO filesystem
@@ -634,7 +794,12 @@ fn svc_apply_security_json(sd, obj) {
     # kernel says so with `"landlock_optional": true`. Inheriting a refusal
     # is rule 19's complaint; inheriting a SILENT LOSS OF POLICY is worse,
     # so the default goes the other way here and says so in the log.
-    var ll_opt = _cfg_bool(sec, "landlock_optional", 0);
+    var ll_opt = _cfg_sec_bool(sec, "landlock_optional", 0);
+    if (ll_opt == CFG_SEC_BADTYPE) {
+        klog("config: security.landlock_optional must be true or false - service REFUSED");
+        kmsg("kybernet: config: security.landlock_optional wrong type; service refused");
+        return 0;
+    }
     var pol = kyb_seccomp_policy_new(kind, nnp, ll_opt);
     # uid/gid were validated at the top of this function; carry them onto the
     # policy that is actually stored. (An earlier draft built a second policy

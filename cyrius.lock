@@ -1,7 +1,7 @@
 commit	08e300487dd79db961085a0219aff7f7746638df	sigil	https://github.com/MacCracken/sigil.git	3.12.10
 commit	a09383a32a45353e9741e2871048a7ef7d08266f	agnostik	https://github.com/MacCracken/agnostik.git	1.5.1
 commit	f101d29348ecb0ab7d912c1c578f2e835f68cfbb	libro	https://github.com/MacCracken/libro.git	2.8.12
-commit	8e984298b13e13193e66eaf6d5787ca6c5ef2809	argonaut	https://github.com/MacCracken/argonaut.git	1.13.8
+commit	3c7ee767af03e881629c052b9eda0efbbeaffaca	argonaut	https://github.com/MacCracken/argonaut.git	1.13.9
 commit	490f8ff5e2914ca6366db5e7a444662e07b9c438	patra	https://github.com/MacCracken/patra.git	1.13.10
 7240760b1260fa06c53c5a139d1a2086fb439e21ac90e53eacd4bf486ac0e9ca  lib/tagged.cyr
 5978751906616997dc497d5ffaa5171c92611c5cb6f6466ada2c6c1dd0b83c79  lib/net.cyr
@@ -31,7 +31,7 @@ eeadd5a7b29998c0039a6758687857689b20f83d3d16c74349a403dac39e71a4  lib/atomic.cyr
 a90313240f49f1884f1bc0992daf4ee8538fe707c6998d04e163f775f4f3a1b2  lib/string.cyr
 d86e95aa17266cf10d634825da8a1ce3e13a8b654fec8178c684297c52b14cb6  lib/process.cyr
 7328ec74c1b37e22094a0f22dbd2ecea4dce10700a6ba5122cf1d5bfff3a564e  lib/alloc.cyr
-61bb24a4e44acaad7789ccde99c21a76d8c684bafcd17e0c968b017ff825d611  lib/argonaut_health.cyr
+f02f79ad92814b1c22d6ec07ae6c81f781783c31ee1f23e4abc7197bfb8ce599  lib/argonaut_health.cyr
 0847964081b1998fa584e74c5ff2a27ad183fc8e251fb620fd1fcf6f2aa9e12e  lib/syscalls_x86_64_linux.cyr
 cecaebeadd86c25bd2bbdc5996a3c6e8c48f220146bb8533a25e2e7b0bb51ea9  lib/syscalls_x86_64_agnos.cyr
 6af061b024975f499bcc7c259c72761109a957c145e0e1fc192cd600c054c09f  lib/sigil_sha256.cyr

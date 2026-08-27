@@ -6,36 +6,41 @@
 
 ## Version
 
-**1.6.14** — **all five HIGH findings** from the 2026-08-26 P(-1) audit. Four land in
-kybernet; the fifth is argonaut's and is fixed in **argonaut 1.13.9, which is written,
-tested and clean but NOT YET TAGGED** — so kybernet still pins 1.13.8 and that finding
-stays open until the tag exists. Suite 681 → 702 assertions. Harness 62 → 66 properties.
+**1.6.15** — **all ten deferred MEDIUM findings** from the 2026-08-26 P(-1) audit.
+Six land here, two in deps that are written and tested but **not yet tagged**, one was
+closed by filing upstream, and **one is deliberately partial and still open**. Suite
+702 → 718 assertions. Harness 66 properties. argonaut 1.13.8 → **1.13.9**, which
+closes HIGH-6 from the previous release.
 
-What was wrong, in one line each:
+Six in kybernet, one line each:
 
-- **HIGH-2** — Landlock was frozen at ABI v1, so `truncate(2)` was governed by nothing:
-  a confined service could zero any file on the box while `sandbox_from_config` returned
-  "applied". Measured: `open(O_WRONLY)` denied, `truncate()` allowed, 16 bytes → 0.
-  Now negotiated (`landlock_create_ruleset(NULL,0,VERSION)`), TRUNCATE at ABI ≥ 3,
-  IOCTL_DEV at ≥ 5, grants intersected with the handled mask so older kernels still work.
-- **HIGH-3** — `capabilities` and `uid` could not be used together **at all**. The
-  capability drop surrendered CAP_SETUID/CAP_SETGID before the privilege drop needed
-  them, so the service exited 126 every time. New `drop_caps_and_privileges()` does
-  KEEPCAPS → inheritable → bounding → setuid → effective → **AMBIENT**, the only set
-  that survives execve of a plain binary.
-- **HIGH-5** — every `kill -HUP 1` leaked ~38 KB, and leaked even with no config file.
-- **HIGH-8** — dm-verity verification borrowed an undocumented hardcoded 10 s, so a
-  board with an intact rootfs powered off blaming a veritysetup that was present and
-  running. Now `edge.verify_timeout_ms`, validated at load, default 300 s, with a
-  distinct TIMEOUT verdict.
+- **MEDIUM-1** — `"landlock": []` or an all-`"none"` block installed NO ruleset and
+  returned `Ok(0)` "applied". Note the asymmetry that makes it easy:
+  `"capabilities": []` means drop *everything*; `"landlock": []` was read as restrict
+  *nothing*. Refused at load; `sandbox_from_config` fails closed if it ever reaches it.
+- **MEDIUM-2** — a config service named after a built-in was parsed, counted, and
+  silently discarded, taking the operator's whole `security` block with it.
+- **MEDIUM-3** — health-check integers derive a SIGKILL deadline
+  (`interval_ms * retries + timeout_ms`) and were unvalidated: `"retries": 0` flapped a
+  HEALTHY service forever, `-1` gave a negative deadline that always fires, and a
+  negative `timeout_ms` reaches `poll(2)` as INFINITE.
+- **MEDIUM-5** — `"uid": "65534"` (a quoted number, the commonest JSON mistake) fell
+  back to permissive defaults, so the service ran as root, unfiltered, with every
+  signal saying the config loaded cleanly.
+- **MEDIUM-6** — `"uid": N` without a gid left the service as **group root**, because
+  `drop_privileges` gates setgid AND setgroups on `gid > 0`.
+- **MEDIUM-7** — `require_auth` with no usable credential prompted for a password
+  nothing could match, then halted PID 1 permanently, across reboots.
 
-⚠ **The `strlen(52 chars)` / `is_mounted` benchmark question is settled, and the answer
-is that they are not gateable.** Proven, not assumed: inserting a purely INERT BSS pad
-into `src/bench.cyr` — read by nothing, called by nothing — moves `strlen(52 chars)`
-from 46 to 63 ns/op and back. That swing is larger than any regression the gate ever
-flagged on it. Both are now reported as `layout … NOT gated`, still recorded and still
-counted. Verified the gate still turns red on a real one: doubling `memeq`'s work was
-flagged +118%.
+⚠ **MEDIUM-10 is PARTIAL and stays open, on purpose.** A streaming audit append cost
+224 bytes; argonaut 1.13.10 caches the two constant Strs, bringing it to 192. The
+remaining 176 is libro's `entry_new`. **The obvious fix was implemented and reverted:**
+having a streaming chain reuse one scratch entry breaks `chain_append`'s contract that
+the returned entry belongs to the caller, and libro's own suite asserts two returned
+entries are independent — four tests go red. That is a real contract. Closing it needs
+an opt-in libro API (append returning the head hash) and a minor release. **libro is
+unchanged at 2.8.12.** The finding's original complaint was that it had been recorded
+as closed in four documents while still being there; it is not being closed again.
 
 ## Toolchain
 
@@ -67,7 +72,7 @@ gitignored: **the contract is the lock file, not the bytes on disk.**
 | sigil | 3.12.10 | `08e3004` | THIN surface — mldsa + sha_ni + sha256 + hex + tpm + argon2. **Never the monolith.** |
 | agnostik | 1.5.1 | `a09383a` | `dist/agnostik.cyr` full bundle |
 | libro | 2.8.12 | `f101d29` | `dist/libro.cyr` full bundle |
-| argonaut | 1.13.8 | `8e98429` | **12 selective modules**, no dist bundle |
+| argonaut | 1.13.9 | `3c7ee76` | **12 selective modules**, no dist bundle |
 | patra | 1.13.10 | `490f8ff` | transitive via libro; kybernet calls no `patra_*` |
 
 Unchanged at 1.6.13 — no dep bump. `cyrius deps --verify` → **70 verified, 0 failed**,
@@ -78,8 +83,8 @@ than by a verify that runs after the resolve rewrites it.
 
 | Arch | Bytes |
 |---|---|
-| x86_64 (`CYRIUS_DCE=1`) | 1,524,632 |
-| aarch64 | 1,962,656 |
+| x86_64 (`CYRIUS_DCE=1`) | 1,531,968 |
+| aarch64 | 1,965,888 |
 
 Static data is 141,168 bytes, **+96 over 1.6.13** — deliberately. The config read
 buffer is allocated once and cached rather than living in BSS: the BSS version worked
@@ -93,8 +98,8 @@ the build; that is standing rule 32.
 
 | Gate | Count | Enforcement |
 |---|---|---|
-| `cyrius test src/test.cyr` | **702** assertions | floor read from CLAUDE.md; a shrinking suite fails |
-| `bash scripts/aarch64-exec-gate.sh` | **702** assertions + 5 syscall probes | **NEW at 1.6.13** — the only gate that executes aarch64 |
+| `cyrius test src/test.cyr` | **718** assertions | floor read from CLAUDE.md; a shrinking suite fails |
+| `bash scripts/aarch64-exec-gate.sh` | **718** assertions + 5 syscall probes | **NEW at 1.6.13** — the only gate that executes aarch64 |
 | `bash qemu/boot-test.sh` | **66** properties, 5 passes | `HARNESS_STRICT=1` in CI makes a skip a failure |
 | `bash scripts/verify-lock.sh` | 2 halves, 5 commit pins | **NEW at 1.6.13** — the committed lock vs a fresh resolve |
 | `bash scripts/bench-history.sh` | **56** benchmarks (2 reported-not-gated) | ≥15% regression gate; a dropped benchmark must be declared `BENCH_REMOVED=n`; `LAYOUT_SENSITIVE` names the two exempt ones |
@@ -120,37 +125,27 @@ deferred items is among them: check their evidence, not their severity label.
 
 ## In flight
 
-**v1.6.14 is NOT tagged.** All gates green locally. The user tags.
+**v1.6.15 is NOT tagged.** All gates green locally. The user tags.
 
-⚠ **v1.6.13 was tagged and never published** — its release run went red and the tag is
-being withdrawn. **1.6.14 carries its content**; the 1.6.13 CHANGELOG section stays as
-the record of what those changes were. CI red means it never shipped: do not invent a
-follow-up patch release for work that never reached a user.
+⚠ **Two dep releases are written, tested and clean but NOT TAGGED:**
 
-⚠ **What made it red was a gate in this repo, not the code.** `release.yml`'s aarch64
-boot probe ran with an empty declared-broken list and failed the whole workflow, so an
-upstream cyrius defect in one architecture blocked a fully-gated x86_64 binary from
-shipping, with the only escape a hand-set repo variable. It now has three outcomes —
-clean publishes both, the DECLARED breakage drops the aarch64 artifact and says why in
-the release body, anything else hard-fails. All three were simulated against the real
-gate before committing. **The lesson is the one this repo keeps relearning: a gate has
-to be exercised in the state it will actually meet.** The probe was verified to detect
-the defect and never verified against the release path it gates.
+- **argonaut 1.13.10** — MEDIUM-4 (the HTTP health check's unbounded `connect`) plus
+  the partial MEDIUM-10 Str caching. All 33 suites pass; `health_exec` 33 → 38.
+- **sigil 3.12.11** — MEDIUM-8 (`tpm2_pcrread` unbounded and status-discarding). All
+  65 suites pass; `dist/sigil-tpm.cyr` and `dist/sigil.cyr` regenerated, the other
+  eleven bundles byte-identical.
 
-⚠ **argonaut 1.13.9 is written, tested and clean in `../argonaut`, and NOT TAGGED.**
-33 suites pass; `health_exec.tcyr` went 23 → 33. kybernet cannot consume it until the
-tag is on the remote — a `cyrius.cyml` naming an untagged version fails CI resolution
-(and `path` overrides are forbidden, see the release order below). **Tag argonaut
-first, then bump kybernet's manifest and re-resolve.**
+kybernet cannot consume either until they are tagged — a manifest naming an untagged
+version fails CI resolution, and `path` overrides are forbidden. **Tag argonaut and
+sigil, then bump kybernet's manifest and re-resolve**, which closes MEDIUM-4 and
+MEDIUM-8. Do the two in one bump; both are pure additions with the old arities kept.
 
 ## Next
 
-**v1.6.15 — all thirteen MEDIUM findings**, then **v1.6.16 — all seven LOWs**, per the
-plan set at 1.6.14. Both lists, with evidence, are in [roadmap.md](roadmap.md).
-
-Before either: **bump argonaut to 1.13.9** once tagged, which closes HIGH-6 and lets
-MEDIUM-4 (`health_check.type = "http"` blocking `connect(2)`) be fixed in the same
-dep cycle.
+**v1.6.16 — the seven LOW findings**, per the plan set at 1.6.14. Before it: bump
+argonaut to 1.13.10 and sigil to 3.12.11 once tagged, and have `edge_boot.cyr` pass
+the remaining `max_boot_ms` slice into `tpm_read_pcr_timeout` the way the verity
+verify already does.
 
 ## Release order (cross-repo)
 

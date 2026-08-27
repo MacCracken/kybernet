@@ -197,17 +197,35 @@ fn test_pre_exec_hook() {
 fn test_sandbox_from_config_fail_closed() {
     println("--- sandbox_from_config (MEDIUM-1) ---");
 
-    # Empty config: nothing to confine, Ok.
+    # ⚠ AN EMPTY RULE SET FAILS CLOSED. Changed at 1.6.15 (MEDIUM-1); this
+    # assertion previously required Ok, i.e. it ENCODED the fail-open bug.
+    #
+    # `kyb_pre_exec` reads Ok(0) as "applied", so returning Ok here meant a
+    # service whose whole `landlock` block resolved to nothing started with zero
+    # filesystem confinement while the hook reported success. The config parser
+    # now refuses such a block at load time, so this is defence in depth.
     var empty = sandbox_config_new();
-    assert(is_ok(sandbox_from_config(empty)) == 1, "sbx: empty is Ok");
+    assert(is_err_result(sandbox_from_config(empty)) == 1,
+      "sbx: an empty rule set fails CLOSED, never Ok");
 
-    # An FS_NO_ACCESS rule used to `return 0` — a bare non-Result that
-    # aborted the whole loop, so every LATER rule went unapplied and the
-    # caller read 0 as success. Assert it is a Result now.
+    # A rule set whose every entry is FS_NO_ACCESS grants nothing, so it reaches
+    # the same empty-builder state and must fail the same way. (The 1.4.3 defect
+    # here was different: FS_NO_ACCESS used to `return 0` — a bare non-Result
+    # that aborted the whole loop, so every LATER rule went unapplied.)
     var withnone = sandbox_config_new();
     vec_push(sandbox_fs_rules(withnone), filesystem_rule_new("/etc", FS_NO_ACCESS));
-    var r_none = sandbox_from_config(withnone);
-    assert(is_ok(r_none) == 1 || is_err_result(r_none) == 1, "sbx: NO_ACCESS returns a Result");
+    assert(is_err_result(sandbox_from_config(withnone)) == 1,
+      "sbx: an all-NO_ACCESS rule set fails CLOSED");
+
+    # ...but a NO_ACCESS rule alongside a real grant is still fine: the
+    # no-access entry is skipped (a path absent from the ruleset is denied for
+    # every handled access) and the grant is applied.
+    var mixed = sandbox_config_new();
+    vec_push(sandbox_fs_rules(mixed), filesystem_rule_new("/etc", FS_NO_ACCESS));
+    vec_push(sandbox_fs_rules(mixed), filesystem_rule_new("/usr", 1));
+    var r_mixed = sandbox_from_config(mixed);
+    assert(is_ok(r_mixed) == 1 || is_err_result(r_mixed) == 1,
+      "sbx: NO_ACCESS beside a real grant still returns a Result");
 
     # An unrecognised access must fail CLOSED with a real Err, never a bare 0
     # that reads as success.
@@ -633,6 +651,94 @@ fn test_landlock_optional_optin() {
     return 0;
 }
 
+# ⚠ 1.6.15 MEDIUM-3 / MEDIUM-5 / MEDIUM-6. Three separate ways a `security` or
+# `health_check` block could be malformed and STILL start the service — two of
+# them starting it as root, unfiltered, with every signal saying the config
+# loaded cleanly.
+fn test_svc_config_medium_rejections() {
+    println("--- security/health strict rejection (1.6.15) ---");
+
+    # MEDIUM-5: a QUOTED NUMBER is the commonest JSON authoring mistake, and it
+    # silently fell back to "no uid configured" — a service running as root on a
+    # config that asked for 65534. The lenient _cfg_* helpers return the
+    # fallback on a type mismatch, which is right elsewhere and wrong inside
+    # `security`.
+    var q_uid = json_v_parse(_doc2(
+        "{\"services\":[{\"name\":\"b\",\"binary\":\"/bin/b\",",
+        "\"security\":{\"uid\":\"65534\",\"gid\":65534}}]}"));
+    assert_eq(vec_len(svc_defs_from_json(q_uid)), 0, "sec: quoted uid rejected, not defaulted");
+
+    var q_secc = json_v_parse(_doc2(
+        "{\"services\":[{\"name\":\"b\",\"binary\":\"/bin/b\",",
+        "\"security\":{\"seccomp\":true}}]}"));
+    assert_eq(vec_len(svc_defs_from_json(q_secc)), 0, "sec: non-string seccomp rejected");
+
+    var q_nnp = json_v_parse(_doc2(
+        "{\"services\":[{\"name\":\"b\",\"binary\":\"/bin/b\",",
+        "\"security\":{\"no_new_privs\":\"true\"}}]}"));
+    assert_eq(vec_len(svc_defs_from_json(q_nnp)), 0, "sec: quoted no_new_privs rejected");
+
+    # MEDIUM-6: uid without gid is an INCOMPLETE drop — drop_privileges gates
+    # setgid and setgroups on gid > 0, so the service kept GID 0 and PID 1's
+    # group list while kyb_pre_exec reported success.
+    var uid_only = json_v_parse(_doc2(
+        "{\"services\":[{\"name\":\"b\",\"binary\":\"/bin/b\",",
+        "\"security\":{\"uid\":65534}}]}"));
+    assert_eq(vec_len(svc_defs_from_json(uid_only)), 0, "sec: uid without gid rejected");
+
+    var both_ids = json_v_parse(_doc2(
+        "{\"services\":[{\"name\":\"b\",\"binary\":\"/bin/b\",",
+        "\"security\":{\"uid\":65534,\"gid\":65534}}]}"));
+    assert_eq(vec_len(svc_defs_from_json(both_ids)), 1, "sec: uid AND gid accepted");
+
+    # A gid alone is a complete request — it changes group identity and nothing
+    # about it is half-done — so it must still be accepted.
+    var gid_only = json_v_parse(_doc2(
+        "{\"services\":[{\"name\":\"b\",\"binary\":\"/bin/b\",",
+        "\"security\":{\"gid\":65534}}]}"));
+    assert_eq(vec_len(svc_defs_from_json(gid_only)), 1, "sec: gid alone accepted");
+
+    # MEDIUM-3: these integers derive a SIGKILL deadline
+    # (interval_ms * retries + timeout_ms) and were unvalidated.
+    var r0 = json_v_parse(_doc2(
+        "{\"services\":[{\"name\":\"b\",\"binary\":\"/bin/b\",\"health_check\":{",
+        "\"type\":\"process-alive\",\"interval_ms\":10000,\"timeout_ms\":2000,\"retries\":0}}]}"));
+    assert_eq(vec_len(svc_defs_from_json(r0)), 0, "hc: retries 0 rejected (2s deadline)");
+
+    var rneg = json_v_parse(_doc2(
+        "{\"services\":[{\"name\":\"b\",\"binary\":\"/bin/b\",\"health_check\":{",
+        "\"type\":\"process-alive\",\"interval_ms\":10000,\"timeout_ms\":2000,\"retries\":-1}}]}"));
+    assert_eq(vec_len(svc_defs_from_json(rneg)), 0, "hc: negative retries rejected");
+
+    # A negative timeout reaches poll(2), which reads it as INFINITE — one
+    # config integer stalling PID 1's reactor.
+    var tneg = json_v_parse(_doc3(
+        "{\"services\":[{\"name\":\"b\",\"binary\":\"/bin/b\",\"health_check\":{",
+        "\"type\":\"tcp\",\"target\":\"127.0.0.1\",\"port\":9,",
+        "\"interval_ms\":10000,\"timeout_ms\":-1,\"retries\":3}}]}"));
+    assert_eq(vec_len(svc_defs_from_json(tneg)), 0, "hc: negative timeout_ms rejected");
+
+    var tbig = json_v_parse(_doc2(
+        "{\"services\":[{\"name\":\"b\",\"binary\":\"/bin/b\",\"health_check\":{",
+        "\"type\":\"process-alive\",\"interval_ms\":5000,\"timeout_ms\":9000,\"retries\":3}}]}"));
+    assert_eq(vec_len(svc_defs_from_json(tbig)), 0, "hc: timeout_ms above interval_ms rejected");
+
+    var pbad = json_v_parse(_doc3(
+        "{\"services\":[{\"name\":\"b\",\"binary\":\"/bin/b\",\"health_check\":{",
+        "\"type\":\"tcp\",\"target\":\"127.0.0.1\",\"port\":999999,",
+        "\"interval_ms\":10000,\"timeout_ms\":2000,\"retries\":3}}]}"));
+    assert_eq(vec_len(svc_defs_from_json(pbad)), 0, "hc: port above 65535 rejected");
+
+    # The harness's own kyb-health values must still parse, or the fixture that
+    # found argonaut's watchdog SIGSEGV at 1.6.1 would stop running.
+    var ok_hc = json_v_parse(_doc3(
+        "{\"services\":[{\"name\":\"b\",\"binary\":\"/bin/b\",\"health_check\":{",
+        "\"type\":\"tcp\",\"target\":\"127.0.0.1\",\"port\":9,",
+        "\"interval_ms\":1000,\"timeout_ms\":200,\"retries\":1}}]}"));
+    assert_eq(vec_len(svc_defs_from_json(ok_hc)), 1, "hc: the shipped fixture values still parse");
+    return 0;
+}
+
 fn test_security_profile_defaults_and_rejection() {
     println("--- security profile rejection (1.5.2) ---");
 
@@ -677,6 +783,30 @@ fn test_security_profile_defaults_and_rejection() {
         "{\"services\":[{\"name\":\"b\",\"binary\":\"/bin/b\",",
         "\"security\":{\"seccomp\":\"paranoid\"}}]}"));
     assert_eq(vec_len(svc_defs_from_json(badsec)), 0, "sec: unknown seccomp profile rejected");
+
+    # ⚠ A LANDLOCK BLOCK THAT GRANTS NOTHING IS REJECTED. 1.6.15 MEDIUM-1.
+    #
+    # Both spellings produced a service with NO ruleset and `Ok(0)` "applied",
+    # so the operator's filesystem policy was absent rather than weak, and
+    # kyb_pre_exec reported success. Note the asymmetry that makes it an easy
+    # mistake, asserted directly above: `"capabilities": []` means drop
+    # EVERYTHING, while `"landlock": []` was being read as restrict NOTHING.
+    var ll_empty = json_v_parse(_doc2(
+        "{\"services\":[{\"name\":\"b\",\"binary\":\"/bin/b\",",
+        "\"security\":{\"landlock\":[]}}]}"));
+    assert_eq(vec_len(svc_defs_from_json(ll_empty)), 0, "sec: empty landlock list rejected");
+
+    var ll_none = json_v_parse(_doc2(
+        "{\"services\":[{\"name\":\"b\",\"binary\":\"/bin/b\",\"security\":{",
+        "\"landlock\":[{\"path\":\"/etc\",\"access\":\"none\"}]}}]}"));
+    assert_eq(vec_len(svc_defs_from_json(ll_none)), 0, "sec: all-none landlock rejected");
+
+    # ...but "none" beside a real grant is legitimate — it documents a path the
+    # operator deliberately withholds, and the block still confines.
+    var ll_mixed = json_v_parse(_doc2(
+        "{\"services\":[{\"name\":\"b\",\"binary\":\"/bin/b\",\"security\":{",
+        "\"landlock\":[{\"path\":\"/etc\",\"access\":\"none\"},{\"path\":\"/usr\",\"access\":\"read-exec\"}]}}]}"));
+    assert_eq(vec_len(svc_defs_from_json(ll_mixed)), 1, "sec: none beside a real grant is accepted");
 
     var nopath = json_v_parse(_doc2(
         "{\"services\":[{\"name\":\"b\",\"binary\":\"/bin/b\",",
@@ -2833,6 +2963,7 @@ fn main() {
     test_required_stage_failure_propagates();
     test_security_profile_parse();
     test_security_profile_defaults_and_rejection();
+    test_svc_config_medium_rejections();
     test_landlock_optional_optin();
     test_capability_numbers_are_kernel();
     test_cgroup_controller_probe();

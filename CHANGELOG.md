@@ -7,6 +7,164 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.6.15] — 2026-08-27
+
+**All ten deferred MEDIUM findings from the 2026-08-26 P(-1) audit.** Six land in
+kybernet, two in deps that are written and tested but **not yet tagged**, one was
+closed by filing upstream, and one is **partial and deliberately still open** —
+the real fix breaks a contract libro's own suite asserts. Suite 702 → 718
+assertions. Harness 66 properties. argonaut 1.13.8 → **1.13.9**, which closes
+HIGH-6 from the previous release.
+
+### Fixed — MEDIUM-1: a `landlock` block that grants nothing confined nothing
+
+`"landlock": []`, or a block whose every rule is `"access": "none"`, produced a
+service with **no ruleset at all** and `Ok(0)` "applied" — the operator's
+filesystem policy was not weaker than intended, it was absent, and `kyb_pre_exec`
+reported success. Note the asymmetry that makes it an easy mistake:
+`"capabilities": []` means drop **everything**, the most restrictive reading,
+while `"landlock": []` was being read as restrict **nothing**.
+
+Refused at load with a readable reason rather than "fixed" by installing an empty
+ruleset — a ruleset with zero PATH_BENEATH rules denies FS_EXECUTE beneath every
+path, so the service could not even `execve` and the operator would get an
+unexplained exit 126 from the one process that cannot tell them why. Rule 19: a
+typo must be a config error you can read. `sandbox_from_config` additionally
+fails **closed** (`Err`, not `Ok(0)`) if an empty rule set ever reaches it —
+checked on the BUILDER as well as the config, because an all-`none` block has a
+non-empty config array and still yields an empty builder. Not "install a deny-all
+ruleset": `sandbox_apply` restricts the **calling** process irreversibly and is
+reachable from `src/test.cyr`, which would confine the test binary mid-run.
+
+### Fixed — MEDIUM-2: a service name colliding with a built-in vanished silently
+
+`argonaut_init_new` registers `default_services(mode)` with an unconditional
+`map_set` and only then adds config services, guarded by `map_has == 0`. So a
+config entry named `daimon` lost to the built-in and was dropped with **no
+diagnostic**: kybernet printed `services parsed: 1`, started a service that was
+not the one in the config, and discarded the operator's binary, args, restart
+policy, cgroup limits and entire `security` block in silence.
+
+kybernet cannot make the override *work* from here — the precedence is
+argonaut's — so it refuses to be silent instead: the collision is logged to
+console and dmesg naming the service, and `services parsed: N` now counts only
+definitions that actually reach the registry. Inverting the precedence so an
+explicit config beats a built-in is filed for argonaut.
+
+### Fixed — MEDIUM-3: unvalidated health-check integers drove a SIGKILL
+
+argonaut sizes the watchdog deadline as `interval_ms * retries + timeout_ms`. So
+`"retries": 0` — a plausible spelling of "do not retry" — collapsed the deadline
+to `timeout_ms` (2 s by default) against a `last_hc` refreshed at best every
+`interval_ms`, and `"retries": -1` produced a **negative** deadline that fires on
+the first watchdog tick after STATE_RUNNING, always. Either way PID 1 SIGKILLs a
+healthy service, restart-queues it, and kills it again — a permanent flap from a
+config integer that reads as reasonable, with the log saying only
+`watchdog killed: <name>` and never why. A negative `timeout_ms` additionally
+reaches `poll(2)`, which reads it as **infinite**.
+
+Bounded and refused, never clamped: `1000 <= interval_ms <= 3600000`,
+`1 <= timeout_ms <= interval_ms`, `1 <= retries <= 10`, `0 <= port <= 65535`, and
+the derived deadline itself capped. The shipped `kyb-health` fixture's values
+(1000/200/1) are asserted to still parse, so the fixture that found argonaut's
+watchdog SIGSEGV at 1.6.1 keeps running.
+
+### Fixed — MEDIUM-5: a quoted number in `security` started the service as root
+
+The lenient `_cfg_*` helpers return the **fallback** on a type mismatch, which is
+right elsewhere and wrong inside `security`. `"uid": "65534"` instead of
+`"uid": 65534` — the commonest JSON authoring mistake — silently fell back to "no
+uid configured", and `"seccomp": true` to no profile. The operator got a service
+running as **root** with the full capability set and no filter, and every
+observable signal said the config had loaded cleanly.
+
+Worse, the failure was not uniform: `no_new_privs` and `landlock_optional` fall
+back to their **restrictive** defaults while uid/gid/seccomp fell back to
+permissive ones, so the direction of the mistake depended on which key you
+fat-fingered. New strict accessors distinguish absent from wrong-typed and refuse
+the service, which is the contract this module already documented and already
+honoured for `limits`.
+
+### Fixed — MEDIUM-6: `"uid": 65534` alone left the service as group root
+
+`drop_privileges` gates **both** `setgroups` and `setgid` on `gid > 0`, so a
+uid-only drop left real, effective, saved-set and fs GID all 0 — group-class
+access to every root-group file retained, files created group-root — while
+`kyb_pre_exec` returned 0 and logged nothing. The shipped fixture could not see
+it: `kyb-nonroot` sets uid AND gid, so the one uid path with a fixture was the
+one that works.
+
+Refused at load (defaulting the gid to the uid would be a guess about identity,
+and this parser already refuses to guess about identity). As defence in depth for
+the callers that do not go through that parser, `setgroups` is now gated on
+**either** id being dropped.
+
+### Fixed — MEDIUM-7: require_auth with no credential was an unrecoverable halt
+
+`emergency_require_auth: true` with the hash omitted — or one `emerg_cred_usable`
+rejects — made PID 1 print `Password: `, wait up to 120 s, deny whatever was
+typed, and enter `while (1 == 1) { sys_pause(); }` **permanently**, with every
+signal blocked and PID 1 unkillable. The board stays dead across reboots until
+someone reaches the bootloader, over a config typo, having prompted for a
+password nothing could ever have matched.
+
+The guard existed at one of the three `drop_to_emergency` call sites, so which
+behaviour you got depended on how you arrived. Hoisted into `drop_to_emergency`
+itself: suppress the shell, say why, return — callers that must refuse to
+continue power off on their own afterwards. `load_config` cross-checks the pair
+and says so on console and dmesg, which is where a typo is still cheap to fix.
+
+### Consumed — argonaut 1.13.9, closing HIGH-6
+
+`health_check.type = "command"` no longer blocks PID 1's reactor in an unbounded
+`waitpid`, honours its `timeout_ms`, resolves bare names against `$PATH`, and can
+finally run a command **with an argument** at all.
+
+### Fixed in deps, awaiting tags
+
+- **MEDIUM-4 → argonaut 1.13.10.** The HTTP health check's `connect(2)` was
+  blocking and unbounded while its sibling `tcp_connect_ip` was not — ~127 s of
+  frozen reactor per tick against a blackholed target. Both arms now share one
+  `connect_bounded`. Measured: returns at its 200 ms bound.
+- **MEDIUM-8 → sigil 3.12.11.** `tpm2_pcrread` ran through the stdlib's
+  `exec_capture`, which is unbounded **and** discards the child's exit status —
+  so a wedged TPM hung PID 1 at phase 6c forever, and a missing tool returned
+  `Ok(0)`, which sigil's parser turns into a zero-filled PCR bank: an attestation
+  pass from a tool that never ran. New bounded, status-checked
+  `agnosys_run_capture_timeout`. ⚠ The PCR read runs **before** the dm-verity
+  verify, so an attacker who has already tampered with the rootfs could plant a
+  `tpm2_pcrread` that sleeps and wedge PID 1 before verification ever executes.
+
+⚠ **kybernet still pins argonaut 1.13.9 and sigil 3.12.10** — those tags do not
+exist yet and a manifest naming an untagged version fails CI resolution. Bump
+after they are tagged; both findings stay open in the roadmap until then.
+
+### Closed by filing — MEDIUM-9
+
+The aarch64 `sys_pause()` → `flock` defect is the same cyrius codegen bug as
+CRITICAL-1 and has no consumer-side workaround. cyrius is off-limits to this
+repo; filing an issue is the only permitted action, and that was done on
+2026-08-27 with a runnable repro. Not fixable here, and now recorded where the
+fix has to happen.
+
+### ⚠ Partial and still open — MEDIUM-10
+
+The audit-chain allocation is **not** closed, and this is said plainly because
+the finding's own complaint was that it had been recorded as closed in four
+documents while still being there.
+
+Measured: a streaming append costs **224 bytes**; argonaut 1.13.10 caches the two
+constant Strs and brings it to **192**. The remaining 176 is inside libro's
+`entry_new`. The obvious fix — have a streaming chain reuse one scratch entry,
+since it retains nothing — was implemented and **reverted**: `chain_append`
+returns the entry to its caller, and libro's own suite asserts that two returned
+entries are independent, so four tests go red. That is a real contract, not a
+test artifact. Closing it needs an opt-in libro API (an append returning the head
+hash rather than an entry) and a minor release with consumer review. libro is
+therefore **unchanged at 2.8.12**.
+
+---
+
 ## [1.6.14] — 2026-08-27
 
 ⚠ **This release also carries everything in [1.6.13], which was tagged but never

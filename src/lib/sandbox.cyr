@@ -277,7 +277,21 @@ fn sandbox_apply(builder) {
 fn sandbox_from_config(config) {
     var fs_rules = sandbox_fs_rules(config);
     var rlen = vec_len(fs_rules);
-    if (rlen == 0) { return Ok(0); }
+    # ⚠ FAIL CLOSED, NOT Ok(0). 1.6.15 MEDIUM-1.
+    #
+    # This returned Ok(0) for an empty rule set, which `kyb_pre_exec` reads as
+    # "applied" — so a service whose whole `landlock` block resolved to nothing
+    # started with ZERO filesystem confinement while the hook reported success.
+    # `svc_config.cyr` now refuses such a block at LOAD time with a readable
+    # reason, so this should be unreachable from the config path; it is Err
+    # rather than Ok so that if anything ever does reach it, the service refuses
+    # to start instead of running unconfined.
+    #
+    # Err, and NOT "install a deny-all ruleset": `sandbox_apply` restricts the
+    # CALLING process irreversibly, and this function is reachable from
+    # src/test.cyr — installing a real ruleset there would confine the test
+    # binary for the rest of its run.
+    if (rlen == 0) { return Err(EINVAL); }
 
     var b = sandbox_builder_new();
     for (var ri = 0; ri < rlen; ri = ri + 1) {
@@ -311,6 +325,15 @@ fn sandbox_from_config(config) {
             return Err(EINVAL);
         }
     }
+    # ⚠ AND CHECK THE BUILDER, NOT JUST THE CONFIG. 1.6.15 MEDIUM-1.
+    #
+    # The `rlen == 0` guard above only catches a literally empty `landlock`
+    # array. A block whose every rule is `"access": "none"` has rlen > 0 and
+    # still produces an EMPTY BUILDER, because access 0 grants nothing and is
+    # skipped — so it reached `sandbox_apply` with zero rules and got Ok(0)
+    # "applied" back, which is the same unconfined service by a different route.
+    # Both spellings of "grants nothing" now fail closed here.
+    if (sandbox_rule_count(b) == 0) { return Err(EINVAL); }
     return sandbox_apply(b);
 }
 

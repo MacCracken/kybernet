@@ -304,6 +304,20 @@ fn _load_config_inner(want_services) {
 
     if (g_emerg_require_auth == 1) {
         klog("config: emergency shell requires authentication");
+        # ⚠ CROSS-CHECK THE PAIR AT LOAD, WHERE A TYPO IS STILL CHEAP.
+        # 1.6.15 MEDIUM-7.
+        #
+        # `emergency_require_auth: true` with no usable credential is not a
+        # stricter configuration, it is an unusable one: nothing can ever
+        # authenticate. Said plainly here — on console AND dmesg, naming the
+        # consequence — rather than discovered at phase 6c on a board that has
+        # already failed a boot step. `drop_to_emergency` suppresses the shell
+        # in that state; this is where it can still be fixed with one edit.
+        if (g_emerg_hash == 0) {
+            klog("config: WARNING require_auth is set but no usable emergency_password_hash");
+            klog("config: the emergency shell will be SUPPRESSED - no password can authenticate");
+            kmsg("kybernet: config: emergency_require_auth set with no usable credential");
+        }
     }
 
     # verify_boot gates the whole edge layer. argonaut defaults it to 1;
@@ -338,9 +352,50 @@ fn _load_config_inner(want_services) {
     var scount = vec_len(svcs);
     _cfg_saw_services = scount;
     if (scount > 0) {
+        # ⚠ A NAME THAT COLLIDES WITH A BUILT-IN IS ANNOUNCED, NOT SWALLOWED.
+        # 1.6.15 MEDIUM-2.
+        #
+        # `argonaut_init_new` registers `default_services(mode)` with an
+        # unconditional map_set and only then adds config services, guarded by
+        # `if (map_has(name) == 0)` (lib/argonaut_init.cyr:30-43). So a config
+        # entry named `daimon` — or any of the other built-ins — loses to the
+        # default and is dropped with no diagnostic at all: kybernet printed
+        # `services parsed: 1`, started a service that was NOT the one in the
+        # config, and discarded the operator's binary, args, restart policy,
+        # cgroup limits and whole `security` block in silence.
+        #
+        # It is not a privilege escalation — the built-in was never confined, so
+        # nothing gains privilege over the pre-existing baseline. What is lost is
+        # the operator's intended hardening and their definition, and their
+        # binary never executes.
+        #
+        # kybernet cannot make the override WORK from here; the precedence is
+        # argonaut's, and inverting it (explicit config beats built-in, the
+        # conventional reading) is filed for a later argonaut release. What it
+        # can do is refuse to be silent, and keep `services parsed` honest by
+        # counting only definitions that will actually reach the registry.
+        var defaults = default_services(config_boot_mode(cfg));
         var dst = config_services(cfg);
-        for (var i = 0; i < scount; i = i + 1) { vec_push(dst, vec_get(svcs, i)); }
-        klog2("config: services parsed: ", _u64_str(scount));
+        var registered = 0;
+        for (var i = 0; i < scount; i = i + 1) {
+            var sd = vec_get(svcs, i);
+            var nm = str_data(svc_def_name(sd));
+            var clash = 0;
+            for (var d = 0; d < vec_len(defaults); d = d + 1) {
+                if (streq(str_data(svc_def_name(vec_get(defaults, d))), nm) == 1) {
+                    clash = 1;
+                    break;
+                }
+            }
+            if (clash == 1) {
+                klog2("config: service collides with a built-in, definition IGNORED: ", nm);
+                kmsg("kybernet: config: a service name collides with a built-in; the built-in wins");
+            } else {
+                vec_push(dst, sd);
+                registered = registered + 1;
+            }
+        }
+        klog2("config: services parsed: ", _u64_str(registered));
     }
 
     return cfg;
@@ -527,6 +582,32 @@ fn drop_to_emergency() {
 
     if (g_emerg_require_auth == 1) {
         klog("emergency shell: authentication required");
+        # ⚠ REQUIRE_AUTH WITH NO USABLE CREDENTIAL IS A DEAD BOARD. 1.6.15
+        # MEDIUM-7.
+        #
+        # `emergency_require_auth: true` with the hash omitted — or one
+        # `emerg_cred_usable` rejects, such as a digest one character short or a
+        # PHC record from another tool — made PID 1 print `Password: `, wait up
+        # to 120 s, deny whatever was typed (a timeout returns -1, which is
+        # neither >=0 nor -2, so `granted` stays 0), and then enter
+        # `while (1 == 1) { sys_pause(); }` permanently, with every signal
+        # blocked and PID 1 unkillable. The board stays dead across reboots
+        # until someone reaches the bootloader — over a config typo, and having
+        # prompted for a password that nothing could ever have matched.
+        #
+        # The guard for this existed at the phase-6c call site and at neither of
+        # the other two, so which behaviour you got depended on how you arrived.
+        # Hoisted here so all three share it: suppress the shell, say why, and
+        # RETURN. Callers that must refuse to continue (phase 6c) power off on
+        # their own after this returns; callers that can continue, continue.
+        # The load-time cross-check in load_config is the other half — that is
+        # where a typo is still cheap to fix.
+        if (g_emerg_hash == 0) {
+            klog("emergency shell: authentication required but NO credential configured - shell suppressed");
+            kmsg("kybernet: emergency auth required with no usable credential; shell suppressed");
+            if (con >= 0) { sys_close(con); }
+            return 0;
+        }
         if (con < 0) {
             # No console to prompt on. Denying is the only honest answer —
             # but do NOT reboot into the same condition, which is the loop
