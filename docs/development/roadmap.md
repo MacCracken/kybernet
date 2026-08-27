@@ -3,10 +3,15 @@
 **Current: v1.6.12** — [CHANGELOG.md](../../CHANGELOG.md) is the record of what each
 release actually did. This file carries only what is **not** done.
 
-Everything below came out of a deliberate sweep of the tree after 1.5.9 shipped;
-v1.6.0 and v1.6.1 closed the first two sections — twenty-two items. Every item names the file that
-proves it. Where a claim was verified by running
-something rather than by reading, it says so.
+Everything below came out of a deliberate sweep of the tree after 1.5.9 shipped. That
+sweep opened **38** items (counted at the `1.6.0` tag); **17 remain** — thirteen releases
+of attrition, and what is left is listed here and nowhere else. Both numbers are
+`grep -c '^- \[ \]'` against this file at the relevant tag, not an estimate.
+
+Every item names the file that proves it. Where a claim was verified by running
+something rather than by reading, it says so — and where it was verified by *injecting
+the defect and watching the gate go red*, it says that too, because this project has
+repeatedly found that a gate nobody has seen fail is a gate nobody should trust.
 
 **Pins:** `v1.6.x` is scoped work with a clear finish line. `v1.x.x` is real but needs
 a design decision or is too large to date. The last two sections are blocked on
@@ -14,6 +19,10 @@ something outside this repo.
 
 `cyrius lint` reports **0 untracked deferrals and 0 warnings** across the tree, and as
 of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into fiction.
+
+**Gate counts at v1.6.12** (a next agent must not let these shrink; each is enforced):
+676 test assertions · 62 harness properties · 56 benchmarks. See
+[state.md](state.md) for the full current-state handoff.
 
 ---
 
@@ -192,9 +201,10 @@ Moved into the v1.6.1 gate line. Recording why here so the claim is not re-made:
       `_read_line_fd`'s `sleep_ms` poll loop. And `fl_alloc`'s unchecked `_fl_mmap`
       return in two places (`freelist.cyr:404-406`, `:231-241`), which is why sigil's
       own `if (mem == 0)` guards are dead code.
-      (The socket-wrapper filing is **closed** — `sys_socket`/`sys_bind`/`sys_recvfrom`
-      have landed, so `notify.cyr`'s hand-rolled table moved to v1.6.2 as deletable
-      code rather than an upstream wait.)
+      (The socket-wrapper filing is **closed and the follow-through has SHIPPED** —
+      `sys_socket`/`sys_bind`/`sys_recvfrom` landed upstream and `notify.cyr`'s
+      hand-rolled per-arch `enum SockSysNr` was deleted at **v1.6.3**, not v1.6.2 as
+      this line used to predict. `notify.cyr:8` records the retirement.)
 - [ ] **Control socket for agnoshi runtime commands** — a separate transport surface,
       pinned until an agnoshi consumer drives the protocol shape.
 - [ ] **Binary signing on release** — pinned until libro signing/timestamping is
@@ -206,6 +216,55 @@ Moved into the v1.6.1 gate line. Recording why here so the claim is not re-made:
 
 One line per release. Detail lives in [CHANGELOG.md](../../CHANGELOG.md).
 
+- **v1.6.12** — argonaut 1.13.8 redep: three things unobservable, unschedulable or
+  unbounded in the long-lived path. The orphan-reap count is logged, so the `kyb-orphan`
+  fixture is **asserted** after eleven releases documented "NOT ASSERTED" — argonaut
+  discarded the count and kybernet had no way to ask, so reparented children were reaped
+  correctly and invisibly. Health probes are now scheduled per service (`interval_ms` was
+  parsed, stored, exposed, and read by nothing), so kybernet's poll timer is a tick
+  resolution rather than the cadence every service got. The in-memory audit chain streams
+  by default — it retained 240 bytes per record, ~0.68 MB/day/service in the one arena PID 1
+  never resets; `chain_with_capacity` was checked and does NOT free (rotation archives into
+  `overflow`), while streaming keeps linkage byte-identical. Also: the harness had **never
+  built what it tests**, so "edit src/, run boot-test.sh" graded the previous binary — found
+  by an inject-the-defect run that returned 62 OK / 0 FAIL when it had to fail. 676 tests,
+  62 harness properties.
+- **v1.6.11** — Deleted a benchmark of dead code without weakening the gate that forbids
+  it. `sandbox_from_ruleset` and `_ll_access_to_kernel` had no production caller; the latter
+  had justified standing rule 9 for seven releases as "the per-service Landlock path where a
+  miscompile is a PID-1 crash" while its only caller chain terminated in `bench.cyr`. The
+  bench gate fails on a shrinking suite, so the removal is *declared* (`BENCH_REMOVED=1`),
+  verified to still fail when undeclared. 57 → 56 benchmarks.
+- **v1.6.10** — `MAINPID=` honoured behind two independent checks, and the difference
+  between authentication and authorisation: `SCM_CREDENTIALS` proves who *sent* a datagram,
+  not which pid it may speak for, so a forged MAINPID is refused on cgroup membership.
+  Reject reasons are counted separately — a single "rejected: N" cannot distinguish
+  "SO_PASSCRED is broken" from "the sender was not a live service". 58 → 61 properties.
+- **v1.6.9** — Services can run as something other than root. The entire uid/gid half of
+  `privdrop.cyr` was unreachable — `drop_privileges` had no caller. Ordering is
+  load-bearing: the drop must precede seccomp, because none of
+  setuid/setgid/setgroups/setresuid are in the `basic` allowlist. 56 → 58 properties.
+- **v1.6.8** — sd_notify READY and WATCHDOG *honoured*, not merely observed. 1.6.3 built
+  the whole substrate and then dropped every message on the floor. argonaut 1.13.5 → 1.13.7.
+- **v1.6.7** — `health_check.interval_ms` was parsed, stored, and never reached the timer:
+  the reactor polled on a hardcoded 30 s, so a service asking for 5 s got 30 — and argonaut
+  sizes the watchdog deadline from the service's OWN interval, so a mis-sized watchdog can
+  kill a healthy service. 667 → 676 assertions.
+- **v1.6.6** — The last confinement mechanism with no fixture, and a gate that had been
+  passing by luck. Picks up argonaut 1.13.4's two per-tick arena leaks. 53 → 55 properties.
+- **v1.6.5** — A per-SIGCHLD arena leak needing no socket, no credentials and no config:
+  `reap_zombies` allocated 152 bytes on **every** SIGCHLD, idle or not. Measured 304,000
+  bytes over 2000 idle calls, now 152 total.
+- **v1.6.4** — Config keys parsed and never consulted, and code with no callers.
+  `log_to_console` had exactly two readers in the tree: its own definition and the copy in
+  reload. 660 → 667 assertions.
+- **v1.6.3** — sd_notify was received, classified, logged and **discarded** — and leaked
+  doing it: `notify_read` allocated 512 bytes per datagram on the reactor hot path, a
+  root-triggerable memory-exhaustion DoS against PID 1. Retired the hand-rolled per-arch
+  socket syscall table. 632 → 660 assertions.
+- **v1.6.2** — Code that does nothing, and docs that say it does. Boot phase 6b was a
+  provable no-op carrying three defects; argonaut's import list dropped 13 → 12 modules
+  (`tmpfiles.cyr` had no call site in the link set).
 - **v1.6.1** — Gates that could not fail, and the kernel panic the first new one found.
   A fixture with a failing health check made PID 1 SIGSEGV on its first tick: argonaut's
   `init_enforce_watchdog` passed a cstr to `proc_table_pid`, which takes a boxed `Str` —

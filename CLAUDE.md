@@ -69,7 +69,9 @@ kybernet/
 │   ├── architecture/overview.md
 │   ├── audit/             # P(-1) audit reports (1.1.5+)
 │   ├── benchmarks-rust-v-cyrius.md  # historical v1.0.0 snapshot, not maintained
-│   └── development/roadmap.md
+│   └── development/
+│       ├── roadmap.md    # what is NOT done; open items only
+│       └── state.md      # what IS true right now (volatile) - START HERE on handoff
 ├── lib/                   # gitignored; populated by `cyrius deps`
 └── build/                 # Generated binaries (gitignored)
 ```
