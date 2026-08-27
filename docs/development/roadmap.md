@@ -17,7 +17,38 @@ of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into
 
 ---
 
-## v1.6.12 — code that does nothing, and docs that say it does
+## v1.6.13 — the P(-1) audit
+
+- [ ] **A P(-1) audit.** The last was cut at 1.4.2, **ten releases ago**. Everything that
+      is now the attack surface — `edge_boot`'s exec path, `emergency_auth`'s KDF, the
+      security/limits parsers, `restart_queue`, `termios`, and the live
+      seccomp/Landlock/capset path — landed after it. Both prior audits found CRITICALs
+      every gate was blind to.
+- [ ] **`cyrius deps --verify` cannot catch a STALE COMMITTED LOCK, because CI resolves
+      first.** Found while cutting 1.6.12, and it very nearly shipped. The `Resolve
+      dependencies` step runs `cyrius deps`, which **rewrites `cyrius.lock` from disk**;
+      the next step then runs `cyrius deps --verify` against the file it just wrote. That
+      is tautological — it verifies the resolve against itself and reports "70 verified,
+      0 failed" no matter what was committed. Concretely: 1.6.12 was committed with
+      `cyrius.cyml` at argonaut `tag = "1.13.8"` and a `cyrius.lock` still pinning
+      1.13.7's commit (`7204b60`), because the tag did not exist yet at commit time. CI
+      would have gone green on that tree. This is the same shape CLAUDE.md already
+      documents for `path` overrides ("the lock is written from disk, so `deps --verify`
+      can't catch it") — but the `path` note frames it as a hazard of that one feature,
+      when it is a property of the STEP ORDER and applies to every release. A gate that
+      would catch it: stash the committed lock, resolve, and diff. **All of this was
+      run, not reasoned** — against the real stale tree the resolve rewrote
+      `7204b60` to `8e98429` in place and verify still said "70 verified, 0 failed".
+      ⚠ **A naive `diff` is a FALSE POSITIVE and must not be shipped:** `cyrius deps`
+      does not emit the lock's hash lines in a stable ORDER, so a byte diff reports
+      drift on a perfectly correct lock. Compare sorted —
+      `diff -q <(sort "$SAVED") <(sort cyrius.lock)` — which was verified to pass on the
+      correct lock (twice, for stability), fail on the stale one, and not false-positive.
+      Left for 1.6.13 rather than folded into 1.6.12, whose scope is the redep itself.
+
+---
+
+## v1.6.x — code that does nothing, and docs that say it does
 
 - [ ] **Port `agnos-init.sh`'s `setup_directories()` to a kybernet oneshot service.**
       Replaces the deleted phase 6b (1.6.2), and it is the *real* form of the need
@@ -82,11 +113,6 @@ of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into
       agnosticos' config. Note the ordering constraint 1.6.9 established: a service
       with `"seccomp": "basic"` AND a uid works only because the drop precedes the
       filter, and none of setuid/setgid/setgroups/setresuid are in that allowlist.
-- [ ] **A P(-1) audit.** The last was cut at 1.4.2, **ten releases ago**. Everything that
-      is now the attack surface — `edge_boot`'s exec path, `emergency_auth`'s KDF, the
-      security/limits parsers, `restart_queue`, `termios`, and the live
-      seccomp/Landlock/capset path — landed after it. Both prior audits found CRITICALs
-      every gate was blind to.
 - [ ] **Landlock is pinned to ABI 1.** `_landlock_handled_mask()` covers bits 0-12, so
       `REFER` (ABI 2), `TRUNCATE` (ABI 3) and `IOCTL_DEV` (ABI 5) are unrestricted for
       every sandboxed service. The 8-byte `landlock_ruleset_attr` pins ABI 1
