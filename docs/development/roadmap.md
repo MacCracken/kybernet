@@ -1,6 +1,6 @@
 # Kybernet Roadmap
 
-**Current: v1.6.1** — [CHANGELOG.md](../../CHANGELOG.md) is the record of what each
+**Current: v1.6.12** — [CHANGELOG.md](../../CHANGELOG.md) is the record of what each
 release actually did. This file carries only what is **not** done.
 
 Everything below came out of a deliberate sweep of the tree after 1.5.9 shipped;
@@ -17,7 +17,7 @@ of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into
 
 ---
 
-## v1.6.11 — code that does nothing, and docs that say it does
+## v1.6.12 — code that does nothing, and docs that say it does
 
 - [ ] **Port `agnos-init.sh`'s `setup_directories()` to a kybernet oneshot service.**
       Replaces the deleted phase 6b (1.6.2), and it is the *real* form of the need
@@ -47,27 +47,6 @@ of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into
           `default_services(BOOT_DESKTOP)`, so making it depend on a new `agnos-init`
           needs either an argonaut change or a config that replaces the default set.
 
-- [ ] **Log the orphan-reap count and assert it (kybernet half).** argonaut 1.13.5 now
-      returns the reaped pids (`proc_table_reap_orphans_into`) and reconciles the service
-      table against them, so the information exists. kybernet still discards it:
-      `init_reap_services`' return is ignored, so a service leaking children produces no
-      evidence anywhere. Needs a consumer bump to 1.13.5, a klog line, and then the
-      `kyb-orphan` fixture (1.6.1) becomes assertable instead of merely exercised.
-- [ ] **Per-service health scheduling (argonaut).** 1.6.7 made the poll timer take the
-      SMALLEST configured `interval_ms` so nobody is polled slower than they asked — but
-      `init_poll_health` checks every service with a health_check on each tick, so a
-      service wanting a longer interval is polled more often than it requested. Needs
-      argonaut to accept a due-time filter (or to track `last_hc` per service and skip
-      the not-yet-due ones internally). Over-polling is wasteful rather than wrong, which
-      is why 1.6.7 shipped the floor rather than faking the schedule.
-- [ ] **`audit_log_record` RETAINS 240 bytes per crash event (argonaut).** Found while
-      fixing the arena leaks at 1.6.5 and deliberately left open: unlike the others this is
-      not un-freeable arena, it is live reachable growth — a probe ended with
-      `audit_log_len == 1006`, one entry per event, never trimmed. A crash-looping service
-      appends forever. Trimming an audit chain is a RETENTION-POLICY decision with security
-      implications (an audit log you silently truncate is one an attacker can flush by
-      generating noise), so it needs a deliberate answer: a cap with explicit rotation, a
-      persist-then-trim, or an accepted bound. Not a mechanical fix.
 - [ ] **`is_mounted` is the benchmark that keeps moving, and it is layout-sensitive.**
       Third intervention now. 1.6.1: it scanned the host's REAL mount table and read
       +641% on a CI runner; fixed with a 2 KiB synthetic table. 1.6.8: measured
@@ -103,14 +82,7 @@ of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into
       agnosticos' config. Note the ordering constraint 1.6.9 established: a service
       with `"seccomp": "basic"` AND a uid works only because the drop precedes the
       filter, and none of setuid/setgid/setgroups/setresuid are in that allowlist.
-- [ ] **The audit chain never rotates and is never drained.** Measured, not estimated:
-      **242 arena bytes per record**, `max_capacity` 0 so `_chain_auto_rotate` returns
-      immediately, 2000 records → 2000 retained, 0 rotations. argonaut writes on
-      kybernet's behalf once per health-checked service per tick, so at the shipped 30 s
-      interval that is ~0.68 MB/day/service in the one arena rule 8 says PID 1 never
-      resets. Latent only because no shipped config uses `health_check`; it arms the
-      first time an operator adds one.
-- [ ] **A P(-1) audit.** The last was cut at 1.4.2, seven releases ago. Everything that
+- [ ] **A P(-1) audit.** The last was cut at 1.4.2, **ten releases ago**. Everything that
       is now the attack surface — `edge_boot`'s exec path, `emergency_auth`'s KDF, the
       security/limits parsers, `restart_queue`, `termios`, and the live
       seccomp/Landlock/capset path — landed after it. Both prior audits found CRITICALs

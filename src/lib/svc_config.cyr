@@ -614,25 +614,27 @@ fn svc_apply_security_json(sd, obj) {
     return 1;
 }
 
-# The health-poll interval the configured services actually asked for.
+# The TICK RESOLUTION for health polling — the smallest interval any configured
+# service asked for.
 #
-# ⚠ THIS IS A POLL FLOOR, NOT PER-SERVICE SCHEDULING, AND THE DIFFERENCE IS
-# STATED SO NOBODY READS MORE INTO IT. argonaut's `init_poll_health` checks
-# EVERY service with a health_check on each tick; kybernet cannot ask it for a
-# subset. So the timer is set to the SMALLEST interval any service requested,
-# which means:
-#   - no service is polled more slowly than it asked for (the defect being
-#     fixed: a 5 s service was polled at the hardcoded 30 s), and
-#   - a service that asked for a LONGER interval is polled more often than it
-#     requested. Over-polling a health check is wasteful, not wrong.
-# True per-service scheduling needs argonaut to accept a due-time filter; that
-# is roadmapped rather than faked here.
+# ⚠ WHAT THIS NUMBER MEANS CHANGED AT 1.6.12, AND THE OLD MEANING IS WORTH
+# KNOWING BECAUSE THE FUNCTION BODY DID NOT CHANGE WITH IT. Through argonaut
+# 1.13.7, `init_poll_health` probed EVERY service with a health_check on every
+# tick — `interval_ms` was parsed, stored, exposed via `svc_hc_interval`, and
+# read by nothing on the scheduling path. kybernet could not ask for a subset,
+# so this minimum was the cadence EVERY service got: one asking for 60 s was
+# probed every 5 s because something unrelated wanted 5 s.
 #
-# Why it matters beyond latency: argonaut sizes the runtime watchdog deadline
-# as `interval * retries + timeout` from the service's OWN configured interval.
-# A service polled six times slower than it asked for has a watchdog sized for
-# a cadence it never receives, and can be killed for being late when it is the
-# POLLER that was late.
+# argonaut 1.13.8's `_hc_is_due` filters per service, so the minimum is now only
+# the RESOLUTION at which due-times are evaluated. It still has to be the
+# minimum — a timer slower than the fastest service's interval would starve that
+# service — but a service asking for a longer interval now actually gets it.
+#
+# Why this mattered beyond wasted wakeups: argonaut sizes the runtime watchdog
+# deadline as `interval * retries + timeout` from the service's OWN configured
+# interval. Under the old behaviour a service could be probed at a cadence its
+# watchdog was not sized for, and the failure mode of a mis-sized watchdog in
+# PID 1 is killing a healthy service. That is now consistent by construction.
 #
 # Clamped to [1, 30] seconds: below 1 s the reactor spends its life polling
 # (and the harness bounds wakeups at 500), and 30 s is the historical default

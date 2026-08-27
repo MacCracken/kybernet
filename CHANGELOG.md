@@ -7,6 +7,105 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.6.12] — 2026-08-26
+
+**argonaut 1.13.8 redep — three things that were unobservable, unschedulable or
+unbounded in the long-lived path, plus a gate that could report green for a binary
+it never compiled.** Suite 676 assertions. Harness 61 → 62 assertions.
+argonaut 1.13.7 → 1.13.8.
+
+### Added — the orphan-reap count is logged, and the fixture is finally ASSERTED
+
+`qemu/build-initramfs.sh` has carried a `kyb-orphan` fixture since 1.6.1 —
+`sh -c 'sleep 0.2 & exit 0'`, so the backgrounded child is reparented to PID 1 and
+must be collected by init. Reaping a child it did not start is half of what an init
+exists to do. The gate's comment said **"NOT ASSERTED"** for eleven releases, and the
+reason was real rather than an omission: the count was thrown away **twice**.
+argonaut's `init_reap_services` calls `proc_table_reap_orphans_into()` and discarded
+the return; and because that runs first and reaps to exhaustion, kybernet's own
+`reap_and_log()` found nothing left and stayed silent too. The orphan was reaped
+correctly and completely invisibly, so there was nothing for a gate to look at.
+
+argonaut 1.13.8 added `init_last_orphan_count()`. `handle_sigchld` now reads it
+immediately after the sweep that fills it and logs `reaped orphans: N`, and the
+harness asserts it.
+
+⚠ **The assertion lives in the reactor pass, not the boot pass, which is standing
+rule 41.** `handle_sigchld` is reachable from exactly one place — the event loop's
+`TOKEN_SIGNAL` arm. `kybernet.harness=1` shuts down at phase 9 *before* the reactor
+starts, so under that mode the orphan's SIGCHLD sits queued in the signalfd and is
+never handled; asserting it there would fail confidently for a feature that works.
+
+**Verified to go red on the defect it exists to catch:** stubbing
+`init_last_orphan_count()` to `return 0` — the pre-1.13.8 discard, exactly — gives
+61 OK / 1 FAIL, and the one failure is this assertion.
+
+### Fixed — `qemu/boot-test.sh` could report a green for a binary it never compiled
+
+⚠ **This was found by the injected-defect run above producing 62 OK / 0 FAIL when it
+should have failed**, and it is the more useful half of this release. This script has
+**never** built `build/kybernet`; it stages whatever is already sitting there. So
+"edit source, run `bash qemu/boot-test.sh`" tested the *previous* binary and reported
+a confident pass for code that was never compiled.
+
+That is the one channel the inject-the-defect discipline does not cover, because the
+discipline's own verification step runs through it. CI cannot see it either — the
+workflow builds immediately before invoking the harness — so it is a **dev-box-only**
+false green, which is worse rather than better: the dev box is where iteration
+happens and where a wrong green costs the most.
+
+The script now fails if any `src/**.cyr` or `cyrius.cyml` is newer than the binary,
+naming the offending file and the exact build command. It **fails rather than
+rebuilding**, per standing rule 32: rebuilding here would fork a second build path
+that could silently drift from the documented `CYRIUS_DCE=1` one, and a gate whose
+job is to notice staleness should not also be the thing papering over it.
+
+### Changed — per-service health scheduling is real, so the poll interval means something new
+
+Through argonaut 1.13.7, `init_poll_health` probed **every** service with a health
+check on **every** tick: `interval_ms` was parsed from config, stored on the struct
+and exposed via `svc_hc_interval`, and read by nothing on the scheduling path. kybernet
+could not ask for a subset, which is why 1.6.7 set the poll timer to the *smallest*
+configured interval — a service asking for 60 s was probed every 5 s because something
+unrelated wanted 5 s.
+
+argonaut 1.13.8's `_hc_is_due` filters per service. `health_interval_from_services` is
+unchanged (the minimum is still the right **tick resolution** — a timer slower than the
+fastest service's interval would starve it) but what the number *means* changed, and the
+comment now says so rather than describing a workaround that is no longer in force.
+
+Why this mattered beyond wasted wakeups: argonaut sizes the watchdog deadline as
+`interval * retries + timeout` from the service's **own** configured interval. Under the
+old behaviour a service could be probed at a cadence its watchdog was not sized for, and
+a mis-sized watchdog in PID 1 kills a healthy service. That is now consistent by
+construction.
+
+⚠ A **failing** service is still probed every tick, deliberately: `last_hc` is written
+only when a probe passes, because the watchdog measures `now - last_hc` and must fire
+when checks stop passing. Writing it on failure would silence the watchdog.
+
+### Changed — the in-memory audit chain no longer grows forever (inherited)
+
+argonaut's `config_audit_retain` now defaults to 0, so `argonaut_init_new` builds a
+**streaming** chain. The chain retained a measured **240 bytes per record**, one per
+service start/stop/crash and per health probe — ~0.68 MB/day/service of live, reachable
+growth in the one arena standing rule 8 says PID 1 never resets. kybernet makes zero
+direct `audit_*` calls, so it gets the fix for free and loses nothing it was using.
+
+⚠ Worth recording because it is the trap: **`chain_with_capacity` is not a fix**, and
+argonaut checked rather than assumed. `chain_rotate` archives the entries vec into the
+chain's `overflow` vec — the entries stay referenced, so memory is *moved*, not freed.
+Streaming keeps only the head hash and **linkage is byte-identical**, so `audit_persist`
+deployments (default off) verify exactly as before.
+
+### Roadmap
+
+Closes four items: the orphan-reap count (kybernet half), per-service health scheduling,
+`audit_log_record` retention, and its `v1.x.x` duplicate. `docs/development/roadmap.md`
+carries only what is not done, so they are removed rather than ticked.
+
+---
+
 ## [1.6.11] — 2026-08-26
 
 **Deleting a benchmark of dead code, without weakening the gate that forbids it.**

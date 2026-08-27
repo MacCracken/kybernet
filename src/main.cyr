@@ -691,6 +691,24 @@ fn handle_sigchld() {
 
     # Reap tracked services first
     var reaped = init_reap_services(g_init);
+
+    # ⚠ THIS IS WHERE ORPHANS ARE ACTUALLY COLLECTED, AND UNTIL 1.6.12 THE COUNT
+    # WAS THROWN AWAY TWICE. `init_reap_services` calls
+    # `proc_table_reap_orphans_into()` internally — `waitpid(-1, WNOHANG)` in a
+    # loop — so by the time `reap_and_log()` runs at the bottom of this function
+    # there is nothing left for it to find. argonaut discarded the count
+    # (fixed in 1.13.8's `init_last_orphan_count`) and kybernet had no way to ask,
+    # so a reparented child was reaped correctly and INVISIBLY: `qemu/boot-test.sh`
+    # carried a `kyb-orphan` fixture whose whole property was documented as
+    # "NOT ASSERTED" for eleven releases because nothing observable came out of it.
+    #
+    # Reaping orphans is half of what an init exists to do. It is now logged, which
+    # is what makes it gateable.
+    var orphans = init_last_orphan_count();
+    if (orphans > 0) {
+        klog2("reaped orphans: ", _u64_str(orphans));
+    }
+
     var rlen = vec_len(reaped);
     for (var ri = 0; ri < rlen; ri = ri + 1) {
         var entry = vec_get(reaped, ri);
@@ -744,15 +762,16 @@ fn handle_sigchld() {
     # Reap orphaned zombies — children of a process that already exited, now
     # reparented to PID 1. Reaping them is half of what an init exists to do.
     #
-    # ⚠ LOGGED, not silent — but note what actually reaches here. argonaut's
-    # `init_reap_services` above calls `proc_table_reap_orphans()`, which
-    # does `waitpid(-1, WNOHANG)` in a loop and discards the count, so in
-    # practice IT collects the orphans and this call finds nothing. That is
-    # why `reap_and_log` rather than the old silent `reap_zombies()`: on the
-    # paths where kybernet does get there first (before `g_init` is set, or
-    # if argonaut's sweep ever stops running) a reaped orphan now leaves a
-    # `reaped pid=N exit=C` line instead of vanishing. Surfacing argonaut's
-    # own count is the real fix and is on the roadmap. 1.6.1.
+    # ⚠ THIS IS THE BACKSTOP, NOT THE PRIMARY PATH, AND IT NORMALLY FINDS
+    # NOTHING. argonaut's `init_reap_services` above already ran
+    # `waitpid(-1, WNOHANG)` to exhaustion, so once `g_init` is set IT collects
+    # the orphans and this call is a no-op — the count is logged up there from
+    # `init_last_orphan_count()` (argonaut 1.13.8). This stays because the
+    # window where kybernet gets here first is real: before `g_init` is set
+    # (phases 1-7), and if argonaut's sweep ever stops running. On those paths a
+    # reaped orphan leaves a `reaped pid=N exit=C` line instead of vanishing,
+    # which is why `reap_and_log` replaced the silent `reap_zombies()`. 1.6.1,
+    # 1.6.12.
     reap_and_log();
     return 0;
 }

@@ -116,6 +116,38 @@ if [ -z "$KERNEL" ]; then
 fi
 [ -f "$KERNEL" ] || { echo "ERROR: kernel not found. Pass an explicit path as \$1."; exit 1; }
 
+# ⚠ THE BINARY MUST BE NEWER THAN THE SOURCE, AND UNTIL 1.6.12 NOTHING CHECKED.
+# This script has never built build/kybernet — it stages whatever is already
+# there. So the sequence "edit src/, run bash qemu/boot-test.sh" tested the
+# PREVIOUS binary and reported a confident green for code that was never
+# compiled. It bit this repo for real while adding the orphan assertion below:
+# a deliberately injected defect produced 62 OK / 0 FAIL, which is precisely the
+# failure the inject-the-defect discipline exists to rule out, arriving through
+# the one channel that discipline does not cover.
+#
+# CI cannot see it — the workflow builds immediately before running this — so it
+# is a dev-box-only false green, which is worse rather than better: the dev box
+# is where iteration happens and where a wrong green costs the most.
+#
+# It FAILS rather than rebuilding, per standing rule 32. Rebuilding here would
+# fork a second build path that could silently drift from the documented
+# CYRIUS_DCE=1 one, and a gate whose job is to notice staleness should not be
+# the thing papering over it.
+_newest_src=$(find "${PROJECT_DIR}/src" -name '*.cyr' -newer "${PROJECT_DIR}/build/kybernet" -print -quit 2>/dev/null || true)
+if [ ! -f "${PROJECT_DIR}/build/kybernet" ]; then
+    echo "ERROR: build/kybernet does not exist. This script does not build it."
+    echo "       run: CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet"
+    exit 1
+fi
+if [ -n "$_newest_src" ] || [ "${PROJECT_DIR}/cyrius.cyml" -nt "${PROJECT_DIR}/build/kybernet" ]; then
+    echo "ERROR: build/kybernet is STALE — source has changed since it was built."
+    echo "       newer: ${_newest_src:-cyrius.cyml}"
+    echo "       this script does not build; it would have tested the OLD binary"
+    echo "       and reported a green for code that was never compiled."
+    echo "       run: CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet"
+    exit 1
+fi
+
 # Build / rebuild the initramfs if the binary is newer than the cpio.
 if [ ! -f "$INITRAMFS" ] || [ "${PROJECT_DIR}/build/kybernet" -nt "$INITRAMFS" ] || [ "${PROJECT_DIR}/cyrius.cyml" -nt "$INITRAMFS" ]; then
     bash "${SCRIPT_DIR}/build-initramfs.sh"
@@ -685,17 +717,31 @@ fi
 # qemu/boot-crash-test.sh was written for; that script booted with
 # -m 256M, which audit rule 8 says fails alloc_init outright, so it has
 # been retired in favour of asserting it here where it actually runs.
-# ⚠ NOT ASSERTED, and the reason is a finding rather than an omission.
-# kyb-orphan exercises the orphan path — a child reparented to PID 1 —
-# but nothing observable comes out of it: argonaut's init_reap_services
-# calls proc_table_reap_orphans(), which does waitpid(-1, WNOHANG) in a
-# loop and DISCARDS the count, and it runs before kybernet's own reaper.
-# So orphans are reaped correctly and invisibly, and kybernet's
-# reap_and_log is unreachable on that path once argonaut is up. Surfacing
-# the count is an argonaut change and is on the roadmap for v1.6.2. The
-# fixture stays because it exercises the path (which is how the watchdog
-# SIGSEGV was found) and because the cgroup-count marker above depends on
-# it.
+# ⚠ ASSERTED AT LAST, IN THE REACTOR PASS, AFTER ELEVEN RELEASES OF
+# "NOT ASSERTED". The fixture exercised the orphan path from 1.6.1 but
+# nothing observable came out of it: argonaut's init_reap_services calls
+# proc_table_reap_orphans_into(), which does waitpid(-1, WNOHANG) in a
+# loop, and it DISCARDED the count — and it runs before kybernet's own
+# reaper, so reap_and_log finds nothing left and stays silent too. The
+# count was thrown away twice and the property was untestable from here.
+# argonaut 1.13.8 added init_last_orphan_count(); kybernet 1.6.12 reads it
+# in handle_sigchld and logs "reaped orphans: N".
+#
+# ⚠ IT IS ASSERTED IN THE REACTOR PASS AND NOT THE BOOT PASS, WHICH IS
+# STANDING RULE 41. handle_sigchld is reachable from exactly one place:
+# the event loop's TOKEN_SIGNAL arm. kybernet.harness=1 shuts down at
+# phase 9 BEFORE the reactor starts, so under that mode the orphan's
+# SIGCHLD sits queued in the signalfd and is never handled. Asserting it
+# there would fail confidently for a feature that works.
+
+if echo "$LOOP_OUT" | grep -aqE "reaped orphans: [1-9]"; then
+    echo "  OK: PID 1 reaped a child it did not start (orphan count surfaced)"
+else
+    echo "  FAIL: no orphan reap observed — kyb-orphan's child was not collected,"
+    echo "        or init_last_orphan_count() is not being read (argonaut >= 1.13.8)"
+    echo "$LOOP_OUT" | grep -aiE 'orphan|reaped' | head -5 || true
+    fail=1
+fi
 
 if echo "$LOOP_OUT" | grep -aqF "health check failed: kyb-health"; then
     echo "  OK: health tick body executed and reported a failing check"
