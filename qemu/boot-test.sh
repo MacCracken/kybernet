@@ -866,6 +866,36 @@ else
     fail=1
 fi
 
+# ⚠ THE WATCHDOG KILL RAN ON EVERY REACTOR PASS AND NOTHING ASSERTED IT.
+# 1.6.16 LOW-5.
+#
+# `init_poll_health` and `init_check_watchdog` are INDEPENDENT paths: the
+# assertion above covers the probe, and nothing covered the kill. So a
+# regression that stopped the watchdog killing while leaving the probe intact
+# left all 66 properties green with PID 1 having no runtime watchdog at all — a
+# wedged service never killed, never restarted, which is the exact failure the
+# watchdog exists to prevent.
+#
+# The concrete regression this guards is the one CLAUDE.md already warns about:
+# writing `managed_svc_set_last_hc` on a FAILED probe would silence the watchdog,
+# and that is a plausible edit while touching argonaut's `_hc_is_due` scheduling.
+#
+# Same shape as `"seccomp": "basic"` (rule 27) except HARDER to notice — there
+# the fixture was missing, here the fixture exists and drives the path, and only
+# the assertion was absent. Verified present in a real loop boot before being
+# asserted, and verified to go red by stubbing argonaut's `init_enforce_watchdog`.
+#
+# Deliberately NOT asserting "watchdog restart scheduled": measured absent under
+# this fixture and correctly so — the restart half is already covered by the
+# `restarting:` / `restarted:` assertions above.
+if echo "$LOOP_OUT" | grep -aqF "watchdog killed: kyb-health"; then
+    echo "  OK: the watchdog actually KILLED the unhealthy service"
+else
+    echo "  FAIL: the watchdog never killed kyb-health — the probe ran but the kill path did not"
+    echo "$LOOP_OUT" | grep -aiE 'watchdog|kyb-health' | head -5 || true
+    fail=1
+fi
+
 # ⚠ THESE LIVE IN THE REACTOR PASS, NOT THE BOOT PASS, AND THAT IS THE WHOLE
 # POINT OF STANDING RULE 23. `handle_notify_msg` is only ever called from the
 # event loop (main.cyr's TOKEN_NOTIFY arm). `kybernet.harness=1` shuts down at

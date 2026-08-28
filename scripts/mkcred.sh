@@ -95,6 +95,22 @@ if [ "${1:-}" = "--check" ]; then
     [ "$v" = "v1" ] || die "bad version field: $v"
     for f in "$ct" "$cm" "$cp"; do
         case "$f" in ''|*[!0-9]*) die "non-numeric cost field: $f" ;; esac
+        # ⚠ LENGTH, CHECKED BEFORE THE `10#` NORMALISATION. 1.6.16 LOW-4.
+        #
+        # kybernet's `_emerg_parse_bounded` bounds DURING decimal accumulation
+        # and gives up past 19 digits, so a longer cost field is classified
+        # INVALID — but this checker normalised through `$((10#$f))` first,
+        # which happily collapses 25 zero-padded digits to a small in-range
+        # number and then blessed the record. `--check` said OK and kybernet
+        # rejected it: exactly the "a generator whose output its own consumer
+        # refuses" class this script's own header warns about, and with
+        # `emergency_require_auth: true` it is a board that prompts for a
+        # password nothing can match.
+        #
+        # Phrased as a LENGTH rule, not a leading-zero rule: the 64-bit wrap
+        # variant of this has no leading zeros at all. Generation can never emit
+        # it (it normalises first), so this is a --check-only divergence.
+        [ "${#f}" -le 19 ] || die "cost field is ${#f} digits; kybernet's parser gives up past 19"
     done
     # ⚠ EVERY ARITHMETIC EXPANSION BELOW USES 10#. bash's $(( )) honours a
     # base prefix, so $((08192)) is "value too great for base 8" — a FATAL

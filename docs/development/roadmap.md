@@ -1,17 +1,21 @@
 # Kybernet Roadmap
 
-**Current: v1.6.15** — [CHANGELOG.md](../../CHANGELOG.md) is the record of what each
+**Current: v1.6.16** — [CHANGELOG.md](../../CHANGELOG.md) is the record of what each
 release actually did. This file carries only what is **not** done.
 
 This file now carries two intakes. The 1.5.9 sweep opened **38** items (counted at the
-`1.6.0` tag) and **14 of those remain** — sixteen releases of attrition. The
-2026-08-26 P(-1) audit added 21, of which **10 remain**. Plus two opened by the
-1.6.14 work (one argonaut allocation finding, one cyrius filing split out of
-CRITICAL-1). Total open: **26**. Every number is `grep -c '^- \[ \]'` against
+`1.6.0` tag) and **14 of those remain** — seventeen releases of attrition. **The
+2026-08-26 P(-1) audit is closed**: 21 items were added to this file and 20 are done,
+leaving only MEDIUM-10, which is partial on purpose. Plus two opened by the 1.6.14
+work (one argonaut allocation finding, one cyrius filing split out of CRITICAL-1).
+Total open: **17**. Every number is `grep -c '^- \[ \]'` against
 this file at the relevant tag, not an estimate.
 
 ⚠ The item count went UP at v1.6.13, and that is the audit working rather than the
-project regressing. v1.6.15 closed all ten MEDIUMs — six here, two in deps awaiting
+project regressing — and it has come back down. v1.6.16 consumed argonaut 1.13.10 and
+sigil 3.12.11 (closing MEDIUM-4 and MEDIUM-8) and closed all six LOWs, one of which
+(LOW-6) turned out to have been closed already at 1.6.14 by HIGH-3's fixture —
+verified rather than assumed before ticking it. v1.6.15 closed all ten MEDIUMs — six here, two in deps awaiting
 tags, one by filing upstream, and **one deliberately left partial** (MEDIUM-10: the
 obvious fix breaks a contract libro's own suite asserts, and half-closing it is
 exactly what that finding complained about). v1.6.14 closed all five of the audit's
@@ -36,8 +40,8 @@ something outside this repo.
 `cyrius lint` reports **0 untracked deferrals and 0 warnings** across the tree, and as
 of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into fiction.
 
-**Gate counts at v1.6.15** (a next agent must not let these shrink; each is enforced):
-718 test assertions (**on both arches**) · 66 harness properties · 56 benchmarks (two
+**Gate counts at v1.6.16** (a next agent must not let these shrink; each is enforced):
+725 test assertions (**on both arches**) · 67 harness properties · 56 benchmarks (two
 reported-not-gated, declared) · the aarch64 execution gate · the committed-lock gate. See
 [state.md](state.md) for the full current-state handoff.
 
@@ -63,20 +67,6 @@ Grouped by where the fix lands: **16 kybernet**, 2 argonaut, 1 sigil, 1 libro, 1
 cyrius. The dep ones cannot ship from here — dep first, **the user tags it**, consumer
 second (see the release order below).
 
-- [ ] **HIGH-6 — FIXED IN argonaut 1.13.9, AWAITING A TAG.** `health_check.type =
-      "command"` blocked PID 1's reactor in an unbounded `waitpid`, discarded the
-      configured `timeout_ms`, and exec'd with an empty envp so a bare command name
-      was ENOENT forever. Found while fixing it: it **could never run a command with
-      an argument at all** — `str_split` returns views into the original buffer
-      (measured: word[0] of `"/bin/sleep 5"` has str_len 10 and its next byte is 32,
-      not 0) and `execve`'s argv needs NUL-terminated strings, so argv[0] was the
-      whole command line. Both the old and new code had that defect, which is why
-      the pre-1.13.9 suite only ever tried single-word targets.
-      argonaut's `check_command` now uses `run_safe_cmd_timeout` and splits in place
-      in a static buffer; its suite went 23 -> 33 assertions. **kybernet still pins
-      argonaut 1.13.8**: the 1.13.9 tag does not exist yet and a manifest naming an
-      untagged version fails CI resolution. Bump after the user tags it.
-
 - [ ] **MEDIUM-10 — PARTIAL. 224 -> 192 bytes per audit record; the remaining 176
       needs a libro API change.** argonaut 1.13.10 caches the two constant Strs
       (`source` is always "argonaut"; `event_type_str` returns a literal), which is
@@ -98,30 +88,6 @@ second (see the release order below).
       ⚠ This item is deliberately still OPEN. Its original complaint was that it had
       been recorded as closed in four documents while still being there.
 
-- [ ] **MEDIUM-4 — FIXED IN argonaut 1.13.10, AWAITING A TAG.** The HTTP health
-      check's `connect(2)` was blocking and unbounded while its sibling
-      `tcp_connect_ip` had already been made bounded, so a `"type": "http"` check
-      against a blackholed target froze PID 1's reactor for the kernel's full
-      SYN-retry window (~127 s) per tick, regardless of `timeout_ms`. Both arms now
-      share one `connect_bounded`, so they cannot drift again. Measured: returns at
-      its 200 ms bound against 198.51.100.1. **Bump kybernet's argonaut pin once
-      1.13.10 is tagged.**
-
-- [ ] **MEDIUM-8 — FIXED IN sigil 3.12.11, AWAITING A TAG.** `tpm2_pcrread` ran
-      through the stdlib's `exec_capture`, which is unbounded AND discards the
-      child's exit status. So a wedged TPM hung PID 1 at phase 6c forever — before
-      the reactor, nothing reaping, every signal blocked — and a missing or failing
-      tool came back as `Ok(0)`, which sigil's parser turns into a zero-filled PCR
-      bank: an attestation pass derived from a tool that never ran. New bounded,
-      status-checked `agnosys_run_capture_timeout`, with `tpm_read_pcr_timeout`
-      threading a caller budget; the existing arities are kept and are now bounded
-      by default rather than unbounded. ⚠ Worth re-reading when this is picked up:
-      the PCR read runs BEFORE the dm-verity verify, so an attacker who has already
-      tampered with the rootfs can plant a `tpm2_pcrread` that sleeps and wedge PID 1
-      before verification ever executes. **Bump kybernet's sigil pin once 3.12.11 is
-      tagged**, then have `edge_boot.cyr` pass the remaining `max_boot_ms` slice the
-      way the verity verify already does.
-
 - [x] **MEDIUM-9 — CLOSED BY FILING (2026-08-27).** aarch64 `sys_pause()` issues
       `flock(0,0)` and returns immediately. Same cyrius codegen defect as CRITICAL-1,
       same filing:
@@ -130,153 +96,6 @@ second (see the release order below).
       action; there is no consumer-side workaround (five failed attempts are recorded
       in the filing). Tracked to completion by the aarch64 execution gate's
       `AARCH64_KNOWN_BROKEN` declaration, which fails if the entry ever becomes stale.
-
-- [ ] **LOW-1 (LOW) — A rejected `edge` block leaves kybernet's device/hash globals committed, so verification still runs after the operator is told edge verification is DISABLED**
-      `src/lib/svc_config.cyr:366` — partially-committed parse — the caller's reset
-      covers the dep struct but not the module globals.
-      TRIGGER: A config whose device triple is valid but whose PCR baselines are not
-      — one bad character in one baseline string. Also fires on the SIGHUP path, and
-      when an edge block is REMOVED (the `if (eb == 0)` early return at the top also
-      clears nothing).
-      CONSEQUENCE: The operator is told twice — console and dmesg — that edge
-      verification is DISABLED, and edge_boot.cyr:529 then runs `_eb_verity_verify`
-      anyway on the retained `_eb_root_device`, under the literal 10 s ceiling
-      because `edge_apply_defaults` just zeroed their `max_boot_ms` (HIGH-8). If
-      verification fails or veritysetup is absent, `_stage_verify_rootfs` (a
-      REQUIRED stage) returns STAGE_FAIL and the board drops to the emergency shell
-      — two subsystems reporting opposite verdicts about the same config on one
-      boot, the exact shape boot_stages.cyr:76-84 documents having removed in the
-      dm-verity-probe case. Secondary: `edge_boot_run`'s `kybernet.edge=off` handler
-      keys on `_eb_root_hash != 0`, so the
-      FIX: Make the commit atomic with the parse: stage `rd`/`hd`/`rh`/`ld`/`pv` in
-      locals and call `edge_set_devices` + `edge_set_expected_pcrs` at a single
-      commit point after ALL validation succeeds. Belt and braces, add an
-      `edge_reset_devices()` zeroing all five globals and call it from the
-      malformed-block arm in load_config, so the caller's documented "reset on
-      malformed block" actually covers both halves of the edge state — and so a
-      SIGHUP that removes the edge block clears it too.
-
-- [ ] **LOW-2 (LOW) — An unknown `depends_on` target becomes a phantom entry in the startup waves: kybernet creates a cgroup for a service that does not exist, counts it FAILED, and never removes the directory**
-      `src/main.cyr:1031` — unvalidated cross-reference; a name with no definition
-      treated as a startable service.
-      TRIGGER: A typo or stale entry in any service's `depends_on` array, e.g.
-      `"depends_on": ["postgress"]`. Also fires without a typo when a config service
-      depends on a name that only exists in a DIFFERENT boot mode.
-      CONSEQUENCE: One stray empty cgroup directory per bad name per boot (cgroupfs
-      is rebuilt each boot, so not cumulative), and `failed` incremented for a
-      service nobody configured. The log line an operator sees is `FAILED to start:
-      postgress`, naming a service that was never in their config, so the diagnostic
-      points away from the typo that caused it. ⚠ The escalation the sweep claimed
-      is REFUTED and must not be written up: `failed > 0 && started == 0` is gated
-      on `init_should_drop_to_emergency`, which inspects failed BOOT STEPS with the
-      required flag — not services — so the phantom cannot by itself reach
-      `drop_to_emergency`. The operationally significant half the sweep understated:
-      the REAL dependent is per
-      FIX: Validate at load, which is the only place that fixes both halves: after
-      the whole `services` array is parsed, refuse any service whose `depends_on`
-      names a target that is neither another config service nor a
-      `default_services(mode)` name, with the reason on console and dmesg (rule 19 —
-      a typo should be a readable config error, not a boot-time surprise).
-      Additionally, in `start_services`, treat `msd == 0` as a config error rather
-      than a start failure — `if (msd == 0) { klog2(" unknown service in dependency
-      graph (check depends_on): ", name_cs); continue; }`, placed BEFORE
-      `_prepare_service_cgroup` so no cgroup is created and `failed` is not
-      incremented.
-
-- [ ] **LOW-3 (LOW) — The consumer-side guard against sigil's PCR zero-fill checks F_OK rather than X_OK and accepts a zero-byte capture as a successful read**
-      `src/lib/edge_boot.cyr:484` — a fail-closed guard that is incomplete — a tool
-      that ran and produced nothing is accepted as a successful attestation read.
-      TRIGGER: `tpm_attestation: true` with `pcr_bindings` set, `/dev/tpm0` present
-      and `/usr/bin/tpm2_pcrread` present but unrunnable — chmod 000 (F_OK passes,
-      X_OK would not), tpm2-tss libraries missing (execve -> 127), resource manager
-      busy, or any non-zero exit.
-      CONSEQUENCE: A guard whose stated purpose is fail-closed passes a binary that
-      cannot run, and kybernet logs `edge boot: PCR read complete` for a read that
-      produced nothing. Diagnostic dishonesty rather than a bypass: nothing
-      downstream is decisional. Worth fixing because the next person to make PCR
-      comparison enforcing (which the roadmap plans) inherits a guard that does not
-      mean what its comment says.
-      FIX: Three cheap consumer-side changes: use `ARG_X_OK` (1) not 0 in the
-      `sys_access` guard — as uid 0, `access(X_OK)` still fails when no x bit is
-      set, so it catches chmod 000; treat an `Ok(n)` with `n == 0` from the capture
-      as a FAILED read rather than a successful one; and reject an all-ASCII-'0'
-      digest under `tpm_attestation: true` at the point of read rather than only as
-      a report-only non-match. The structural fix is MEDIUM-8's: give sigil's
-      `agnosys_run_capture` a bounded, status-checked exec so `Ok(0)` can no longer
-      mean "the tool never ran".
-
-- [ ] **LOW-4 (LOW) — `scripts/mkcred.sh --check` blesses a v1 record kybernet classifies INVALID: a cost field longer than 19 characters**
-      `scripts/mkcred.sh:118` — generator/consumer validation divergence — a bounds
-      "copy" that is not a copy (standing rule 25).
-      TRIGGER: An operator or third-party tool hand-writing or zero-padding a cost
-      field to more than 19 characters and validating it with `mkcred.sh --check`,
-      which reports OK. mkcred's own GENERATION path normalises through `$((10#$X))`
-      and can never emit this, so it is `--check`-only.
-      CONSEQUENCE: The record is written into config.json, load_config classifies it
-      INVALID, logs `emergency_password_hash is malformed - credential REJECTED` and
-      zeroes `g_emerg_hash` — the same brick class the script's own header warns
-      about ("A generator whose output its own consumer refuses is the 1.5.4-1.5.7
-      brick class"). With `emergency_require_auth: true` it feeds directly into
-      MEDIUM-7: an operator whose credential the validator blessed gets a permanent
-      halt at the first boot-stage failure. The rejection is loud (console + dmesg),
-      which is why this is LOW.
-      FIX: Add the length rule to --check so the copy is a copy: after the non-
-      numeric test and BEFORE the `10#` normalisation, reject any of $ct/$cm/$cp
-      longer than 19 characters, with a message naming `_emerg_parse_bounded`'s
-      bound. Phrase it as a LENGTH rule, not a leading-zero rule — the 64-bit wrap
-      variant has no leading zeros. State in the script header that kybernet's
-      parser caps a cost field at 19 digits, and add a long-digit case to CI's
-      generator self-test.
-
-- [ ] **LOW-5 (LOW) — The watchdog kill path executes on every reactor gate run and NOTHING asserts it — the path that SIGSEGV'd PID 1 at 1.6.1 is run but ungated**
-      `qemu/boot-test.sh:746` — a gate that runs its subject without asserting it
-      (standing rules 27, 32).
-      TRIGGER: Any regression that stops `init_enforce_watchdog` killing while
-      leaving the health probe intact — most concretely the one CLAUDE.md already
-      warns against (writing `managed_svc_set_last_hc` on a FAILED probe, "writing
-      it on failure would silence the watchdog"), a plausible edit while touching
-      argonaut 1.13.8's new `_hc_is_due` scheduling. Also an early return in
-      `handle_watchdog_tick`, or the watchdog timerfd not being re-armed.
-      CONSEQUENCE: All 62 harness properties stay green while PID 1 has no runtime
-      watchdog at all — a wedged service is never killed and never restarted, which
-      on a real board is the failure mode the watchdog exists to prevent. The loud
-      class IS caught (line 671 greps for `Attempted to kill init|Kernel panic`), so
-      this is specifically about the silent class: `init_poll_health` and
-      `init_check_watchdog` are independent paths, and no existing loop-pass
-      assertion covers the second. Same shape as `"seccomp": "basic"` (rule 27)
-      except that the fixture exists and drives the path — only the assertion is
-      missing, which is strictly harder to notice.
-      FIX: Add ONE assertion to the reactor pass, beside the existing `health check
-      failed: kyb-health` check at line 746: `grep -aqF "watchdog killed: kyb-
-      health"`, setting `fail=1` with a diagnostic ending in `|| true` (rule 40). Do
-      NOT add the `watchdog restart scheduled` assertion — measured absent under
-      this fixture and correctly so; the restart half is already covered by the
-      existing `restarting:` / `restarted:` lines. Verify by injection (stub
-      `init_enforce_watchdog` to return an empty vec and confirm the pass goes red)
-      and bump the property count 62 -> 63 in docs/development/state.md.
-
-- [ ] **LOW-6 (LOW) — No fixture ever sets a NON-EMPTY `capabilities` keep-list, so `capset(2)` has never run with a non-zero mask in any gate**
-      `qemu/build-initramfs.sh:357` — a config key reaching a syscall with no
-      harness fixture for its non-degenerate value (standing rule 27).
-      TRIGGER: A service configured `"security": { "capabilities":
-      ["cap_net_bind_service"] }` on a real board, after any future divergence in
-      the capset(2) invocation or the two-word packing. Nothing in `cyrius test`,
-      `bash qemu/boot-test.sh` or CI executes that combination.
-      CONSEQUENCE: A regression in the mask-build loop or the 24-byte V3 two-struct
-      layout presents either as fail-closed (child exits 126, service never starts)
-      or as a wrong capability grant — argonaut's own comment at
-      lib/argonaut_types.cyr:534-535 records the historical instance: "under the old
-      values 'keep CAP_SYS_ADMIN' kept kernel capability 1 — CAP_DAC_OVERRIDE — and
-      dropped CAP_SYS_ADMIN". Nothing in cyrius test, boot-test.sh or CI would see
-      it.
-      FIX: Add a `kyb-caps` fixture with a keep-list spanning BOTH capset words —
-      `"capabilities": ["cap_net_bind_service", "cap_bpf"]` — whose command reports
-      its own /proc/self/status CapEff to /dev/console, and assert the exact hex
-      from inside the child: `0000008000000400` (validated above). That is the only
-      assertion that distinguishes a correct mask build from a wrong one, and it is
-      the same shape kyb-confined/kyb-seccomp/kyb-landlock already use. Update the
-      `services parsed: N` and `removed service cgroups: N` markers and the counts
-      in state.md. Note this fixture must NOT also set `uid`, or it hits HIGH-3.
 
 ---
 
@@ -459,6 +278,20 @@ Moved into the v1.6.1 gate line. Recording why here so the claim is not re-made:
 
 One line per release. Detail lives in [CHANGELOG.md](../../CHANGELOG.md).
 
+- **v1.6.16** — The last of the P(-1) audit. Consumed argonaut 1.13.10 and sigil
+  3.12.11, closing MEDIUM-4 (the HTTP health check's unbounded `connect`, ~127 s of
+  frozen reactor per tick) and MEDIUM-8 (`tpm2_pcrread` unbounded AND
+  status-discarding, so a wedged TPM hung PID 1 at phase 6c and a missing tool became
+  a zero-filled PCR bank). Then all six LOWs: a rejected `edge` block left its device
+  paths committed so verification ran on a board just told it was disabled; a typo in
+  `depends_on` became a phantom service with its own cgroup and a `FAILED` line naming
+  a service nobody configured; a fail-closed guard used F_OK and passed a `chmod 000`
+  binary; `mkcred.sh --check` blessed a record kybernet classifies INVALID; and the
+  watchdog KILL ran on every gate run with nothing asserting it. LOW-6 was already
+  closed at 1.6.14. 718 -> 725 assertions, 66 -> 67 harness properties.
+  ⚠ Worth keeping: the first injection used to verify the watchdog assertion was
+  itself broken — a stub in `lib/` is restored by `cyrius build`'s re-resolve, so the
+  gate stayed green for the wrong reason. **`lib/` is not a valid injection point.**
 - **v1.6.15** — All ten deferred MEDIUMs. A `landlock` block that granted nothing
   confined nothing while reporting "applied"; a config service whose name collided
   with a built-in was counted, dropped and never mentioned; unvalidated health-check
@@ -486,7 +319,7 @@ One line per release. Detail lives in [CHANGELOG.md](../../CHANGELOG.md).
   en route: it could never run a command with an argument, on either implementation).
   Also settled the benchmark question three releases old, by proving with inert
   padding that `strlen`/`is_mounted` measure layout. 681 -> 702 assertions,
-  62 -> 66 harness properties.
+  62 -> 67 harness properties.
 - **v1.6.13** — The P(-1) audit, ten releases late, and the arch half of the product
   could not boot. 31 findings (2 CRITICAL, 9 HIGH, 13 MEDIUM, 7 LOW); 9 closed, 1
   mitigated, 21 deferred with evidence. **CRITICAL-1: `sys_signalfd()` issues

@@ -395,6 +395,52 @@ fn _load_config_inner(want_services) {
                 registered = registered + 1;
             }
         }
+
+        # ⚠ EVERY `depends_on` TARGET MUST EXIST. 1.6.16 LOW-2.
+        #
+        # `resolve_service_waves` walks these edges, so a typo — or a name that
+        # only exists in a different boot mode — becomes a phantom entry in the
+        # startup waves: kybernet created a cgroup for a service that does not
+        # exist, counted it FAILED, and logged a name the operator never wrote,
+        # pointing the diagnostic away from the typo that caused it.
+        #
+        # Validated here, after the whole array is parsed, because a forward
+        # reference to a service defined later in the file is perfectly legal —
+        # the check needs the complete name set, which is the config services
+        # plus this boot mode's built-ins.
+        #
+        # ⚠ THIS WARNS, IT DOES NOT REFUSE THE SERVICE, and that is a deliberate
+        # departure from what the audit proposed. `depends_on` expresses ORDERING:
+        # a service whose dependency does not exist still runs correctly, just
+        # without that constraint. Refusing it would take a working service off a
+        # board over a typo in an optional edge — a bigger outage than the defect,
+        # and on an upgrade path where the operator may not be watching. The harm
+        # the finding actually describes (a phantom cgroup, a bogus `failed`, and
+        # a log line naming a service nobody configured) is closed in
+        # `start_services` instead, where the phantom is skipped outright. What is
+        # left is the diagnostic, said plainly at the one moment it is cheap to
+        # act on.
+        for (var si = 0; si < vec_len(dst); si = si + 1) {
+            var s_sd = vec_get(dst, si);
+            var deps = svc_def_deps(s_sd);
+            for (var di = 0; di < vec_len(deps); di = di + 1) {
+                var dep_cs = str_data(vec_get(deps, di));
+                var found = 0;
+                for (var cj = 0; cj < vec_len(dst); cj = cj + 1) {
+                    if (streq(str_data(svc_def_name(vec_get(dst, cj))), dep_cs) == 1) { found = 1; break; }
+                }
+                if (found == 0) {
+                    for (var dj = 0; dj < vec_len(defaults); dj = dj + 1) {
+                        if (streq(str_data(svc_def_name(vec_get(defaults, dj))), dep_cs) == 1) { found = 1; break; }
+                    }
+                }
+                if (found == 0) {
+                    klog2("config: depends_on names a service that does not exist: ", dep_cs);
+                    kmsg("kybernet: config: a depends_on target does not exist; check for a typo");
+                }
+            }
+        }
+
         klog2("config: services parsed: ", _u64_str(registered));
     }
 
@@ -1181,11 +1227,31 @@ fn start_services() {
             # not run has no business owning one, and the shutdown sweep
             # would then have to account for it.
             var msd = init_get_service(g_init, name_cs);
-            if (msd != 0) {
-                if (svc_def_enabled(managed_svc_def(msd)) == 0) {
-                    klog2("  skipped (disabled in config): ", name_cs);
-                    continue;
-                }
+            # ⚠ A NAME IN THE WAVES WITH NO DEFINITION IS A CONFIG ERROR, NOT A
+            # START FAILURE. 1.6.16 LOW-2.
+            #
+            # `resolve_service_waves` walks `depends_on` edges, so an unknown
+            # target — a typo like `"depends_on": ["postgress"]`, or a name that
+            # only exists in a DIFFERENT boot mode — becomes a phantom entry in
+            # the waves. kybernet then created a cgroup for a service that does
+            # not exist, tried to start it, incremented `failed`, and logged
+            # `FAILED to start: postgress` — naming a service the operator never
+            # configured, so the diagnostic points away from the typo that caused
+            # it and one empty cgroup directory is left behind.
+            #
+            # Checked BEFORE `_prepare_service_cgroup` so no directory is
+            # created, and it does not touch `failed`, because nothing failed to
+            # start: there was nothing to start. The load-time validation is the
+            # real fix; this is the second half, for a graph edge that reaches
+            # here some other way.
+            if (msd == 0) {
+                klog2("  unknown service in the dependency graph (check depends_on): ", name_cs);
+                kmsg("kybernet: a depends_on target names a service that does not exist");
+                continue;
+            }
+            if (svc_def_enabled(managed_svc_def(msd)) == 0) {
+                klog2("  skipped (disabled in config): ", name_cs);
+                continue;
             }
 
             klog2("  starting: ", name_cs);

@@ -7,6 +7,120 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.6.16] — 2026-08-27
+
+**The last of the P(-1) audit: both remaining MEDIUMs consumed from their deps, and
+all six LOWs.** Suite 718 → 725 assertions. Harness 66 → **67** properties.
+argonaut 1.13.9 → **1.13.10**, sigil 3.12.10 → **3.12.11**.
+
+With this the 2026-08-26 audit's 31 findings are closed except MEDIUM-10, which
+stays open by design — see [1.6.15].
+
+### Closed by consuming the deps — MEDIUM-4 and MEDIUM-8
+
+- **MEDIUM-4** (argonaut 1.13.10) — the HTTP health check's `connect(2)` was
+  blocking and unbounded while its sibling was not, freezing PID 1's reactor for
+  the kernel's full SYN-retry window (~127 s) per tick against a blackholed
+  target. Both arms now share one `connect_bounded`.
+- **MEDIUM-8** (sigil 3.12.11) — `tpm2_pcrread` ran through the stdlib's
+  `exec_capture`: unbounded, and it discarded the child's exit status. A wedged
+  TPM hung PID 1 at phase 6c forever; a missing tool returned `Ok(0)`, which
+  sigil's parser turns into a zero-filled PCR bank — an attestation pass from a
+  tool that never ran.
+
+`edge_boot.cyr` now calls `tpm_read_pcr_timeout` with its own budget, capped by
+whatever remains of `max_boot_ms`, exactly as the dm-verity verify already was.
+
+### Fixed — LOW-1: a rejected `edge` block left its device paths committed
+
+`edge_set_devices` fired as soon as the device triple validated, **before** the
+`expected_pcrs` block could still reject. So one bad character in one baseline
+left `_eb_root_device` / `_eb_hash_device` / `_eb_root_hash` live while the
+caller was told the block was malformed — kybernet then announced, twice, that
+edge verification was DISABLED and `edge_boot_run` verified against the retained
+paths anyway. Two subsystems, opposite verdicts, one config, one boot.
+
+Staged in locals and committed at a single point after all validation. Plus
+`edge_reset_devices()`, called on entry, so an absent or rejected block also
+CLEARS what a previous load committed — which is what the SIGHUP path and a
+removed `edge` block needed and nothing provided.
+
+### Fixed — LOW-2: a typo in `depends_on` became a phantom service
+
+`resolve_service_waves` walks those edges, so an unknown target — a typo, or a
+name that only exists in a different boot mode — became an entry in the startup
+waves. kybernet created a cgroup for a service that does not exist, tried to
+start it, incremented `failed`, and logged `FAILED to start: postgress`, naming a
+service the operator never configured, so the diagnostic pointed away from the
+typo that caused it.
+
+`start_services` now skips an unresolvable name **before** the cgroup is created
+and without touching `failed`; nothing failed to start, there was nothing to
+start. `load_config` additionally names the bad target at parse time, where it is
+cheap to fix.
+
+⚠ **It warns rather than refusing the service, which departs from what the audit
+proposed.** `depends_on` expresses ORDERING: a service whose dependency does not
+exist still runs correctly, just without that constraint. Refusing it would take
+a working service off a board over a typo in an optional edge — a bigger outage
+than the defect, on an upgrade path where nobody may be watching. The harm the
+finding describes is closed in `start_services`; what is left is the diagnostic.
+
+### Fixed — LOW-3: a fail-closed guard that passed a binary which cannot run
+
+The `tpm2_pcrread` guard used `F_OK`, which only asks whether the path exists —
+`chmod 000` sailed through it. Now `X_OK`, which as uid 0 still fails when no
+execute bit is set. The other causes (missing tpm2-tss so `execve` → 127, a busy
+resource manager, any non-zero exit) are caught by sigil 3.12.11's status check.
+
+Also: kybernet logged `edge boot: PCR read complete` for a read that produced
+nothing, because sigil zero-fills a PCR it could not parse. It now says how many
+banks came back all-zero — which means UNREADABLE, never "read as zero".
+Deliberately **not** escalated to a refusal: this module commits to PCR
+comparison being report-only on purpose, since PCR 7 and 14 legitimately change
+on any signed firmware or kernel update and an enforcing comparison turns a
+routine upgrade into a fleet-wide refusal to boot.
+
+### Fixed — LOW-4: `mkcred.sh --check` blessed a record kybernet rejects
+
+`_emerg_parse_bounded` bounds DURING decimal accumulation and gives up past 19
+digits, so a zero-padded cost field longer than that classifies INVALID. But
+`--check` normalised through `$((10#$f))` first, which collapses the padding and
+blessed it. The validator said OK and kybernet refused it — the "a generator
+whose output its own consumer refuses" class this script's own header warns
+about, and with `emergency_require_auth: true` it feeds straight into MEDIUM-7.
+
+Phrased as a LENGTH rule, not a leading-zero rule: the 64-bit wrap variant has no
+leading zeros. Asserted on **both** sides now — CI's generator self-test refuses
+the record and `src/test.cyr` asserts the parser classifies that same string
+INVALID, so the two cannot drift apart silently.
+
+### Fixed — LOW-5: the watchdog kill ran on every gate run and nothing asserted it
+
+`init_poll_health` and `init_check_watchdog` are independent paths. The reactor
+pass asserted the probe and nothing asserted the kill, so a regression that
+stopped the watchdog killing while leaving the probe intact left every property
+green with PID 1 having no runtime watchdog at all.
+
+One assertion added. 66 → 67 properties.
+
+⚠ **The first injection used to verify it was itself broken, which is worth
+recording.** Stubbing `init_enforce_watchdog` in `lib/argonaut_init.cyr` changed
+nothing — `cyrius build` re-resolves dependencies, so it restored the file
+underneath the build, and the gate stayed green for the wrong reason. Injecting
+in `src/main.cyr` instead turned it red with exactly the intended message. **A
+`lib/` edit is not a valid injection point in this repo.**
+
+### Closed already — LOW-6
+
+`capset(2)` with a non-zero mask had never run in any gate. Closed at 1.6.14 as a
+side effect of HIGH-3's fixture: `kyb-capuid` sets
+`"capabilities": ["cap_net_bind_service"]` and the harness asserts `CapAmb` and
+`CapBnd` are exactly `0x400` from inside the child. Verified rather than assumed
+before marking it.
+
+---
+
 ## [1.6.15] — 2026-08-27
 
 **All ten deferred MEDIUM findings from the 2026-08-26 P(-1) audit.** Six land in

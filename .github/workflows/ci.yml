@@ -254,11 +254,18 @@ jobs:
             'f52fbd32b2b3b86ff88ef6c490628285f482af15ddcb29541f94bcf526a3f6c7' \
             'v1$2$19456$1$6b796265726e65742d746573742d3031$2b314f63f14b4817f38b55e7c5c53e55a4973ce075d7a95ad2da3a4aa7c57c5e$' \
             'v1$2$19456$1$6b796265726e65742d746573742d3031$2b314f63' \
-            'v1$1$64$1$6b796265726e65742d746573742d3031$2b314f63f14b4817f38b55e7c5c53e55a4973ce075d7a95ad2da3a4aa7c57c5e'; do
+            'v1$1$64$1$6b796265726e65742d746573742d3031$2b314f63f14b4817f38b55e7c5c53e55a4973ce075d7a95ad2da3a4aa7c57c5e' \
+            'v1$2$0000000000000000019456$1$6b796265726e65742d746573742d3031$2b314f63f14b4817f38b55e7c5c53e55a4973ce075d7a95ad2da3a4aa7c57c5e'; do
             if ./scripts/mkcred.sh --check "$bad" >/dev/null 2>&1; then
               echo "ERROR: mkcred.sh --check accepted a record kybernet rejects: $bad"; exit 1
             fi
           done
+          # ⚠ The last entry is 1.6.16 LOW-4: a 22-digit zero-padded cost field.
+          # kybernet's `_emerg_parse_bounded` bounds DURING accumulation and gives
+          # up past 19 digits, so it classifies INVALID — but --check normalised
+          # through `$((10#$f))` first, which collapses the padding and blessed a
+          # record its own consumer refuses. src/test.cyr asserts the parser side
+          # of the same string, so the two halves cannot drift apart silently.
           echo "mkcred.sh --check agrees with emergency_auth.cyr's bounds"
           # Records kybernet ACCEPTS that --check must not reject. The
           # leading-zero case is the one that used to make bash's $(( ))

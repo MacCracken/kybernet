@@ -114,6 +114,21 @@ fn edge_set_devices(root_dev, hash_dev, root_hash, luks_dev) {
 }
 
 fn edge_set_expected_pcrs(v) { _eb_expected_pcrs = v; return 0; }
+
+# Clear every piece of edge state kybernet owns. 1.6.16 LOW-1.
+#
+# `edge_apply_defaults` resets argonaut's EdgeBootConfig; these five globals are
+# kybernet's and were reset by nothing, so a rejected or removed `edge` block
+# left the previous values live and verification ran on a board that had just
+# been told edge verification was disabled.
+fn edge_reset_devices() {
+    _eb_root_device = 0;
+    _eb_hash_device = 0;
+    _eb_root_hash = 0;
+    _eb_luks_device = 0;
+    _eb_expected_pcrs = 0;
+    return 0;
+}
 fn edge_set_verify_timeout(ms) { _eb_verify_timeout_ms = ms; return 0; }
 fn edge_verify_timeout() { return _eb_verify_timeout_ms; }
 fn edge_root_device()   { return _eb_root_device; }
@@ -569,23 +584,85 @@ fn edge_boot_run(config) {
             # unparsed PCR. On a box that asked for tpm_attestation, that
             # is an attestation "pass" derived from a tool that never ran.
             # Fail closed on a missing binary. 1.4.2 audit MEDIUM-2.
-            if (sys_access("/usr/bin/tpm2_pcrread", 0) != 0) {
-                return _eb_refuse("FATAL: tpm_attestation required but /usr/bin/tpm2_pcrread missing",
-                  "edge-boot REFUSED: /usr/bin/tpm2_pcrread missing");
+            # ⚠ X_OK (1), NOT F_OK (0). 1.6.16 LOW-3.
+            #
+            # A guard whose stated purpose is fail-closed was passing a binary
+            # that cannot run: F_OK only asks whether the path exists. chmod 000
+            # passes it — and as uid 0 `access(X_OK)` still fails when no execute
+            # bit is set, so X_OK catches exactly that case. Missing tpm2-tss
+            # libraries (execve -> 127) and a busy resource manager are caught by
+            # sigil 3.12.11's status check instead, which no longer reports a
+            # tool that exited non-zero as a successful capture.
+            if (sys_access("/usr/bin/tpm2_pcrread", 1) != 0) {
+                return _eb_refuse("FATAL: tpm_attestation required but /usr/bin/tpm2_pcrread missing or not executable",
+                  "edge-boot REFUSED: /usr/bin/tpm2_pcrread missing or not executable");
             }
-            # Budget checkpoint BEFORE the exec — tpm_read_pcr shells out
-            # to tpm2_pcrread and blocks on it with no timeout.
+            # Budget checkpoint BEFORE the exec.
             if (_eb_over_budget(start_ms, max_ms) == 1) {
                 return _eb_refuse("FATAL: edge boot exceeded max_boot_ms before PCR read",
                   "edge-boot REFUSED: max_boot_ms exceeded before PCR read");
             }
-            var pcr_res = tpm_read_pcr(TPM_SHA256, indices);
-            if (is_err_result(pcr_res) == 1) {
-                return _eb_refuse("FATAL: tpm_read_pcr failed",
-                  "edge-boot REFUSED: tpm_read_pcr failed");
+            # ⚠ THE PCR READ IS NOW BOUNDED. 1.6.16 — audit MEDIUM-8.
+            #
+            # `tpm_read_pcr` shelled out to tpm2_pcrread through sigil's
+            # `agnosys_run_capture`, i.e. the stdlib's `exec_capture`: a blocking
+            # drain and an unbounded `waitpid` whose status was then discarded. A
+            # wedged TPM — /dev/tpm0 held open by another consumer, a tabrmd/D-Bus
+            # TCTI wait, bad firmware — therefore hung PID 1 here FOREVER. This is
+            # phase 6c: before the reactor, so nothing reaps, nothing services a
+            # watchdog, no service has started, and every signal is blocked. The
+            # board looks dead with `edge boot: reading PCRs` as its last line.
+            #
+            # sigil 3.12.11 added the bounded, status-checked form. Give it the
+            # same treatment the verity verify already gets: its own budget,
+            # capped by whatever remains of `max_boot_ms` when one is configured.
+            # The default when none is (`_EB_VERIFY_TIMEOUT_DEFAULT`) is generous
+            # for a device read and still bounded, per rules 17 and 22.
+            var pbudget = _eb_verify_timeout_ms;
+            if (max_ms > 0) {
+                var premain = max_ms - (monotonic_ms() - start_ms);
+                if (premain < 500) { premain = 500; }
+                if (premain < pbudget) { pbudget = premain; }
             }
-            klog("edge boot: PCR read complete");
-            _eb_pcr_mismatches = _eb_compare_pcrs(result_unwrap(pcr_res), indices);
+            var pcr_res = tpm_read_pcr_timeout(TPM_SHA256, indices, pbudget);
+            if (is_err_result(pcr_res) == 1) {
+                # Now covers a TIMEOUT and a non-zero exit as well as a parse
+                # failure — sigil no longer reports a tool that never ran, or one
+                # that was killed at its deadline, as a successful capture.
+                return _eb_refuse("FATAL: tpm_read_pcr failed, timed out, or the tool exited non-zero",
+                  "edge-boot REFUSED: tpm_read_pcr failed or timed out");
+            }
+            # ⚠ "COMPLETE" ONLY IF IT ACTUALLY READ SOMETHING. 1.6.16 LOW-3.
+            #
+            # sigil zero-fills any PCR it could not parse out of tpm2_pcrread's
+            # output, so an all-ASCII-'0' digest means UNREADABLE, never "read as
+            # zero". kybernet logged `PCR read complete` regardless — diagnostic
+            # dishonesty rather than a bypass (nothing downstream is decisional,
+            # and `_eb_compare_pcrs` already refuses to treat all-zero as a
+            # match), but the next person to make the comparison enforcing would
+            # inherit a line that does not mean what it says.
+            #
+            # Said plainly instead. Not escalated to a refusal: this module's
+            # header commits to PCR comparison being REPORT-ONLY on purpose —
+            # PCR 7 and 14 legitimately change on any signed firmware or kernel
+            # update, and an enforcing comparison turns a routine upgrade into a
+            # fleet-wide refusal to boot. The structural half of this finding is
+            # sigil 3.12.11's status check, which stops a tool that never ran or
+            # exited non-zero from reaching here as a successful capture at all.
+            var pcr_vals = result_unwrap(pcr_res);
+            var unread = 0;
+            for (var pv = 0; pv < vec_len(pcr_vals); pv = pv + 1) {
+                if (edge_is_all_zero_hex(str_from(tpm_pcr_value_value(vec_get(pcr_vals, pv)))) == 1) {
+                    unread = unread + 1;
+                }
+            }
+            if (unread > 0) {
+                klog2("edge boot: PCR read returned UNREADABLE (all-zero) banks: ", _u64_str(unread));
+                kmsg("kybernet: edge boot: one or more PCRs came back all-zero - not a reading");
+            } else {
+                klog("edge boot: PCR read complete");
+            }
+            _eb_pcr_mismatches = _eb_compare_pcrs(pcr_vals, indices);
         } else {
             klog("edge boot: pcr_bindings empty - skipping PCR read");
         }

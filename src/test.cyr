@@ -252,6 +252,13 @@ fn _doc2(a, b) {
     return _json_doc(v);
 }
 
+fn _cat2(a, b) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, a);
+    str_builder_add_cstr(sb, b);
+    return str_data(str_builder_build(sb));
+}
+
 fn _doc3(a, b, c) {
     var v = vec_new(); vec_push(v, a); vec_push(v, b); vec_push(v, c);
     return _json_doc(v);
@@ -1330,6 +1337,24 @@ fn test_emergency_cred_format() {
     assert_eq(_kind(TV_CHEAP()), EMERG_CRED_ARGON2ID, "cred: v1 record is ARGON2ID");
     assert_eq(_kind(TV_REAL()), EMERG_CRED_ARGON2ID, "cred: default-param record is ARGON2ID");
 
+    # ⚠ 1.6.16 LOW-4 — the consumer half of a generator/consumer divergence.
+    #
+    # `_emerg_parse_bounded` bounds DURING decimal accumulation and gives up
+    # past 19 digits, so a zero-padded cost field longer than that classifies
+    # INVALID. `scripts/mkcred.sh --check` normalised through `$((10#$f))`
+    # first, which collapses the padding and blessed the record — so the
+    # validator said OK and kybernet rejected it. That is the brick class
+    # mkcred's own header warns about, and with `emergency_require_auth: true`
+    # it is a board prompting for a password nothing can match.
+    #
+    # Asserted on BOTH sides now: the script rejects it (CI's generator
+    # self-test) and this asserts the parser really does classify it INVALID,
+    # so the claim that the bounds are a copy is tested rather than stated.
+    var long_cost = _cat2("v1$2$0000000000000000019456$1$6b796265726e65742d746573742d3031$",
+      "2b314f63f14b4817f38b55e7c5c53e55a4973ce075d7a95ad2da3a4aa7c57c5e");
+    assert_eq(_cred_kind_of(long_cost), EMERG_CRED_INVALID,
+      "cred: a >19-digit cost field is INVALID, never coerced");
+
     # The 1.5.8 credential — sha256("hunter2"). This exact string is what
     # qemu/build-initramfs.sh has written since 1.5.8.
     var legacy = "f52fbd32b2b3b86ff88ef6c490628285f482af15ddcb29541f94bcf526a3f6c7";
@@ -2266,6 +2291,34 @@ fn test_edge_config_rejects() {
     # veritysetup was SIGKILLed and a board with an INTACT rootfs powered off
     # reporting "veritysetup missing" — a tool that was present the whole time.
     # Bounds are rejections at LOAD, never clamps (rule 19).
+    # ⚠ A REJECTED BLOCK MUST LEAVE NO STATE BEHIND. 1.6.16 LOW-1.
+    #
+    # `edge_set_devices` used to fire as soon as the device triple validated,
+    # BEFORE the expected_pcrs block could still reject. So one bad character in
+    # one baseline left the device paths committed while the caller was told the
+    # block was malformed — load_config then announced, twice, that edge
+    # verification was DISABLED and edge_boot_run verified against the retained
+    # paths anyway. Two subsystems, opposite verdicts, one config, one boot.
+    var good_dev = "\"root_device\":\"/dev/vda\",\"hash_device\":\"/dev/vdb\",";
+    var good_hash = "\"root_hash\":\"aabbccddeeff00112233445566778899aabbccddeeff001122334455667788ff\",";
+    assert_eq(edge_config_from_json(json_v_parse(_doc3(
+            "{\"edge\":{", _cat2(good_dev, good_hash),
+            "\"expected_pcrs\":[\"nothex\"]}}")), ec), 0,
+      "edge: a bad baseline rejects the block");
+    assert_eq(edge_root_device(), 0, "edge: ...and commits NO device path");
+
+    # The same triple with everything valid must of course still commit.
+    assert_eq(edge_config_from_json(json_v_parse(_doc3(
+            "{\"edge\":{", _cat2(good_dev, good_hash),
+            "\"tpm_attestation\":false}}")), ec), 1, "edge: a valid triple is accepted");
+    assert(edge_root_device() != 0, "edge: ...and the device path IS committed");
+
+    # And a block that is REMOVED clears what a previous load committed — the
+    # SIGHUP path, where nothing used to reset these globals at all.
+    assert_eq(edge_config_from_json(json_v_parse(_doc3("{}", "", "")), ec), 1,
+      "edge: no block at all is accepted");
+    assert_eq(edge_root_device(), 0, "edge: a removed block CLEARS the device path");
+
     assert_eq(edge_config_from_json(json_v_parse(
           _doc3("{\"edge\":{\"verify_timeout_ms\":999}}", "", "")), ec), 0,
       "edge: verify_timeout_ms below the 1000 floor rejected");

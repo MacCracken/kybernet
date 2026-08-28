@@ -413,6 +413,15 @@ fn edge_apply_defaults(ec) {
 fn edge_config_from_json(root, ec) {
     if (ec == 0) { return 1; }
     edge_apply_defaults(ec);
+    # ⚠ CLEAR THE MODULE GLOBALS TOO, NOT JUST THE DEP STRUCT. 1.6.16 LOW-1.
+    #
+    # `edge_apply_defaults` resets argonaut's EdgeBootConfig; kybernet's own
+    # device/baseline globals live in edge_boot.cyr and were never reset by
+    # anything. So the `eb == 0` early return below — an edge block that was
+    # REMOVED on a SIGHUP — left the previous boot's device paths standing, and
+    # so did every rejection path. Both halves of the edge state are cleared
+    # here, and re-committed at the single commit point at the end.
+    edge_reset_devices();
 
     var eb = json_v_obj_get(root, "edge");
     if (eb == 0) { return 1; }
@@ -487,13 +496,31 @@ fn edge_config_from_json(root, ec) {
     if (rh != 0) { have = have + 1; }
     if (have != 0 && have != 3) { return 0; }
 
-    edge_set_devices(rd, hd, rh, ld);
+    # ⚠ NOT COMMITTED YET. 1.6.16 LOW-1.
+    #
+    # `edge_set_devices` used to fire here, before the `expected_pcrs` block
+    # below could still `return 0`. So a config whose device triple was valid
+    # and whose baselines were not — one bad character in one baseline string —
+    # left `_eb_root_device` / `_eb_hash_device` / `_eb_root_hash` COMMITTED
+    # while the caller was told the block was malformed. load_config then reset
+    # argonaut's EdgeBootConfig and told the operator, twice, that edge
+    # verification was DISABLED — and `edge_boot_run` went on to run
+    # `_eb_verity_verify` anyway against the retained device paths. Two
+    # subsystems reporting opposite verdicts about one config on one boot, which
+    # is the exact shape `boot_stages.cyr` documents having removed for the
+    # dm-verity-probe case.
+    #
+    # Staged in locals and committed at a single point once EVERYTHING has
+    # validated. See `edge_reset_devices` for the other half — an absent or
+    # rejected block must also CLEAR state a previous load left behind, which
+    # matters on the SIGHUP path and when an edge block is removed.
+    var pv = 0;
 
     # --- expected PCR baselines ---
     var ex = json_v_obj_get(eb, "expected_pcrs");
     if (ex != 0) {
         if (json_v_is_arr(ex) == 0) { return 0; }
-        var pv = vec_new();
+        pv = vec_new();
         var n = json_v_arr_len(ex);
         for (var k = 0; k < n; k = k + 1) {
             var e = json_v_arr_get(ex, k);
@@ -505,8 +532,13 @@ fn edge_config_from_json(root, ec) {
             if (edge_is_all_zero_hex(d) == 1) { return 0; }
             vec_push(pv, d);
         }
-        edge_set_expected_pcrs(pv);
     }
+
+    # THE SINGLE COMMIT POINT. Nothing above this line has touched the module
+    # globals, so every `return 0` path leaves them exactly as
+    # `edge_reset_devices` left them.
+    edge_set_devices(rd, hd, rh, ld);
+    if (pv != 0) { edge_set_expected_pcrs(pv); }
 
     return 1;
 }
