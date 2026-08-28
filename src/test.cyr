@@ -1816,6 +1816,17 @@ fn test_seccomp_basic_profile() {
     vec_push(want, BS_STAT);
     vec_push(want, BS_LSTAT);
     vec_push(want, BS_PIPE);
+    # The wait/sleep primitives, same release, same reason: a confined daemon
+    # that cannot sleep busy-spins a core, and `chrono.sleep_ms` DISCARDS its
+    # syscall result so nothing reports the denial. Unasserted until now.
+    vec_push(want, BS_POLL);
+    vec_push(want, BS_NANOSLEEP);
+    #endif
+    #ifdef CYRIUS_ARCH_AARCH64
+    # aarch64 reaches the same sleep through ppoll — the ESYSXLAT ladder
+    # rewrites cyrius source-7 to nr 73 — so the primitive is arch-specific
+    # even though the calling code is not.
+    vec_push(want, BS_PPOLL);
     #endif
     # The counterpart of every parity addition, asserted on BOTH arches — this
     # is the rule itself ("add only where the other arch's equivalent is already

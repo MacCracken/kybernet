@@ -10,8 +10,9 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [1.6.19] — 2026-08-28
 
 **`seccomp: basic` could not open a file on x86_64, and had not been able to
-since 1.6.0 — and a confined daemon could not sleep on either arch.** Suite 739
-→ **745** assertions. Harness 72 → **79** properties.
+since 1.6.0 — and a confined daemon could not sleep on either arch.** Suite 739 →
+**747** assertions (742 on aarch64 — six are x86-only, one aarch64-only).
+Harness 72 → **79** properties.
 No dep bumps — sigil 3.12.13 / agnostik 1.5.1 / libro 2.9.0 / argonaut 1.14.0 are
 unchanged, and the cyrius pin stays at 6.5.35.
 

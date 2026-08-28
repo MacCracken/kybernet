@@ -113,9 +113,38 @@ if ! printf '%s' "$SUMMARY" | grep -qE '^[0-9]+ passed,'; then
     fail=1
 else
     COUNT="$(printf '%s' "$SUMMARY" | sed -E 's/^([0-9]+) passed.*/\1/')"
-    FLOOR="$(grep -oE '\(([0-9]+) tests must pass\)' CLAUDE.md | grep -oE '[0-9]+' | head -1)"
+    # ⚠ THE AARCH64 FLOOR IS ITS OWN NUMBER, NOT THE x86 ONE.
+    #
+    # This read `(N tests must pass)` — the x86_64 floor — and failed a
+    # perfectly correct suite with "the aarch64 suite SHRANK — 741 < 745".
+    # src/test.cyr necessarily carries `#ifdef CYRIUS_ARCH_*` assertions,
+    # because a seccomp allowlist is arch-specific (standing rule 47):
+    # BS_OPEN / BS_STAT / BS_LSTAT / BS_PIPE / BS_POLL / BS_NANOSLEEP exist
+    # only on x86_64, BS_PPOLL only on aarch64. The counts differ for a real
+    # reason, and padding the short arch with filler assertions to equalise
+    # them would buy a tidy number at the cost of the suite meaning anything.
+    #
+    # So both floors are declared in CLAUDE.md and each gate reads its own.
+    # They must be bumped together — see standing rule 49.
+    # ⚠ `grep -oE '[0-9]+'` HERE RETURNS 64 — from the "64" in "aarch64".
+    # It did, and because 742 >= 64 the check then PASSED vacuously while
+    # reporting "floor 64". A gate that reads the wrong number and passes is
+    # worse than one that fails (standing rule 32), so take the digits at the
+    # END of the match and sanity-bound the result below.
+    FLOOR="$(grep -oE 'aarch64 test floor: [0-9]+' CLAUDE.md | grep -oE '[0-9]+$' | head -1)"
+    if [ -n "$FLOOR" ] && [ "$FLOOR" -lt 100 ]; then
+        echo "  FAIL: parsed an implausible aarch64 test floor ($FLOOR)."
+        echo "        The suite is in the hundreds; a small number means the"
+        echo "        parse matched something else and the check would pass"
+        echo "        vacuously. Fix the parse, not the floor."
+        fail=1
+        FLOOR=""
+    fi
     if [ -z "$FLOOR" ]; then
-        echo "  FAIL: could not read the test floor from CLAUDE.md"
+        echo "  FAIL: could not read 'aarch64 test floor: N' from CLAUDE.md."
+        echo "        This gate needs its OWN floor — the x86_64 one is higher"
+        echo "        because src/test.cyr has arch-gated assertions (rule 49)."
+        echo "        Deleting the line is not a way past this gate."
         fail=1
     elif ! printf '%s' "$SUMMARY" | grep -q '0 failed'; then
         echo "  FAIL: aarch64 suite has failures: $SUMMARY"

@@ -21,7 +21,7 @@ The helmsman that steers the Argo. Manages system boot, essential mounts, signal
 ```sh
 cyrius deps                                  # Resolve deps from cyrius.cyml into lib/
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet   # Build (DCE recommended)
-cyrius test src/test.cyr                     # Run 745 tests
+cyrius test src/test.cyr                     # Run 747 tests
 cyrius bench src/bench.cyr                   # Run benchmarks
 bash scripts/bench-history.sh                # Record bench history + ≥15% regression gate (MANDATORY on every release)
 cyrius build --aarch64 src/main.cyr build/kybernet-aarch64   # Cross-build aarch64
@@ -113,7 +113,7 @@ Do **not** add a `path = "../<dep>"` alongside `git`/`tag`. When `path` resolves
 
 1. Make changes to `src/main.cyr` or `src/lib/*.cyr`
 2. Build: `CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet`
-3. Test: `cyrius test src/test.cyr` (745 tests must pass)
+3. Test: `cyrius test src/test.cyr` (747 tests must pass)
 4. Cross-build: `cyrius build --aarch64 src/main.cyr build/kybernet-aarch64` (verify both arches)
 5. Harness (needs KVM): `bash qemu/boot-test.sh` — 79 properties across five passes: boot markers + budget, the reactor gate, dm-verity verification, the emergency-auth prompt against BOTH credential formats, and the quiet gate (log_to_console=false)
 5b. **On a version bump: `bash scripts/bench-history.sh`** — records per-benchmark ns/op to `benches/history.csv` and exits non-zero on a ≥15% regression vs the previous run. Review and explain (or fix) any flagged delta before cutting.
@@ -212,6 +212,8 @@ Apply on every change touching src/:
 
 48. **⚠ MEASURE A SECURITY PROFILE AGAINST THE BINARY SHAPE PRODUCTION SHIPS, NOT THE ONE THAT WAS CONVENIENT TO STAGE.** `seccomp: basic` was gated for six releases by a busybox `/bin/sh` one-liner — and glibc uses `openat`, so the gate could not see the defect above. Every AGNOS service (aethersafha, daimon, agnoshi) is a **static, libc-free Cyrius binary**; the profile had never been executed against one. `qemu/notify-fixture.cyr` and `qemu/landlock-fixture.cyr` were already moved off busybox for exactly this reason, and both say so in their headers — the reasoning existed and was simply not carried to the third fixture. When a gate covers a security mechanism, ask what a real consumer *is*, and stage that. ⚠ Pair it with a **control arm**: `kyb-seccomp-off` runs the SAME binary with no security block, because a denial-only assertion cannot distinguish a working filter from a broken environment — a read-only `/dev/shm` would make the confined `mkdirat` fail and a denial-only gate would score that a pass. Assert the specific errno too (EPERM, not ENOENT, not a kill). And a fixture that cannot report must **exit non-zero**: silent success is how this hid. Rule 27 asked for the effect to be asserted from inside the child; these are the three things that make such an assertion mean something. 1.6.19.
 
+49. **⚠ THE TWO ARCHITECTURES RUN DIFFERENT NUMBERS OF ASSERTIONS, AND ONE FLOOR CANNOT GATE BOTH.** `src/test.cyr` carries `#ifdef CYRIUS_ARCH_*` assertions — necessarily, because a seccomp allowlist is arch-specific (rule 47) and `BS_OPEN`/`BS_STAT`/`BS_LSTAT`/`BS_PIPE`/`BS_POLL`/`BS_NANOSLEEP` exist only on x86_64 while `BS_PPOLL` exists only on aarch64. So x86_64 runs **747** and aarch64 runs **742**, and `scripts/aarch64-exec-gate.sh` reading the x86 floor out of CLAUDE.md failed a correct suite with `the aarch64 suite SHRANK — 741 < 745`. ⚠ **Do not "fix" that by padding the short arch with filler assertions** — the counts differ for a real reason and inventing assertions to equalise them buys a tidy number at the cost of the suite meaning what it says. Both floors are declared in this file — the x86 one on the Development Process "Test" line, the aarch64 one on the release-gate line for `aarch64-exec-gate.sh` — and each gate reads its own. **Both must be bumped together** on any change to an arch-gated assertion. ⚠ Each marker must appear in this file exactly ONCE in parseable form: both gates take `head -1`, so a second copy in prose (including in this rule) becomes a candidate the parse can pick up, and the two would then drift silently. Refer to them in words, never by writing the literal pattern. ⚠ The aarch64 parse also has to take the digits at the END of its match: a bare `[0-9]+` returns **64**, from the "64" in "aarch64", and because the count exceeds it the gate then PASSES while reporting a floor of 64 — a mis-parse that weakens a gate instead of failing it, which is why that gate also refuses any floor below 100. A gate fails if it cannot find its floor, so deleting the line is not a way past it. 1.6.19.
+
 ## Release gates
 
 Every version bump runs all of these, in this order, and they must all be green before cutting:
@@ -221,8 +223,8 @@ bash scripts/verify-lock.sh                         # the COMMITTED lock == a fr
 rm -rf lib && cyrius deps && cyrius deps --verify   # expect: N verified, 0 failed
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet
 cyrius build --aarch64 src/main.cyr build/kybernet-aarch64
-cyrius test src/test.cyr                            # 745 tests, 0 failed
-bash scripts/aarch64-exec-gate.sh                   # EXECUTES aarch64 (needs qemu-user)
+cyrius test src/test.cyr                            # 747 tests, 0 failed
+bash scripts/aarch64-exec-gate.sh                   # EXECUTES aarch64 (needs qemu-user); aarch64 test floor: 742
 bash scripts/bench-history.sh                       # ≥15% regression gate
 bash qemu/boot-test.sh                              # needs KVM
 ```

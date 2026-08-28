@@ -7,8 +7,10 @@
 ## Version
 
 **1.6.19** — `seccomp: basic` could not open a file on x86_64, and had not been
-able to since 1.6.0. Suite 739 → **745** assertions. Harness 72 → **79**
-properties. **No dep bumps**: sigil 3.12.13 / agnostik 1.5.1 / libro 2.9.0 /
+able to since 1.6.0. Suite 739 → **747** assertions (742 on aarch64: the seccomp
+allowlist is arch-specific, so six assertions are x86-only and one is
+aarch64-only, and each gate now reads its own declared floor). Harness 72 →
+**79** properties. **No dep bumps**: sigil 3.12.13 / agnostik 1.5.1 / libro 2.9.0 /
 argonaut 1.14.0, cyrius 6.5.35.
 
 ⚠ **The defect, and why it hid.** aarch64 is an `*at`-only architecture, so the
