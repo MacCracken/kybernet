@@ -342,14 +342,15 @@ cat > "${INITRAMFS_DIR}/etc/kybernet/config.json" << 'CFGEOF'
       "description": "reports its own cgroup limits; depends_on kyb-live because its control case reads kyb-live's cgroup",
       "depends_on": ["kyb-live"],
       "binary": "/bin/sh",
-      "args": ["-c", "C=$(cut -d: -f3 /proc/self/cgroup); D=/sys/fs/cgroup$C; { echo LIMIT-cgroup=$C; echo LIMIT-memmax=$(cat $D/memory.max 2>&1); echo LIMIT-pidsmax=$(cat $D/pids.max 2>&1); echo LIMIT-cpuweight=$(cat $D/cpu.weight 2>&1); echo LIMIT-memhigh=$(cat $D/memory.high 2>&1); echo LIMIT-ctrl=$(cat /sys/fs/cgroup/kybernet.slice/cgroup.subtree_control 2>&1); echo LIMIT-unlimited=$(cat /sys/fs/cgroup/kybernet.slice/kyb-live/memory.max 2>&1); } > /dev/console 2>&1"],
+      "args": ["-c", "C=$(cut -d: -f3 /proc/self/cgroup); D=/sys/fs/cgroup$C; { echo LIMIT-cgroup=$C; echo LIMIT-memmax=$(cat $D/memory.max 2>&1); echo LIMIT-pidsmax=$(cat $D/pids.max 2>&1); echo LIMIT-cpuweight=$(cat $D/cpu.weight 2>&1); echo LIMIT-memhigh=$(cat $D/memory.high 2>&1); echo LIMIT-cpumax=$(cat $D/cpu.max 2>&1); echo LIMIT-ctrl=$(cat /sys/fs/cgroup/kybernet.slice/cgroup.subtree_control 2>&1); echo LIMIT-unlimited=$(cat /sys/fs/cgroup/kybernet.slice/kyb-live/memory.max 2>&1); } > /dev/console 2>&1"],
       "type": "oneshot",
       "restart": "never",
       "limits": {
         "memory_max": 67108864,
         "memory_high": 50331648,
         "cpu_weight": 250,
-        "pids_max": 32
+        "pids_max": 32,
+        "cpu_max_us": 50000
       }
     },
     {
@@ -421,6 +422,22 @@ cat > "${INITRAMFS_DIR}/etc/kybernet/config.json" << 'CFGEOF'
       "type": "oneshot",
       "restart": "never",
       "depends_on": ["kyb-nonroot"]
+    },
+    {
+      "name": "kyb-prereq-fail",
+      "description": "1.6.17: a oneshot that CANNOT start — its binary does not exist",
+      "binary": "/usr/bin/kyb-does-not-exist",
+      "type": "oneshot",
+      "restart": "never"
+    },
+    {
+      "name": "kyb-prereq-dep",
+      "description": "1.6.17: depends on a service that fails; must be SKIPPED, never started",
+      "binary": "/bin/sh",
+      "args": ["-c", "echo PREREQ-DEP-RAN > /dev/console 2>&1"],
+      "type": "oneshot",
+      "restart": "never",
+      "depends_on": ["kyb-prereq-fail"]
     },
     {
       "name": "kyb-capuid",

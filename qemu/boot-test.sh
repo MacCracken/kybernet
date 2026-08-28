@@ -24,7 +24,7 @@
 #   "started: kyb-live"              — a LIVE service, so a cgroup is really
 #                                      created and the pid moved into it
 #                                      (a completed oneshot correctly gets none)
-#   "removed service cgroups: 15"    — the shutdown sweep killed and rmdir'd them
+#   "removed service cgroups: 16"    — the shutdown sweep killed and rmdir'd them
 #
 #     ⚠ NINE of NINE. This said EIGHT from 1.5.3 to 1.6.1, with a comment
 #     arguing the shortfall was correct: kyb-orphan backgrounds a child, this
@@ -356,12 +356,12 @@ for marker in \
     "kybernet: services started" \
     "kybernet: harness done" \
     "kybernet: shutdown" \
-    "kybernet: config: services parsed: 15" \
+    "kybernet: config: services parsed: 17" \
     "kybernet:   completed (oneshot): kyb-dep" \
     "kybernet:   completed (oneshot): kyb-svc" \
     "kybernet: boot: skipped (not applicable): Start udev device manager" \
     "kybernet:   started: kyb-live" \
-    "kybernet: removed service cgroups: 15"; do
+    "kybernet: removed service cgroups: 16"; do
     if echo "$RUNTIME_OUT" | grep -aqF "$marker"; then
         echo "  OK: $marker"
     else
@@ -632,6 +632,64 @@ else
     echo "$RUNTIME_OUT" | grep -aE '^LIMIT-memmax' | head -1 || true
     fail=1
 fi
+# ⚠ THE HARD CPU CAP. 1.6.17.
+#
+# kybernet could express `cpu.weight` — a RELATIVE share, meaning "this service
+# matters less than its neighbours when they compete" — and could not express a
+# ceiling, so no service could be told it may never exceed half a core. The
+# blocker was mechanical: every other limit file takes one integer and `cpu.max`
+# takes "<quota> <period>".
+#
+# 50000 against the kernel's default 100000 us period is 0.5 CPU, so the file
+# must read back exactly "50000 100000" — the period proves kybernet wrote both
+# halves rather than the kernel defaulting one.
+# ⚠ A FAILED PREREQUISITE MUST BLOCK ITS DEPENDENTS. 1.6.17.
+#
+# `resolve_service_waves` only ORDERS the waves — a wave-N failure incremented
+# `failed` and wave N+1 started regardless. So a service whose prerequisite did
+# not come up was launched into a world without the thing it requires, and
+# either exited nonzero immediately (an exit the operator has to trace back by
+# hand) or ran degraded against missing state.
+#
+# kyb-prereq-fail cannot start: its binary does not exist. kyb-prereq-dep
+# depends on it and prints PREREQ-DEP-RAN if it runs. The assertion that matters
+# is the ABSENCE of that line — a service that merely started proves nothing,
+# since it would have started before this change too.
+#
+# Note the cgroup count is 16, not 17, for 17 services: the FAILED service is
+# prepared before argonaut is asked to start it and so owns a cgroup, while the
+# SKIPPED one is caught before `_prepare_service_cgroup` and owns none. That
+# asymmetry is deliberate and is what the count is pinning.
+if echo "$RUNTIME_OUT" | grep -aqF "FAILED to start: kyb-prereq-fail"; then
+    echo "  OK: a service with a missing binary fails to start"
+else
+    echo "  FAIL: kyb-prereq-fail did not fail — the fixture no longer proves anything"
+    fail=1
+fi
+
+if echo "$RUNTIME_OUT" | grep -aqF "SKIPPED (prerequisite failed): kyb-prereq-dep"; then
+    echo "  OK: a dependent of a failed service is SKIPPED, with the blocker named"
+else
+    echo "  FAIL: kyb-prereq-dep was not skipped — a failed prerequisite did not block it"
+    echo "$RUNTIME_OUT" | grep -aiE 'prereq' | head -3 || true
+    fail=1
+fi
+
+if echo "$RUNTIME_OUT" | grep -aqF "PREREQ-DEP-RAN"; then
+    echo "  FAIL: kyb-prereq-dep RAN despite its prerequisite failing"
+    fail=1
+else
+    echo "  OK: the dependent never executed — the skip is real, not just logged"
+fi
+
+if echo "$RUNTIME_OUT" | grep -aqE '^LIMIT-cpumax=50000 100000'; then
+    echo "  OK: cpu.max applied (0.5 CPU, read back from kernel)"
+else
+    echo "  FAIL: cpu.max not applied — the hard CPU cap did not reach the kernel"
+    echo "$RUNTIME_OUT" | grep -aE '^LIMIT-cpumax' | head -1 || true
+    fail=1
+fi
+
 if echo "$RUNTIME_OUT" | grep -aqF "LIMIT-pidsmax=32"; then
     echo "  OK: pids.max applied (32, read back from kernel)"
 else

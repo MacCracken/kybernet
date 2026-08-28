@@ -1,14 +1,17 @@
 # Kybernet Roadmap
 
-**Current: v1.6.16** — [CHANGELOG.md](../../CHANGELOG.md) is the record of what each
+**Current: v1.6.17** — [CHANGELOG.md](../../CHANGELOG.md) is the record of what each
 release actually did. This file carries only what is **not** done.
 
 This file now carries two intakes. The 1.5.9 sweep opened **38** items (counted at the
-`1.6.0` tag) and **14 of those remain** — seventeen releases of attrition. **The
-2026-08-26 P(-1) audit is closed**: 21 items were added to this file and 20 are done,
-leaving only MEDIUM-10, which is partial on purpose. Plus two opened by the 1.6.14
+`1.6.0` tag) and **12 of those remain** — eighteen releases of attrition. The
+2026-08-26 P(-1) audit is closed apart from MEDIUM-10. Plus two opened by the 1.6.14
 work (one argonaut allocation finding, one cyrius filing split out of CRITICAL-1).
-Total open: **17**. Every number is `grep -c '^- \[ \]'` against
+Total open: **15**.
+
+⚠ **Four of the fifteen are done in a dep and waiting only on a tag** — libro 2.9.0,
+argonaut 1.14.0 and sigil 3.12.13. They are marked as such rather than ticked,
+because a fix kybernet cannot resolve is a fix kybernet does not have. Every number is `grep -c '^- \[ \]'` against
 this file at the relevant tag, not an estimate.
 
 ⚠ The item count went UP at v1.6.13, and that is the audit working rather than the
@@ -40,8 +43,8 @@ something outside this repo.
 `cyrius lint` reports **0 untracked deferrals and 0 warnings** across the tree, and as
 of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into fiction.
 
-**Gate counts at v1.6.16** (a next agent must not let these shrink; each is enforced):
-725 test assertions (**on both arches**) · 67 harness properties · 56 benchmarks (two
+**Gate counts at v1.6.17** (a next agent must not let these shrink; each is enforced):
+733 test assertions (**on both arches**) · 71 harness properties · 56 benchmarks (two
 reported-not-gated, declared) · the aarch64 execution gate · the committed-lock gate. See
 [state.md](state.md) for the full current-state handoff.
 
@@ -67,48 +70,34 @@ Grouped by where the fix lands: **16 kybernet**, 2 argonaut, 1 sigil, 1 libro, 1
 cyrius. The dep ones cannot ship from here — dep first, **the user tags it**, consumer
 second (see the release order below).
 
-- [ ] **MEDIUM-10 — PARTIAL. 224 -> 192 bytes per audit record; the remaining 176
-      needs a libro API change.** argonaut 1.13.10 caches the two constant Strs
-      (`source` is always "argonaut"; `event_type_str` returns a literal), which is
-      32 of the 224. The rest is inside libro's `entry_new`: an 88-byte struct plus
-      the timestamp, hash and algorithm Strs.
-      ⚠ **The obvious fix was implemented and REVERTED, so do not simply retry it.**
-      Having a streaming chain reuse one scratch entry — sound in principle, since a
-      streaming chain retains nothing and the struct is dead once `_chain_retain` has
-      taken its hash — breaks `chain_append`'s contract that the returned entry
-      belongs to the caller. libro's own suite asserts two returned entries are
-      independent, and four tests go red (verified, then reverted; libro is unchanged
-      at 2.8.12). That is a real contract, not a test artifact.
-      THE DESIGN THAT WORKS: an opt-in libro API — an append that returns the head
-      HASH rather than an entry, using a per-chain scratch internally — which
-      existing callers ignore and argonaut's `audit_log_record` adopts. That is a
-      libro MINOR release with consumer review, not a patch. Separately,
-      `execute_health_check`'s 64-byte result should be written into a
-      caller-supplied slot on the polling path.
-      ⚠ This item is deliberately still OPEN. Its original complaint was that it had
-      been recorded as closed in four documents while still being there.
-
-- [x] **MEDIUM-9 — CLOSED BY FILING (2026-08-27).** aarch64 `sys_pause()` issues
-      `flock(0,0)` and returns immediately. Same cyrius codegen defect as CRITICAL-1,
-      same filing:
-      `docs/development/issues/2026-08-27-aarch64-esysxlat-eats-native-signalfd4-and-ppoll.md`.
-      cyrius is off-limits to this repo and filing an issue is the only permitted
-      action; there is no consumer-side workaround (five failed attempts are recorded
-      in the filing). Tracked to completion by the aarch64 execution gate's
-      `AARCH64_KNOWN_BROKEN` declaration, which fails if the entry ever becomes stale.
+- [ ] **MEDIUM-10 — the OPT-IN API LANDED (libro 2.9.0, awaiting a tag); the bytes
+      mostly did not, and the first analysis was wrong about why.**
+      `chain_append_nokeep` is in and works: it returns the head hash rather than an
+      entry, so a streaming chain can reuse one scratch struct without breaking
+      `chain_append`'s contract that the entry belongs to the caller (libro's own suite
+      holds two at once — that is why it had to be a second entry point).
+      MEASURED: a streaming append was **224 bytes of arena plus an 88-byte
+      `fl_alloc`**; with nokeep it is **208 and no `fl_alloc`** — a third of the real
+      cost, with the freelist half at zero, but the arena figure barely moves.
+      ⚠ **The entry struct was never the dominant cost, which is what the 1.6.15
+      analysis assumed.** What dominates is Strs inherent to producing a new link:
+      the RFC3339 timestamp (measured 40 bytes), the superseded head-hash Str, and the
+      hasher's output. Closing it means changing what a hash IS in libro — a fixed
+      buffer on the chain rather than a fresh `Str` per record — which touches
+      `entry_compute_hash` and therefore byte-identical linkage for every consumer.
+      That is the next step, and it is a libro change with real blast radius, not a
+      tidy-up.
 
 ---
 
-- [ ] **`check_command` allocates 232 bytes per health check, on PID 1's reactor
-      path.** Measured during the 1.6.14 work (`alloc_used()` delta over two calls
-      = 464 B). At a 5 s interval that is ~4 MB/day/service in the arena init never
-      resets — the same class as 1.6.3 / 1.6.5 / 1.6.6 / 1.6.12 / 1.6.13 HIGH-4.
-      It comes from `str_from` boxes, `safe_cmd_new`, `run_safe_cmd_timeout`'s argv
-      buffer and `_resolve_safe_binary`'s path builder, so it is pre-existing and
-      shared with the edge-boot callers — which run once per boot, where it does not
-      matter. Removing it means reworking `SafeCommand`'s allocation rather than
-      patching one call site, so it was filed rather than rushed into 1.13.9.
-      Lands in argonaut.
+- [ ] **`check_command`'s 232 bytes/health-check — FIXED IN argonaut 1.14.0, AWAITING
+      A TAG.** Now **0 bytes per call**, asserted in `tests/tcyr/health_exec.tcyr`
+      across 50 calls rather than described. One SafeCommand per process with its args
+      vec truncated rather than replaced, a fixed pool of Str boxes rewritten in place,
+      and static argv/envp in `run_safe_cmd_timeout`. Also fixed while there: the word
+      split silently TRUNCATED a command past 16 words and ran the shortened
+      command — found by writing the test for the new argv bound. **Bump kybernet's
+      argonaut pin once 1.14.0 is tagged.**
 
 ## v1.6.x — code that does nothing, and docs that say it does
 
@@ -162,15 +151,6 @@ second (see the release order below).
       agnosticos' config. Note the ordering constraint 1.6.9 established: a service
       with `"seccomp": "basic"` AND a uid works only because the drop precedes the
       filter, and none of setuid/setgid/setgroups/setresuid are in that allowlist.
-- [ ] **Landlock is pinned to ABI 1.** `_landlock_handled_mask()` covers bits 0-12, so
-      `REFER` (ABI 2), `TRUNCATE` (ABI 3) and `IOCTL_DEV` (ABI 5) are unrestricted for
-      every sandboxed service. The 8-byte `landlock_ruleset_attr` pins ABI 1
-      deliberately; nothing records that as a scope decision. Wants a version probe.
-- [ ] **No hard CPU bandwidth cap.** kybernet can express `cpu.weight` (relative share)
-      but not `cpu.max`, so a service cannot be capped at 0.5 CPU. Mechanical blocker:
-      `_cgroup_write_u64` (`cgroup.cyr:425`) emits one integer and `cpu.max` takes
-      `"<quota> <period>"`. The same block also documents "plain integers only — no
-      `64M` suffixes".
 - [ ] **Move the emergency credential out of the world-readable config.**
       `/etc/kybernet/emergency.cred` at 0600 costs almost nothing and defeats a local
       unprivileged reader. It does **not** defeat the image-holder adversary, which is
@@ -226,16 +206,17 @@ Moved into the v1.6.1 gate line. Recording why here so the claim is not re-made:
 
 ## Blocked upstream / on an external consumer
 
-- [ ] **sigil's `exec_capture` / `exec_vec` fail open and wait unbounded.**
-      `agnosys_run_capture` checks only `n < 0`, so an absent or failing `tpm2_pcrread`
-      returns `Ok(0)` and sigil zero-fills every PCR — an attestation "pass" from a tool
-      that never ran. `agnosys_run_checked` uses `exec_vec`, which standing rule 17
-      forbids outright. kybernet's `tpm_read_pcr` call (`edge_boot.cyr:473`) is the last
-      unbounded exec in PID 1; `edge_boot.cyr:222` declines it as "not kybernet's to add".
-      **That framing is the mistake the 2026-08-24 audit already retracted once** —
-      HIGH-1 was filed deferred as "blocked upstream", and the correct fix was to add the
-      seam to argonaut. sigil is first-party. This is a sigil release, then a kybernet
-      bump.
+- [ ] **sigil's `exec_capture` / `exec_vec` — FIXED IN sigil 3.12.13, AWAITING A TAG.**
+      No module outside `sys_util.cyr` calls either stdlib function any more. 3.12.11
+      added the bounded capture and threaded it through the TPM path; 3.12.13 finishes
+      it with `agnosys_run_checked_timeout` (a bounded `exec_vec` replacement, child
+      output to /dev/null so a chatty tool cannot get EPIPE) and `agnosys_capture_n` (a
+      drop-in for `exec_capture` returning **-1** where it returned a byte count for a
+      tool that never ran). Converted: dmverity ×3, luks ×2, ima_core ×2,
+      secureboot_core ×7. ⚠ The worst site was `dmverity_verify`, which was
+      `return Ok(exec_vec(args) == 0)` — a `veritysetup verify` that never ran reported
+      as **verified**. **Bump kybernet's sigil pin once 3.12.13 is tagged.**
+
 - [ ] **⚠ FILED 2026-08-27: the aarch64 ESYSXLAT collision behind CRITICAL-1 and
       MEDIUM-9.** `docs/development/issues/2026-08-27-aarch64-esysxlat-eats-native-signalfd4-and-ppoll.md`
       in the cyrius repo, with a runnable repro under `issues/repros/`. **cyrius is
@@ -278,6 +259,22 @@ Moved into the v1.6.1 gate line. Recording why here so the claim is not re-made:
 
 One line per release. Detail lives in [CHANGELOG.md](../../CHANGELOG.md).
 
+- **v1.6.17** — Working the 1.5.9 sweep survivors. kybernet gained a HARD CPU cap
+  (`limits.cpu_max_us`): it could express `cpu.weight`, a relative share, and never a
+  ceiling, blocked on the mechanical fact that `cpu.max` takes two numbers where every
+  other limit file takes one. Verified by reading `cpu.max` back from the kernel in a
+  real PID-1 boot. And a failed prerequisite now BLOCKS its dependents —
+  `resolve_service_waves` only ordered the waves, so a service whose dependency did
+  not come up was started anyway, into a world without the thing it requires. The
+  Landlock ABI item was already closed at 1.6.14 and is ticked after checking the
+  source rather than the roadmap. In deps awaiting tags: libro 2.9.0
+  (`chain_append_nokeep`), argonaut 1.14.0 (`check_command` 232 -> 0 bytes/call, plus
+  a silently-truncated over-long command), sigil 3.12.13 (no module outside
+  `sys_util.cyr` still calls the stdlib's `exec_vec`/`exec_capture`; the worst site
+  reported a `veritysetup verify` that never ran as VERIFIED).
+  ⚠ MEDIUM-10 stays open and the reason is now measured rather than assumed: the
+  entry struct was never the dominant cost. 725 -> 733 assertions, 67 -> 71 harness
+  properties.
 - **v1.6.16** — The last of the P(-1) audit. Consumed argonaut 1.13.10 and sigil
   3.12.11, closing MEDIUM-4 (the HTTP health check's unbounded `connect`, ~127 s of
   frozen reactor per tick) and MEDIUM-8 (`tpm2_pcrread` unbounded AND
@@ -288,7 +285,7 @@ One line per release. Detail lives in [CHANGELOG.md](../../CHANGELOG.md).
   a service nobody configured; a fail-closed guard used F_OK and passed a `chmod 000`
   binary; `mkcred.sh --check` blessed a record kybernet classifies INVALID; and the
   watchdog KILL ran on every gate run with nothing asserting it. LOW-6 was already
-  closed at 1.6.14. 718 -> 725 assertions, 66 -> 67 harness properties.
+  closed at 1.6.14. 718 -> 725 assertions, 66 -> 71 harness properties.
   ⚠ Worth keeping: the first injection used to verify the watchdog assertion was
   itself broken — a stub in `lib/` is restored by `cyrius build`'s re-resolve, so the
   gate stayed green for the wrong reason. **`lib/` is not a valid injection point.**
@@ -319,7 +316,7 @@ One line per release. Detail lives in [CHANGELOG.md](../../CHANGELOG.md).
   en route: it could never run a command with an argument, on either implementation).
   Also settled the benchmark question three releases old, by proving with inert
   padding that `strlen`/`is_mounted` measure layout. 681 -> 702 assertions,
-  62 -> 67 harness properties.
+  62 -> 71 harness properties.
 - **v1.6.13** — The P(-1) audit, ten releases late, and the arch half of the product
   could not boot. 31 findings (2 CRITICAL, 9 HIGH, 13 MEDIUM, 7 LOW); 9 closed, 1
   mitigated, 21 deferred with evidence. **CRITICAL-1: `sys_signalfd()` issues

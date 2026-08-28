@@ -419,10 +419,39 @@ fn _cgroup_write_u64(service, filename, value) {
     return Ok(0);
 }
 
+# ⚠ `cpu.max` NEEDS TWO NUMBERS, WHICH IS WHY IT TOOK UNTIL 1.6.17.
+#
+# Every other limit file takes a single integer, so `_cgroup_write_u64` covered
+# them all. `cpu.max` takes `"<quota_us> <period_us>"` — the share of each period
+# the cgroup may run — or the literal `"max"` for unlimited. That one difference
+# is the whole reason kybernet could express a relative share (`cpu.weight`) but
+# never a HARD cap: a service could be told it mattered less than its neighbours,
+# but not that it may never exceed half a core.
+#
+# The period is fixed at the kernel's default 100000 us. Exposing it would let an
+# operator choose latency-vs-throughput, but it also makes the quota meaningless
+# on its own, and a single "how much CPU may this have" number is what the config
+# is for. `quota_us` is therefore hundredths of a core: 50000 = 0.5 CPU,
+# 200000 = 2 CPUs on a multi-core box.
+fn _cgroup_write_cpu_max(service, quota_us) {
+    if (quota_us <= 0) { return Ok(0); }
+    var file = cgroup_file(service, "cpu.max");
+    var sb = str_builder_new();
+    str_builder_add_int(sb, quota_us);
+    str_builder_add_cstr(sb, " 100000");
+    var val = str_builder_build(sb);
+    var fd = sys_open(str_data(file), O_WRONLY | O_CLOEXEC, 0);
+    if (fd < 0) { return Err(0 - fd); }
+    var w = sys_write(fd, str_data(val), str_len(val));
+    sys_close(fd);
+    if (is_err(w) == 1) { return Err(err_code(w)); }
+    return Ok(0);
+}
+
 # Apply agnostik cgroup_limits to a service cgroup.
-# Writes memory.max, memory.high, cpu.weight, pids.max — NOT cpu.max, which
-# this cannot express: the cgroup v2 file takes "<quota> <period>" or the
-# literal "max", and _cgroup_write_u64 emits a single fmt_int_buf integer.
+# Writes memory.max, memory.high, cpu.weight, pids.max and cpu.max. The last
+# needed its own writer because it takes "<quota> <period>" rather than a single
+# integer — see _cgroup_write_cpu_max. 1.6.17.
 # cglim_cpu_max is consequently never read. Deferred with the config key;
 # see CHANGELOG 1.5.5.
 # Returns: Result
@@ -466,6 +495,14 @@ fn cgroup_apply_limits(service, limits) {
     if (pids_max > 0) {
         var r4 = _cgroup_write_u64(service, "pids.max", pids_max);
         if (is_err_result(r4) == 1) { failed = err_code_of(r4); }
+    }
+
+    # The hard CPU cap. 1.6.17 — see _cgroup_write_cpu_max for why this one
+    # needed its own writer.
+    var cpu_max = cglim_cpu_max(limits);
+    if (cpu_max > 0) {
+        var r5 = _cgroup_write_cpu_max(service, cpu_max);
+        if (is_err_result(r5) == 1) { failed = err_code_of(r5); }
     }
 
     if (failed != 0) { return Err(failed); }

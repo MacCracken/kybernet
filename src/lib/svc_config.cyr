@@ -325,7 +325,11 @@ fn svc_apply_resources_json(sd, obj) {
     var mem_high  = _cfg_limit(lim, "memory_high");
     var cpu_wt    = _cfg_limit(lim, "cpu_weight");
     var pids_max  = _cfg_limit(lim, "pids_max");
-    if (mem_max < 0 || mem_high < 0 || cpu_wt < 0 || pids_max < 0) { return 0; }
+    # 1.6.17 — the HARD cpu cap. `cpu_weight` is a relative share; this is a
+    # ceiling. Hundredths of a core against the kernel's default 100000 us
+    # period: 50000 = half a CPU, 200000 = two CPUs.
+    var cpu_max   = _cfg_limit(lim, "cpu_max_us");
+    if (mem_max < 0 || mem_high < 0 || cpu_wt < 0 || pids_max < 0 || cpu_max < 0) { return 0; }
 
     # cpu.weight is 1..10000 in cgroup v2; anything else is EINVAL at the
     # kernel. 0 stays "unset" — that is the sentinel every field uses.
@@ -333,11 +337,26 @@ fn svc_apply_resources_json(sd, obj) {
         if (cpu_wt < 1 || cpu_wt > 10000) { return 0; }
     }
 
+    # cpu.max quota bounds. The kernel's floor is 1000 us; below that the cgroup
+    # is throttled so hard it cannot make progress, which is a config error
+    # rather than a very small limit. The ceiling is 100 CPUs — far above any
+    # board this runs on, and it exists so a typo'd extra digit is refused at
+    # LOAD rather than becoming an effectively-unlimited cap that reads as one.
+    # Rejected, never clamped: a service given a different CPU budget than the
+    # one written is a service nobody configured.
+    if (cpu_max != 0) {
+        if (cpu_max < 1000 || cpu_max > 10000000) {
+            klog("config: limits.cpu_max_us outside 1000..10000000 - service REFUSED");
+            kmsg("kybernet: config: limits.cpu_max_us out of range");
+            return 0;
+        }
+    }
+
     # An empty or all-zero block carries no policy. Attaching a
     # cgroup_limits of all zeros would be harmless but misleading — every
     # write is skipped on the 0 sentinel — so leave the field null and let
     # the start path see "no limits" rather than "limits, none set".
-    if (mem_max == 0 && mem_high == 0 && cpu_wt == 0 && pids_max == 0) { return 1; }
+    if (mem_max == 0 && mem_high == 0 && cpu_wt == 0 && pids_max == 0 && cpu_max == 0) { return 1; }
 
     # memory.high is a throttling watermark; above memory.max it can never
     # take effect, which is a config error worth surfacing rather than
@@ -353,6 +372,7 @@ fn svc_apply_resources_json(sd, obj) {
     cglim_set_memory_high(cl, mem_high);
     cglim_set_cpu_weight(cl, cpu_wt);
     cglim_set_pids_max(cl, pids_max);
+    cglim_set_cpu_max(cl, cpu_max);
     svc_def_set_cgroup_limits(sd, cl);
     return 1;
 }

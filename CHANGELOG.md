@@ -7,6 +7,106 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.6.17] — 2026-08-27
+
+**Working the 1.5.9 sweep survivors.** Suite 725 → 733 assertions. Harness 67 →
+**71** properties, two new fixtures. No dep bump: libro 2.9.0, argonaut 1.14.0 and
+sigil 3.12.13 are written and tested but **not yet tagged**.
+
+### Added — a hard CPU cap (`limits.cpu_max_us`)
+
+kybernet could express `cpu.weight` — a RELATIVE share, meaning "this service
+matters less than its neighbours when they compete" — and could not express a
+ceiling. No service could be told it may never exceed half a core.
+
+The blocker was mechanical and is why this sat open: every other limit file takes
+a single integer and `cpu.max` takes `"<quota_us> <period_us>"`, so
+`_cgroup_write_u64` could not emit it. New `_cgroup_write_cpu_max` writes both
+halves against the kernel's default 100000 us period, making the config value
+hundredths of a core — 50000 is 0.5 CPU, 200000 is two.
+
+Bounds are rejections at load, never clamps: `1000 <= cpu_max_us <= 10000000`.
+The floor is the kernel's, below which a cgroup is throttled too hard to make
+progress; the ceiling exists so a typo'd extra digit is refused rather than
+becoming an effectively-unlimited cap that reads like a limit.
+
+Verified end to end rather than from a log: `kyb-limited` now reads `cpu.max`
+back **from the kernel** inside a real PID-1 QEMU boot and the harness asserts
+`50000 100000` exactly — the period proves kybernet wrote both halves rather than
+the kernel defaulting one.
+
+### Fixed — a failed prerequisite did not block its dependents
+
+`resolve_service_waves` only ORDERS the waves. A wave-N failure incremented
+`failed` and wave N+1 started anyway, so a service whose prerequisite did not come
+up was launched into a world without the thing it requires — exiting nonzero
+immediately (an exit the operator has to trace back by hand), or worse, running
+degraded against missing state.
+
+A dependent of a failed service is now skipped, with the blocker named, and is
+itself recorded as failed so ITS dependents are skipped too — one broken
+prerequisite does not launch a whole subtree. Checked **before**
+`_prepare_service_cgroup`, so a service that will not run does not own a cgroup
+the shutdown sweep then has to account for.
+
+⚠ A skipped dependent is **not** counted in `failed`. It did not fail, it was
+never attempted, and conflating the two would make the emergency-shell heuristic
+fire on a single root cause multiplied by its fan-out.
+
+This is also the item that makes the planned "port `agnos-init`'s
+`setup_directories()` to a oneshot" design trustworthy: that puts directory
+creation in a oneshot the compositor depends on, which is only safe if a broken
+oneshot actually stops the compositor.
+
+New fixtures `kyb-prereq-fail` (a binary that does not exist) and
+`kyb-prereq-dep`. The assertion that matters is the **absence** of the
+dependent's output line — a service that merely started would prove nothing,
+since it started before this change too. `services parsed` 15 → 17;
+`removed service cgroups` 15 → **16**, not 17, because the FAILED service is
+prepared before argonaut is asked to start it and owns a cgroup, while the
+SKIPPED one is caught earlier and owns none. That asymmetry is what the count
+pins.
+
+### Closed — Landlock ABI pinning
+
+The roadmap still carried "Landlock is pinned to ABI 1 … wants a version probe".
+It was closed at **1.6.14** by HIGH-2: `_landlock_abi()` negotiates,
+`TRUNCATE` is handled from ABI 3 and `IOCTL_DEV` from 5. Verified in the source
+before ticking it rather than taken on the roadmap's word. `REFER` remains
+deliberately unhandled — unhandled it is fail-CLOSED, and adding it would loosen
+the sandbox unless every rule also granted it.
+
+### Written in deps, awaiting tags
+
+- **libro 2.9.0** — `chain_append_nokeep`, MEDIUM-10's real fix. See below.
+- **argonaut 1.14.0** — `check_command` allocated **232 bytes per health check**
+  on PID 1's reactor path; now **0**, asserted. Also fixed an over-long command
+  being silently truncated rather than refused — found by writing the test for
+  the new argv bound.
+- **sigil 3.12.13** — no module outside `sys_util.cyr` calls the stdlib's
+  `exec_vec` or `exec_capture` any more. The worst site was `dmverity_verify`,
+  which returned **Ok(true)** for a `veritysetup verify` that never ran.
+
+### ⚠ MEDIUM-10: the API landed, the bytes mostly did not
+
+libro 2.9.0 adds the opt-in append the 1.6.15 analysis called for, and it works.
+The honest measurement: a streaming append was **224 bytes of arena plus an
+88-byte `fl_alloc`**; with `chain_append_nokeep` it is **208 and no `fl_alloc`**.
+So about a third of the real cost, and the freelist half goes to zero — but the
+arena figure barely moves, because the entry struct was never the dominant cost.
+
+What dominates is Strs inherent to producing a new link with the current
+representation: the RFC3339 timestamp (measured 40 bytes), the superseded
+head-hash Str, and the hasher's output. Removing those means changing what a hash
+IS in libro — a fixed buffer on the chain rather than a fresh `Str` per record —
+which touches `entry_compute_hash` and therefore byte-identical linkage for every
+consumer.
+
+**MEDIUM-10 stays open.** The first analysis assumed the entry struct was the
+cost; it was not, and saying so is more useful than a third close.
+
+---
+
 ## [1.6.16] — 2026-08-27
 
 **The last of the P(-1) audit: both remaining MEDIUMs consumed from their deps, and

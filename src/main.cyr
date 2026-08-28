@@ -1199,6 +1199,26 @@ fn start_services() {
 
     var started = 0;
     var failed = 0;
+    # ⚠ NAMES THAT FAILED, SO THEIR DEPENDENTS DO NOT RUN. 1.6.17.
+    #
+    # `resolve_service_waves` orders waves so a dependency starts before its
+    # dependents, and that was the whole of the guarantee: a wave-N failure only
+    # incremented `failed`, and wave N+1 started anyway. So a service whose
+    # prerequisite did not come up was launched into a world where the thing it
+    # requires is absent — it either exits nonzero immediately (an exit 126/127
+    # the operator has to trace back by hand) or, worse, starts and runs
+    # degraded against missing state.
+    #
+    # This is the item that makes the "port agnos-init's setup_directories to a
+    # oneshot" plan trustworthy: that design puts directory creation in a
+    # oneshot the compositor depends on, and it is only safe if a broken
+    # oneshot actually stops the compositor rather than letting it start and
+    # fail obscurely.
+    #
+    # A skipped dependent is NOT counted in `failed`: it did not fail, it was
+    # never attempted, and conflating the two would make the emergency-shell
+    # heuristic fire on a single root cause multiplied by its fan-out.
+    var failed_names = vec_new();
     var nwaves = vec_len(waves);
     for (var wi = 0; wi < nwaves; wi = wi + 1) {
         var wave = vec_get(waves, wi);
@@ -1280,6 +1300,35 @@ fn start_services() {
             # faulted in before the move stay charged to the root cgroup
             # forever; and a oneshot has already exited by the time
             # init_start_service returns 0, so it never got a cgroup at all.
+            # ⚠ A DEPENDENT OF A FAILED SERVICE IS NOT STARTED. 1.6.17.
+            #
+            # Checked BEFORE the cgroup is prepared, so a service that will not
+            # run does not own a directory the shutdown sweep then has to
+            # account for — the same reasoning as the `enabled: false` skip.
+            var blocked = 0;
+            var blocker = 0;
+            var mydeps = svc_def_deps(managed_svc_def(msd));
+            for (var di = 0; di < vec_len(mydeps); di = di + 1) {
+                var dep_cs = str_data(vec_get(mydeps, di));
+                for (var fi = 0; fi < vec_len(failed_names); fi = fi + 1) {
+                    if (streq(str_data(vec_get(failed_names, fi)), dep_cs) == 1) {
+                        blocked = 1;
+                        blocker = dep_cs;
+                        break;
+                    }
+                }
+                if (blocked == 1) { break; }
+            }
+            if (blocked == 1) {
+                klog2("  SKIPPED (prerequisite failed): ", name_cs);
+                klog2("    its dependency did not start: ", blocker);
+                # Not counted as a failure — see failed_names above. It is also
+                # recorded as failed itself, so ITS dependents are skipped too
+                # and one broken prerequisite does not launch a whole subtree.
+                vec_push(failed_names, name);
+                continue;
+            }
+
             # The child now joins itself in kyb_pre_exec, so the cgroup and
             # its limits must already exist when argonaut forks.
             _prepare_service_cgroup(name_cs);
@@ -1294,6 +1343,7 @@ fn start_services() {
             } else {
                 klog2("  FAILED to start: ", name_cs);
                 failed = failed + 1;
+                vec_push(failed_names, name);
             }
         }
     }

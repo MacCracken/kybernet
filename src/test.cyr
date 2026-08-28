@@ -378,6 +378,49 @@ fn test_svc_config_limits() {
 # same contract the security block uses. An operator who configured a
 # memory cap and silently got none is in the position 1.5.2 refused to
 # leave them in for capabilities.
+# ⚠ 1.6.17 — the HARD cpu cap. kybernet could express `cpu.weight`, a RELATIVE
+# share, and not a ceiling: no service could be told it may never exceed half a
+# core. Bounds are rejections at LOAD, never clamps — a service given a
+# different CPU budget than the one written is a service nobody configured.
+fn test_svc_config_cpu_max() {
+    println("--- limits.cpu_max_us (1.6.17) ---");
+
+    var ok = svc_defs_from_json(json_v_parse(_doc2(
+          "{\"services\":[{\"name\":\"c\",\"binary\":\"/bin/c\",",
+          "\"limits\":{\"cpu_max_us\":50000}}]}")));
+    assert_eq(vec_len(ok), 1, "cpu_max: 50000 (0.5 CPU) accepted");
+    var cl = svc_def_cgroup_limits(vec_get(ok, 0));
+    assert(cl != 0, "cpu_max: a limits block was attached");
+    assert_eq(cglim_cpu_max(cl), 50000, "cpu_max: the value reached cgroup_limits");
+
+    # Below the kernel's 1000 us floor the cgroup is throttled so hard it cannot
+    # make progress — a config error, not a very small limit.
+    assert_eq(vec_len(svc_defs_from_json(json_v_parse(_doc2(
+              "{\"services\":[{\"name\":\"c\",\"binary\":\"/bin/c\",",
+              "\"limits\":{\"cpu_max_us\":999}}]}")))), 0, "cpu_max: below 1000us rejected");
+
+    # The ceiling exists so a typo'd extra digit is refused rather than becoming
+    # an effectively-unlimited cap that reads like a limit.
+    assert_eq(vec_len(svc_defs_from_json(json_v_parse(_doc2(
+              "{\"services\":[{\"name\":\"c\",\"binary\":\"/bin/c\",",
+              "\"limits\":{\"cpu_max_us\":10000001}}]}")))), 0, "cpu_max: above 100 CPUs rejected");
+
+    assert_eq(vec_len(svc_defs_from_json(json_v_parse(_doc2(
+              "{\"services\":[{\"name\":\"c\",\"binary\":\"/bin/c\",",
+              "\"limits\":{\"cpu_max_us\":-1}}]}")))), 0, "cpu_max: negative rejected");
+
+    # A limits block carrying ONLY cpu_max_us must still attach — before 1.6.17
+    # the all-zero check did not know about this field, so such a block would
+    # have been treated as carrying no policy at all.
+    var only = svc_defs_from_json(json_v_parse(_doc2(
+          "{\"services\":[{\"name\":\"c\",\"binary\":\"/bin/c\",",
+          "\"limits\":{\"cpu_max_us\":200000}}]}")));
+    assert_eq(vec_len(only), 1, "cpu_max: a cpu-only limits block parses");
+    assert_eq(cglim_cpu_max(svc_def_cgroup_limits(vec_get(only, 0))), 200000,
+      "cpu_max: 2 CPUs, and the block was not discarded as empty");
+    return 0;
+}
+
 fn test_svc_config_limits_rejects() {
     println("--- svc config limits rejection (1.5.5) ---");
 
@@ -3008,6 +3051,7 @@ fn main() {
     test_svc_config_parse();
     test_svc_config_limits();
     test_svc_config_limits_rejects();
+    test_svc_config_cpu_max();
     test_svc_config_health_check();
     test_config_services_reach_argonaut();
     test_boot_stage_results();
