@@ -1,0 +1,283 @@
+# qemu/seccomp-fixture.cyr — seccomp `basic` probe for the PID-1 harness. (1.6.19)
+#
+# WHY THIS EXISTS, AND WHY IT IS A CYRIUS BINARY
+# ----------------------------------------------
+# `seccomp: basic` was gated only by `kyb-seccomp`, a busybox `/bin/sh` one-liner
+# that greps its own /proc/self/status. Two problems, and the second is the one
+# that made the gate dishonest:
+#
+#   1. IT ASSERTED SURVIVAL, NOT DENIAL. A service that runs and reports
+#      `Seccomp: 2` proves a filter was installed, not that the filter denies
+#      anything. Standing rule 27 asked for the effect to be asserted from
+#      inside the child; the mode line is the closest thing to that which
+#      proves the least.
+#
+#   2. IT MEASURED THE BUILD HOST'S BUSYBOX. The dev box stages Arch's dynamic
+#      busybox; ci.yml installs `busybox-static`. A static glibc start-up issues
+#      readlinkat("/proc/self/exe") and prctl that the dynamic path does not,
+#      neither is on the allowlist, and both are tolerated because standing rule
+#      28 made the default ERRNO(EPERM). So the local green and the CI green
+#      attested to two different syscall sets — standing rule 39 exactly, and
+#      the same defect the notify and landlock fixtures were already moved off
+#      busybox to avoid.
+#
+# THE DECISION THE ROADMAP ASKED FOR
+# -----------------------------------
+# ⚠ `basic` TARGETS LIBC-FREE STATIC BINARIES, BECAUSE THAT IS WHAT AGNOS RUNS.
+# Every service kybernet supervises on a real board — aethersafha, daimon,
+# agnoshi — is a Cyrius binary: statically linked, no libc, no dynamic loader.
+# glibc's start-up sequence is not a workload this profile is measured against,
+# in either linkage. The allowlist is deliberately NOT widened to cover it:
+# adding syscalls to quiet a denial that costs nothing is how an allowlist stops
+# meaning anything, and the existing loader entries (access/newfstatat/pread64/
+# prlimit64) are already the high-water mark of that, kept only because execve's
+# own path needs them.
+#
+# So the primary evidence for `basic` is this binary, whose syscall set is a
+# property of the repo rather than of the machine that built the image. It is
+# identical on the dev box and on CI by construction. `kyb-seccomp` stays as an
+# additional shape — a dynamically linked shell is a real thing to survive — but
+# it is no longer the only thing standing behind the profile.
+#
+# WHAT IT PROVES, AND HOW IT IS FALSIFIABLE IN BOTH DIRECTIONS
+# ------------------------------------------------------------
+# The harness runs this ONE binary as TWO services: `kyb-seccomp-on` with
+# `"seccomp": "basic"` and `kyb-seccomp-off` with no security block at all.
+#
+#   - on-list  (getpid)  must succeed under both.
+#   - off-list (mkdirat) must be denied EPERM under `basic` and must SUCCEED
+#     unconfined.
+#
+# ⚠ THE UNCONFINED ARM IS THE POINT. Asserting only the denial cannot tell a
+# working filter from a broken environment: if mkdirat failed because /dev/shm
+# were read-only, a denial-only gate would read that as the filter working. The
+# free arm turns that into a failure. It is the two-service form of the
+# inside/outside pairing qemu/landlock-fixture.cyr uses within one service.
+#
+# ⚠ IT LABELS ITSELF BY THE MODE IT READS, not by an argv it was handed. A
+# fixture told which arm it is can be told wrong — the config and the
+# expectation drift, and the gate grades the label instead of the state. Reading
+# /proc/self/status makes the prefix a measurement.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fs.cyr"
+include "lib/process.cyr"
+
+var CONSOLE = "/dev/console";
+var STATUS_PATH = "/proc/self/status";
+
+# Distinct per arm so the two services cannot collide, and so the unconfined
+# arm's leftover directory cannot make a rerun look like a denial (EEXIST is
+# not EPERM, but a gate that greps for "not ALLOWED" would not care).
+var PROBE_DIR_ON = "/dev/shm/sc-probe-on";
+var PROBE_DIR_OFF = "/dev/shm/sc-probe-off";
+
+# Report through /dev/console for the same reason the Landlock fixture does:
+# a supervised service's stdout is whatever kybernet gave it, and the harness
+# greps the serial console.
+fn say(msg) {
+    var fd = sys_open(CONSOLE, O_WRONLY | O_CLOEXEC, 0);
+    if (fd < 0) { return 0 - 1; }
+    sys_write(fd, msg, strlen(msg));
+    sys_write(fd, "\n", 1);
+    sys_close(fd);
+    return 0;
+}
+
+# ⚠ `sys_open` here is `open` (nr 2) on x86_64 and `openat` (nr 56) on aarch64 —
+# ONE wrapper, two numbers, which is the entire subject of this file. Saying
+# "openat" would have been wrong on the arch the harness actually boots.
+#
+# All three of open/read/close are on the `basic` allowlist, and that is not
+# incidental: **the fixture's ability to emit ANY line at all is the regression
+# assertion for BS_OPEN.** If `open` ever leaves the allowlist again, this
+# returns -1, every emit becomes a no-op, main returns 3, and the harness fails
+# on both the missing SC[2] markers and a FAILED-to-start service. That is the
+# most load-bearing property in this file, and it is invisible unless stated.
+var _STATUS_BUF[4096];
+
+fn read_seccomp_mode() {
+    var fd = sys_open(STATUS_PATH, O_RDONLY | O_CLOEXEC, 0);
+    if (fd < 0) { return 0 - 1; }
+    var n = sys_read(fd, &_STATUS_BUF, 4095);
+    sys_close(fd);
+    if (n <= 0) { return 0 - 1; }
+    store8(&_STATUS_BUF + n, 0);
+
+    # ⚠ strstr returns an INDEX and -1 on a miss, never a pointer (standing
+    # rule 34). Comparing the result against 0 would read a match at position
+    # zero as a failure.
+    var at = strstr(&_STATUS_BUF, "Seccomp:");
+    if (at < 0) { return 0 - 1; }
+    var p = &_STATUS_BUF + at + 8;
+    while ((load8(p) & 0xFF) == 32 || (load8(p) & 0xFF) == 9) { p = p + 1; }
+    var v = 0;
+    var got = 0;
+    while ((load8(p) & 0xFF) >= 48 && (load8(p) & 0xFF) <= 57) {
+        v = v * 10 + ((load8(p) & 0xFF) - 48);
+        got = 1;
+        p = p + 1;
+    }
+    if (got == 0) { return 0 - 1; }
+    return v;
+}
+
+# On the allowlist. Returns the pid, or the negated errno.
+fn probe_getpid() {
+    return syscall(SYS_GETPID);
+}
+
+# ⚠ THE SLEEP PROBE, AND WHY IT MEASURES TIME RATHER THAN A RETURN VALUE.
+#
+# `chrono.sleep_ms` is `syscall(7, 0, 0, ms)` and **discards the result**, so
+# when the profile denied poll/ppoll the call was a silent no-op and every
+# confined daemon's main loop busy-spun at 100% of a core. Nothing returned an
+# error to anyone; the only observable was elapsed time. So that is what this
+# measures — which is standing rule 48's point exactly: assert that an operation
+# SUCCEEDED, not that the process survived it.
+#
+# Source-7 is correct on both arches: x86_64 issues poll(NULL,0,ms) directly and
+# the aarch64 ESYSXLAT ladder rewrites it to ppoll WITH the ms -> timespec
+# conversion. Writing the aarch64 number here instead would be wrong — 73 is
+# claimed by the ladder as x86 `flock`.
+#
+# clock_gettime is native on both and already on the allowlist, so the
+# measurement itself cannot be what fails.
+#ifdef CYRIUS_ARCH_X86
+var SC_CLOCK_GETTIME = 228;
+#endif
+#ifdef CYRIUS_ARCH_AARCH64
+var SC_CLOCK_GETTIME = 113;
+#endif
+
+# GLOBAL scope: `var X[N]` is N SLOTS, i.e. N * 8 bytes (standing rule 2), so a
+# struct timespec {sec, nsec} is [2] and NOT [16].
+var _SC_TS[2];
+
+fn _mono_ms() {
+    if (syscall(SC_CLOCK_GETTIME, 1, &_SC_TS) < 0) { return 0 - 1; }
+    return load64(&_SC_TS) * 1000 + load64(&_SC_TS + 8) / 1000000;
+}
+
+# Sleep 50 ms and report how long it actually took.
+fn probe_sleep_ms() {
+    var t0 = _mono_ms();
+    if (t0 < 0) { return 0 - 1; }
+    syscall(7, 0, 0, 50);
+    var t1 = _mono_ms();
+    if (t1 < 0) { return 0 - 1; }
+    return t1 - t0;
+}
+
+# NOT on the allowlist, and harmless: creating a directory under /dev/shm.
+# Returns 0 on success, else the errno as a positive number.
+#
+# mkdirat is in both stdlib arch tables as an enum member, so `syscall(...)`
+# here carries no literal number and needs no #ifdef — standing rule 1 is about
+# hardcoded integers, and 258 (x86_64) vs 34 (aarch64) is exactly why.
+fn probe_mkdirat(path) {
+    var r = syscall(SYS_MKDIRAT, AT_FDCWD, path, 448);   # 0700
+    if (r >= 0) { return 0; }
+    return 0 - r;
+}
+
+# Decimal render into a caller buffer; returns the length. Hand-rolled rather
+# than pulled from a formatter so this fixture's own syscall set stays small
+# and legible — the thing being measured is which syscalls it makes.
+fn int_into(v, buf) {
+    if (v < 0) {
+        store8(buf, 45);
+        return 1 + int_into(0 - v, buf + 1);
+    }
+    if (v < 10) {
+        store8(buf, 48 + v);
+        return 1;
+    }
+    var n = int_into(v / 10, buf);
+    store8(buf + n, 48 + (v - (v / 10) * 10));
+    return n + 1;
+}
+
+# One open/write/close per line, three fragments per line: keeping the line
+# assembly out of a string builder keeps the probe's syscall footprint to the
+# open (x86_64) / openat (aarch64), write and close the allowlist already
+# covers — and, deliberately, to nothing else, so a failure here is the
+# profile's and not the probe's.
+fn emit3(prefix, key, val) {
+    var fd = sys_open(CONSOLE, O_WRONLY | O_CLOEXEC, 0);
+    if (fd < 0) { return 0 - 1; }
+    sys_write(fd, prefix, strlen(prefix));
+    sys_write(fd, key, strlen(key));
+    sys_write(fd, val, strlen(val));
+    sys_write(fd, "\n", 1);
+    sys_close(fd);
+    return 0;
+}
+
+var _NUM_BUF[32];
+
+fn emit_int(prefix, key, v) {
+    var n = int_into(v, &_NUM_BUF);
+    store8(&_NUM_BUF + n, 0);
+    return emit3(prefix, key, &_NUM_BUF);
+}
+
+# ⚠ A FIXTURE THAT CANNOT REPORT MUST NOT EXIT 0.
+#
+# This is how the `open`-vs-`openat` defect presented on its first boot: under
+# `basic` on x86_64 the console open returned EPERM, every emit silently did
+# nothing, and the oneshot completed SUCCESSFULLY having produced no output.
+# kybernet logged "completed (oneshot): kyb-seccomp-on" and the only evidence
+# anything was wrong was a missing marker — which reads identically to a
+# fixture that was never staged. Exiting non-zero turns a silent no-op into a
+# named service failure in the boot log, next to the service that caused it.
+fn main() {
+    var mode = read_seccomp_mode();
+    var prefix = "SC[?]-";
+    var dir = PROBE_DIR_OFF;
+    if (mode == 0) {
+        prefix = "SC[0]-";
+        dir = PROBE_DIR_OFF;
+    }
+    if (mode == 2) {
+        prefix = "SC[2]-";
+        dir = PROBE_DIR_ON;
+    }
+
+    # A mode this fixture does not recognise is reported rather than silently
+    # folded into one of the two arms: the harness asserts on SC[0] and SC[2]
+    # markers, so SC[?] fails by absence AND is visible in the log.
+    if (emit_int(prefix, "MODE=", mode) < 0) { return 3; }
+
+    if (probe_getpid() > 0) {
+        emit3(prefix, "GETPID=", "ALLOWED");
+    } else {
+        emit3(prefix, "GETPID=", "DENIED");
+    }
+
+    # 40 ms of slack under a 50 ms request: a denied poll returns in
+    # microseconds, so the two outcomes are three orders of magnitude apart and
+    # the threshold is not doing delicate work.
+    var slept = probe_sleep_ms();
+    emit_int(prefix, "SLEEP_MS=", slept);
+    if (slept >= 40) {
+        emit3(prefix, "SLEEP=", "OK");
+    } else {
+        emit3(prefix, "SLEEP=", "NOSLEEP");
+    }
+
+    var e = probe_mkdirat(dir);
+    if (e == 0) {
+        emit3(prefix, "MKDIRAT=", "ALLOWED");
+    } else {
+        emit3(prefix, "MKDIRAT=", "DENIED");
+        emit_int(prefix, "MKDIRAT_ERRNO=", e);
+    }
+    return 0;
+}

@@ -291,6 +291,21 @@ cp "$LL_FIX_BIN" "${INITRAMFS_DIR}/usr/bin/kyb-landlock-fixture"
 chmod +x "${INITRAMFS_DIR}/usr/bin/kyb-landlock-fixture"
 echo "  staged kyb-landlock-fixture (Landlock probe)"
 
+# Seccomp probe — a cyrius binary for the same reason as the notify and
+# Landlock ones, and see its header for the decision it encodes: `basic` is
+# measured against libc-free static binaries, which is what every AGNOS service
+# is. The busybox `kyb-seccomp` fixture stays as an additional shape, but it can
+# no longer be the only evidence, because its syscall set is a property of the
+# build host's busybox linkage rather than of this repo.
+SC_FIX_BIN="${PROJECT_DIR}/build/seccomp-fixture"
+if ! (cd "$PROJECT_DIR" && cyrius build qemu/seccomp-fixture.cyr "$SC_FIX_BIN" >/dev/null); then
+    echo "  ERROR: could not build qemu/seccomp-fixture.cyr (compiler output above)"
+    exit 1
+fi
+cp "$SC_FIX_BIN" "${INITRAMFS_DIR}/usr/bin/kyb-seccomp-fixture"
+chmod +x "${INITRAMFS_DIR}/usr/bin/kyb-seccomp-fixture"
+echo "  staged kyb-seccomp-fixture (seccomp basic probe)"
+
 # The truncate probe's victim: outside the fixture's Landlock rule set, with
 # 16 known bytes. If the sandbox governs TRUNCATE this file is untouched; if
 # it does not, the fixture zeroes it and says so. Staged as its own file so a
@@ -481,6 +496,24 @@ cat > "${INITRAMFS_DIR}/etc/kybernet/config.json" << 'CFGEOF'
       "binary": "/usr/bin/kyb-notify-fixture",
       "type": "notify",
       "watchdog_ms": 30000,
+      "restart": "never"
+    },
+    {
+      "name": "kyb-seccomp-on",
+      "description": "the basic profile, probed from inside the child: off-list mkdirat must be denied",
+      "binary": "/usr/bin/kyb-seccomp-fixture",
+      "type": "oneshot",
+      "restart": "never",
+      "security": {
+        "seccomp": "basic",
+        "no_new_privs": true
+      }
+    },
+    {
+      "name": "kyb-seccomp-off",
+      "description": "SAME BINARY, NO SECURITY BLOCK — the control arm; mkdirat must SUCCEED here",
+      "binary": "/usr/bin/kyb-seccomp-fixture",
+      "type": "oneshot",
       "restart": "never"
     }
   ]

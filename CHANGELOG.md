@@ -7,6 +7,207 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.6.19] — 2026-08-28
+
+**`seccomp: basic` could not open a file on x86_64, and had not been able to
+since 1.6.0 — and a confined daemon could not sleep on either arch.** Suite 739
+→ **745** assertions. Harness 72 → **79** properties.
+No dep bumps — sigil 3.12.13 / agnostik 1.5.1 / libro 2.9.0 / argonaut 1.14.0 are
+unchanged, and the cyrius pin stays at 6.5.35.
+
+### Fixed — the profile was broken for every binary AGNOS actually ships
+
+⚠ **THE DEFECT.** aarch64 is an `*at`-only architecture, so the stdlib's
+`sys_open()` compiles to `openat` there — on the allowlist since 1.6.0. On
+x86_64 the *same wrapper* compiles to the legacy `open` (nr 2), which was not.
+A confined service on x86_64 therefore could not open a single file.
+
+⚠ **AND IT FAILED SILENTLY.** Standing rule 28 makes the default action
+`ERRNO(EPERM)` rather than `KILL_PROCESS`, deliberately — a denied call should
+degrade a service, not vanish it. The cost here is that `sys_open` just returned
+EPERM: no signal, no diagnostic, no non-zero exit. On its first boot the new
+fixture ran to completion, printed nothing, and kybernet logged
+`completed (oneshot): kyb-seccomp-on` — a successful service that had done
+nothing at all.
+
+⚠ **WHY IT SURVIVED SIX RELEASES.** The only fixture was `kyb-seccomp`, a
+busybox `/bin/sh` one-liner — and glibc uses `openat`. The profile was measured
+exclusively against a binary shape that **does not exist in production**: every
+AGNOS service (aethersafha, daimon, agnoshi) is a static, libc-free Cyrius
+binary. This is standing rule 39 with an architecture axis added, and it is the
+same defect the notify and Landlock fixtures were already moved off busybox to
+avoid — the reasoning was written down in those two files and simply not
+carried across to the third.
+
+The fix adds four syscalls, x86_64-only, under a rule narrow enough to apply
+mechanically: **add a syscall only when its aarch64 equivalent is ALREADY on the
+allowlist.** Each addition is then a parity fix — the same operation reached by
+the other arch's number — and grants no new capability.
+
+| x86_64      | aarch64 equivalent | already allowed |
+|-------------|--------------------|-----------------|
+| `open` (2)  | `openat`           | yes             |
+| `stat` (4)  | `newfstatat`       | yes             |
+| `lstat` (6) | `newfstatat`       | yes             |
+| `pipe` (22) | `pipe2`            | yes             |
+
+`BS_ACCESS` was the same idea applied once in 1.6.0 and then not carried
+through. ⚠ What stays out falls out of the rule rather than a judgement call:
+`mkdir`, `rmdir`, `unlink`, `symlink`, `link`, `rename`, `chmod`, `fchownat`
+and `readlink` all have x86_64 wrappers too, and their aarch64 `*at` forms are
+**not** on the list. Filesystem mutation is the confinement this profile sells.
+
+### Added — `qemu/seccomp-fixture.cyr`, and the decision the roadmap asked for
+
+The roadmap asked whether `basic` covers static linkage, and to measure whichever
+answer was chosen. **The answer: `basic` targets libc-free static binaries,
+because that is what AGNOS runs.** glibc's start-up sequence is not a workload
+this profile is measured against in either linkage, and the allowlist is
+deliberately not widened to cover it — the `readlinkat`/`prctl` denials the
+1.6.0 note describes stay exactly where they were, now for a mechanical reason
+rather than a judgement one.
+
+So the primary evidence is a Cyrius binary, whose syscall set is a property of
+this repo rather than of the machine that built the image — identical on a dev
+box and on CI by construction. `kyb-seccomp` stays as an additional shape.
+
+⚠ **THE FIXTURE ASSERTS THE DENIAL, NOT THE SURVIVAL.** Everything the harness
+had before proved a filter was *loaded*; an allowlist containing every syscall
+would have passed all of it. The fixture runs as **two services from one
+binary** — `kyb-seccomp-on` under `basic`, `kyb-seccomp-off` with no security
+block — and probes an off-list syscall (`mkdirat`) and an on-list one
+(`getpid`).
+
+⚠ **The control arm is not decoration.** A denial-only assertion cannot tell a
+working filter from a broken environment: if `/dev/shm` were read-only the
+confined `mkdirat` would fail and a denial-only gate would call that a pass. It
+is the two-service form of the inside/outside pairing `landlock-fixture.cyr`
+uses within one service. The harness also asserts the denial is specifically
+**EPERM**, which is what distinguishes rule 28's ERRNO default from a kill, from
+`ENOENT` and from an ordinary permission failure.
+
+The fixture labels every line with the seccomp mode it reads from its own
+`/proc/self/status`, not with an argv it was handed — a fixture told which arm
+it is can be told wrong, and then the gate grades the label instead of the
+state. And it **exits non-zero if it cannot report**, so the silent-success
+shape that hid this defect for six releases now surfaces as
+`FAILED to start: kyb-seccomp-on` next to the service that caused it.
+
+Verified by injection: commenting out the single `seccomp_allow(b, BS_OPEN)`
+line turns the harness red with four failures and exit 1.
+
+### Fixed — `verify-lock.sh` was verifying the working tree, not the commit
+
+⚠ **The gate written at 1.6.13 to break rule 45's tautology reproduced it one
+level up.** It read `cyrius.lock` from the **working tree**. Both `cyrius build`
+and `cyrius deps` rewrite that file from disk as a side effect, and every release
+gate list runs a build before this script — so by the time it ran, the file it
+called "the committed lock" had already been regenerated by the same resolver it
+was about to be compared against. Half 2 could not fail. Half 1 was no better
+off: a build that rewrites a stale pin **corrects** it in the working tree, so
+the offline check passed while the committed file was still wrong — which is
+exactly the 1.6.12 case the script's own header describes.
+
+It now reads `git show HEAD:cyrius.lock`, because the question is "if CI checks
+out this commit and resolves, does it get this lock?" A dirty working tree is
+reported as a NOTICE rather than a failure (it is normal mid-release), and the
+restore path still puts back the **working tree** bytes — restoring HEAD would
+make a deliberately non-mutating gate discard an uncommitted lock change.
+
+⚠ **It also now tells a toolchain difference from a dependency difference**,
+because the two want opposite responses. `cyrius deps` writes a hash for every
+stdlib file it lands, so a locally modified `~/.cyrius/lib` — an in-flight
+compiler fix — moves those hashes while every `commit` pin stays put. CI
+installs the pinned cyrius release and reproduces HEAD's hashes, so in that case
+the committed lock is the correct one and regenerating it would **red CI**. The
+gate now says so explicitly and names the files, instead of reporting a stale
+lock and recommending the fix that breaks the build.
+
+Verified both ways: bumping a manifest tag without re-resolving still fails half
+1 offline, and the toolchain-drift arm was exercised against a real in-flight
+`~/.cyrius/lib` (5 stdlib files moved, 4 commit pins identical).
+
+### Fixed — a confined daemon could not sleep, on either architecture
+
+Found by an adversarial review of the fix above, and **measured, not reasoned**.
+This one is a WIDENING rather than a parity fix, so it carries its own rule:
+*add a syscall when the capability it provides is already reachable through a
+syscall on the list.* Here `epoll_wait` has been allowed since 1.6.0 and is a
+strictly more capable wait than either addition — an epoll set with no fds and a
+timeout **is** a sleep — so denying these removed no ability. It only forced
+callers off the path the stdlib actually takes.
+
+Two live consumers were silently degraded:
+
+- **`chrono.sleep_ms` is `syscall(7, 0, 0, ms)` on both arches** and **discards
+  the result**. On x86_64 that is `poll(NULL,0,ms)`; on aarch64 the ESYSXLAT
+  ladder rewrites source-7 to **ppoll, kernel nr 73** (verified by execution
+  under `qemu-aarch64`; argonaut's own `ag_sys_poll` documents the same
+  translation). Neither number was allowed, so the call was a silent no-op and
+  **every confined daemon's main loop busy-spun at 100% of a core.**
+- **sakshi's TSC calibration** opens a 10 ms window with `syscall(35, …)` =
+  `nanosleep`, x86_64 only. Denied, the window collapses: `_sk_tsc_freq_hz` came
+  back **2.5x–4.3x low and different every run** — 3.193e9 unconfined against
+  0.70e9–1.27e9 confined, with the correct value restored by allowing nr 35
+  alone. Every log timestamp and span duration in a confined service was
+  fiction, and plausible-looking fiction, which is worse than an obvious one.
+
+⚠ aarch64 `nanosleep` (101) is **deliberately not added**: no Cyrius code can
+issue it, because a literal `syscall(35)` is not in the translation ladder and
+lands on aarch64 `unlinkat` — the first row of argonaut's `syscall_compat.cyr`
+table. An allowlist entry with no possible caller is what this release spent its
+time removing the justification for.
+
+The harness asserts it by **elapsed time**, because a discarded return value
+leaves no other observable: the fixture sleeps 50 ms and reports how long it
+took, in both arms. Verified by injection — denying `BS_POLL` gives
+`SC[2]-SLEEP_MS=0` against the control arm's `SC[0]-SLEEP_MS=50`, which is the
+whole point of running a control.
+
+### Fixed — three defects the review found in this release's own gate
+
+⚠ **The initramfs staleness guard did not list `seccomp-fixture.cyr`** — so
+editing the new fixture rebuilt nothing and the harness graded the previously
+staged copy. That is **standing rule 43 reintroduced by the release that cites
+it**: a stale artifact does not merely hide a defect, it forges the evidence
+that none exists. The hand-maintained list could not fail to go stale, because
+nothing tied it to the directory it described; it is now `${SCRIPT_DIR}/*.cyr`.
+
+⚠ **The EPERM assertion was an unanchored `grep -F "…ERRNO=1"`**, which EACCES
+(13) and EEXIST (17) both satisfy — the two errnos it exists to rule out. The
+obvious fix, `…=1$`, is also wrong and the reason is a trap worth recording:
+`RUNTIME_OUT` is `cat -v "$LOG" | tr '\r' '\n'`, and **`cat -v` runs first**,
+rendering the CR as the literal characters `^M` so the `tr` finds nothing to
+translate. Every line ends in `^M`, not where its content ends, so an
+end-of-line anchor fails on correct output — which it promptly did. It is now
+`…=1([^0-9]|$)`.
+
+⚠ **Comments in the fixture said `openat` where the binary issues `open`** — in
+the file whose entire subject is that distinction. Corrected, along with
+`seccomp.cyr`'s claim that the harness asserts the denial "on both arches": no
+gate has ever loaded a seccomp filter on aarch64, so that was a claim about a
+table rather than about behaviour (standing rule 44's shape).
+
+Also: `stat`, `lstat` and `pipe` shipped in the parity set with **nothing
+asserting them** — not the suite, not the harness, not the fixture. The suite
+now asserts all four, plus their aarch64 counterparts on both arches, which
+turns the parity rule into something enforced rather than claimed.
+
+### Added — the `restart_config` config key
+
+One of the seven `ServiceDefinition` fields with no config key. `max_restarts`,
+`base_delay_ms` and `max_delay_ms` are now settable per service, validated at
+load time and **refused rather than clamped** (standing rule 25): bounds are
+`max_restarts <= 1000`, `base_delay_ms` in 1..3600000, `max_delay_ms` in
+`base_delay_ms..3600000`.
+
+⚠ `environment` and `env_files` were implemented and then **withheld**, because
+they would have parsed correctly and done nothing: `fork_exec_service` builds
+the child envp from `build_default_envp()` and never reads `svc_def_env`, and
+`svc_def_env_files` is read by nothing at all. Shipping a config key that is
+silently inert is worse than not shipping it. The missing seam is added in
+argonaut 1.15.0 (`_append_service_env`); the keys land here once that is tagged.
+
 ## [1.6.18] — 2026-08-27
 
 **Consumed the three dep releases, and moved the emergency credential out of the

@@ -24,7 +24,7 @@
 #   "started: kyb-live"              — a LIVE service, so a cgroup is really
 #                                      created and the pid moved into it
 #                                      (a completed oneshot correctly gets none)
-#   "removed service cgroups: 16"    — the shutdown sweep killed and rmdir'd them
+#   "removed service cgroups: 18"    — the shutdown sweep killed and rmdir'd them
 #
 #     ⚠ NINE of NINE. This said EIGHT from 1.5.3 to 1.6.1, with a comment
 #     arguing the shortfall was correct: kyb-orphan backgrounds a child, this
@@ -163,12 +163,20 @@ fi
 # here: the initramfs is a derived artifact this script owns and builds itself,
 # whereas build/kybernet is built by a documented command this script must not
 # duplicate.
+# ⚠ GLOB THE FIXTURES, DO NOT LIST THEM. 1.6.19.
+#
+# This was a hand-maintained list of four `.cyr` fixtures, and adding a fifth
+# (`seccomp-fixture.cyr`) did not add it here — so editing the new fixture
+# rebuilt nothing and the harness graded the PREVIOUSLY staged copy. That is
+# standing rule 43 exactly, reintroduced by the release that cites it: a stale
+# artifact does not merely hide a defect, it forges the evidence that no defect
+# exists. The list could not fail to go stale, because nothing tied it to the
+# directory it was describing. `${SCRIPT_DIR}/*.cyr` cannot forget the next one.
 _initramfs_stale() {
     [ ! -f "$INITRAMFS" ] && return 0
     local f
     for f in "${PROJECT_DIR}/build/kybernet" "${PROJECT_DIR}/cyrius.cyml" \
-             "${SCRIPT_DIR}/build-initramfs.sh" "${SCRIPT_DIR}/mkcred-fixture.cyr" \
-             "${SCRIPT_DIR}/notify-fixture.cyr" "${SCRIPT_DIR}/landlock-fixture.cyr"; do
+             "${SCRIPT_DIR}/build-initramfs.sh" "${SCRIPT_DIR}"/*.cyr; do
         [ -e "$f" ] && [ "$f" -nt "$INITRAMFS" ] && return 0
     done
     return 1
@@ -356,12 +364,12 @@ for marker in \
     "kybernet: services started" \
     "kybernet: harness done" \
     "kybernet: shutdown" \
-    "kybernet: config: services parsed: 17" \
+    "kybernet: config: services parsed: 19" \
     "kybernet:   completed (oneshot): kyb-dep" \
     "kybernet:   completed (oneshot): kyb-svc" \
     "kybernet: boot: skipped (not applicable): Start udev device manager" \
     "kybernet:   started: kyb-live" \
-    "kybernet: removed service cgroups: 16"; do
+    "kybernet: removed service cgroups: 18"; do
     if echo "$RUNTIME_OUT" | grep -aqF "$marker"; then
         echo "  OK: $marker"
     else
@@ -591,6 +599,109 @@ elif echo "$RUNTIME_OUT" | grep -aqF "LL-TRUNCATE=ALLOWED"; then
 else
     echo "  FAIL: kyb-landlock produced no LL-TRUNCATE line — the fixture is stale or died"
     echo "$RUNTIME_OUT" | grep -aiE 'LL-' | head -3 || true
+    fail=1
+fi
+
+# ⚠ THE PROBE THAT ASSERTS THE DENIAL RATHER THAN THE SURVIVAL. 1.6.19.
+#
+# Everything above proves a filter was LOADED. None of it proves the filter
+# denies anything — an allowlist containing every syscall would pass all of it.
+# kyb-seccomp-fixture runs as two services from ONE binary: kyb-seccomp-on
+# under "seccomp": "basic", kyb-seccomp-off with no security block. It probes
+# an off-list syscall (mkdirat) and an on-list one (getpid) and reports both,
+# labelling each line with the seccomp mode it read from its own
+# /proc/self/status rather than with an argv it was handed.
+#
+# ⚠ THE CONTROL ARM IS NOT DECORATION. A denial-only assertion cannot tell a
+# working filter from a broken environment — if /dev/shm were read-only, the
+# confined mkdirat would fail and a denial-only gate would call that a pass.
+# The SC[0] assertions turn that into a failure. Both arms must be present.
+if echo "$RUNTIME_OUT" | grep -aqF "SC[2]-MODE=2"; then
+    echo "  OK: the seccomp probe ran under a loaded filter and could report (mode 2)"
+else
+    echo "  FAIL: no SC[2]-MODE=2 — the confined probe could not open /proc/self/status or /dev/console"
+    echo "$RUNTIME_OUT" | grep -aF "SC[" | head -6 || true
+    fail=1
+fi
+
+if echo "$RUNTIME_OUT" | grep -aqF "SC[2]-MKDIRAT=DENIED"; then
+    echo "  OK: seccomp basic DENIED an off-list syscall (mkdirat) inside the child"
+elif echo "$RUNTIME_OUT" | grep -aqF "SC[2]-MKDIRAT=ALLOWED"; then
+    echo "  FAIL: seccomp basic PERMITTED mkdirat — the filter is inert"
+    fail=1
+else
+    echo "  FAIL: kyb-seccomp-on produced no SC[2] line — it never ran, or the profile killed it"
+    echo "$RUNTIME_OUT" | grep -aF "SC[" | head -6 || true
+    fail=1
+fi
+
+# Standing rule 28: the default action is ERRNO(EPERM), not KILL_PROCESS, so a
+# denied call is a normal failed call the program can report. Asserting the
+# errno is what distinguishes that from a kill, from ENOENT (a missing
+# /dev/shm) and from EACCES (an ordinary permission failure).
+# ⚠ BOUNDED, NOT ANCHORED — AND `$` IS THE WRONG TOOL HERE.
+#
+# `grep -F "…ERRNO=1"` is a SUBSTRING match, so EACCES (13) and EEXIST (17)
+# both satisfied it: the two errnos this assertion exists to rule out.
+#
+# ⚠ But `...=1$` does not work either, and the reason is a real trap in this
+# script. RUNTIME_OUT is built as `cat -v "$LOG" | tr '\r' '\n'` (line 358).
+# `cat -v` runs FIRST and renders the serial console's CR as the two literal
+# characters `^M`, so by the time `tr` looks for a carriage return there is
+# none left to translate — the `tr` is a no-op and **every line in RUNTIME_OUT
+# ends in `^M`, not where its content ends.** An end-of-line anchor therefore
+# fails on correct output. Verified: the harness went red on a passing board.
+#
+# `([^0-9]|$)` is what is actually wanted — it rejects a longer number while
+# accepting the `^M` that really follows it.
+if echo "$RUNTIME_OUT" | grep -aqE 'SC\[2\]-MKDIRAT_ERRNO=1([^0-9]|$)'; then
+    echo "  OK: the denial is EPERM (rule 28's ERRNO default), not a kill and not ENOENT"
+else
+    echo "  FAIL: seccomp denial did not report EPERM — check which errno came back"
+    echo "$RUNTIME_OUT" | grep -aF "MKDIRAT_ERRNO" | head -3 || true
+    fail=1
+fi
+
+# ⚠ THE ASSERTION THAT A CONFINED DAEMON CAN STILL WAIT. 1.6.19.
+#
+# `chrono.sleep_ms` discards its syscall result, so when `basic` denied
+# poll/ppoll the call was a SILENT no-op and a confined daemon's main loop
+# busy-spun at 100% of a core — nothing errored, nothing crashed, and no
+# survival-based assertion could have seen it. The only observable is elapsed
+# time, so the fixture measures it and this asserts the measurement. Both arms:
+# the control proves 50 ms of sleep is achievable in this environment at all.
+for _sc_arm in 2 0; do
+    if echo "$RUNTIME_OUT" | grep -aqF "SC[${_sc_arm}]-SLEEP=OK"; then
+        echo "  OK: SC[${_sc_arm}] slept for the full 50 ms (poll/ppoll reaches the kernel)"
+    elif echo "$RUNTIME_OUT" | grep -aqF "SC[${_sc_arm}]-SLEEP=NOSLEEP"; then
+        echo "  FAIL: SC[${_sc_arm}] returned from a 50 ms sleep immediately — it would busy-spin"
+        echo "$RUNTIME_OUT" | grep -aF "SLEEP_MS" | head -3 || true
+        fail=1
+    else
+        echo "  FAIL: no SC[${_sc_arm}]-SLEEP line — that arm never ran"
+        echo "$RUNTIME_OUT" | grep -aF "SC[" | head -8 || true
+        fail=1
+    fi
+done
+
+if echo "$RUNTIME_OUT" | grep -aqF "SC[2]-GETPID=ALLOWED"; then
+    echo "  OK: seccomp basic still PERMITS an on-list syscall (getpid)"
+else
+    echo "  FAIL: seccomp basic denied getpid, which is on its own allowlist"
+    echo "$RUNTIME_OUT" | grep -aF "SC[" | head -6 || true
+    fail=1
+fi
+
+# The control arm. Same binary, same probe, no security block.
+if echo "$RUNTIME_OUT" | grep -aqF "SC[0]-MKDIRAT=ALLOWED"; then
+    echo "  OK: control arm (no seccomp) performed the SAME mkdirat successfully"
+elif echo "$RUNTIME_OUT" | grep -aqF "SC[0]-MKDIRAT=DENIED"; then
+    echo "  FAIL: mkdirat failed with NO filter applied — the confined denial above proves nothing"
+    echo "$RUNTIME_OUT" | grep -aF "SC[0]" | head -4 || true
+    fail=1
+else
+    echo "  FAIL: kyb-seccomp-off produced no SC[0] line — the control arm never ran"
+    echo "$RUNTIME_OUT" | grep -aF "SC[" | head -6 || true
     fail=1
 fi
 

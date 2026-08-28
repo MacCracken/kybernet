@@ -6,32 +6,78 @@
 
 ## Version
 
-**1.6.18** — consumed the three dep releases, and moved the emergency credential out
-of the world-readable config. Suite 733 → 739 assertions. Harness 71 → **72**
-properties. sigil 3.12.11 → **3.12.13**, libro 2.8.12 → **2.9.0**, argonaut 1.13.10 →
-**1.14.0**.
+**1.6.19** — `seccomp: basic` could not open a file on x86_64, and had not been
+able to since 1.6.0. Suite 739 → **745** assertions. Harness 72 → **79**
+properties. **No dep bumps**: sigil 3.12.13 / agnostik 1.5.1 / libro 2.9.0 /
+argonaut 1.14.0, cyrius 6.5.35.
 
-**Closed by the bumps:** `check_command`'s 232 bytes per health check (now 0), and
-sigil's `exec_capture`/`exec_vec` — no module outside `sys_util.cyr` calls either any
-more. The worst site there was `dmverity_verify`, which returned **Ok(true)** for a
-`veritysetup verify` that never ran.
+⚠ **The defect, and why it hid.** aarch64 is an `*at`-only architecture, so the
+stdlib's `sys_open()` compiles to `openat` there — allowed since 1.6.0. On
+x86_64 the *same wrapper* compiles to legacy `open` (nr 2), which was not on the
+list. So a confined service could not open a single file on x86_64. Under
+standing rule 28's deliberate `ERRNO(EPERM)` default it failed **silently**: the
+service ran to completion, did nothing, and kybernet logged
+`completed (oneshot)`. It survived six releases because the only fixture was a
+busybox `/bin/sh` one-liner and **glibc uses `openat`** — the profile had never
+been executed against the binary shape AGNOS actually ships, which is a static,
+libc-free Cyrius binary. Standing rules **47** and **48** are the generalisation.
 
-**Added: `/etc/kybernet/emergency.cred` at 0600.** config.json is world-readable *by
-design* — it is a service manifest — so an Argon2id record in it let every local
-unprivileged process read the salt and tag and grind the KDF offline. The file mode
-does not defeat an image-holder, which is exactly why it **complements** the 1.5.9 KDF
-rather than replacing it. The file wins over the config key (announced, not silent),
-and a group- or world-readable file is **REFUSED** rather than fallen back from — a
-credential file anyone can read buys nothing over the key it replaced.
+⚠ **An adversarial review of that fix then found a second hole in the same
+profile: a confined daemon could not SLEEP, on either arch.** `chrono.sleep_ms`
+is `syscall(7, 0, 0, ms)` and discards the result — `poll` on x86_64, and on
+aarch64 the ESYSXLAT ladder rewrites source-7 to `ppoll` (nr 73). Neither was
+allowed, so the call was a silent no-op and **every confined daemon's main loop
+busy-spun at 100% of a core**. sakshi's TSC calibration was worse: its 10 ms
+`nanosleep` window collapsed and `_sk_tsc_freq_hz` came back 2.5x–4.3x low and
+different every run, making every log timestamp and span duration in a confined
+service plausible-looking fiction. This one is a **widening**, so it carries its
+own rule — *add a syscall when the capability is already reachable through an
+allowed one* — and `epoll_wait` (allowed since 1.6.0) is a strictly more capable
+wait than either, so nothing new is granted. The harness asserts it by **elapsed
+time**, since a discarded return leaves no other observable.
 
-The loader is in `src/lib/emergency_auth.cyr`, not `main.cyr`, so the unit suite can
-reach it (rule 34). ⚠ `st_mode` is read with `load32` via the stdlib's arch-dispatched
-`STAT_MODE` — a 32-bit `mode_t` at **+24 on x86_64 and +16 on aarch64**, so neither
-width nor offset may be hardcoded.
+The same review found three defects in this release's own gate: the initramfs
+staleness guard did not list the new fixture (**standing rule 43, reintroduced
+by the release that cites it** — now a glob), the EPERM assertion was an
+unanchored match that EACCES and EEXIST both satisfied, and two comments said
+`openat` where the binary issues `open`, in the file whose subject is that
+distinction. ⚠ The obvious fix for the second — a `$` anchor — was also wrong:
+`RUNTIME_OUT` is `cat -v | tr '\r' '\n'` and **`cat -v` runs first**, so every
+line ends in a literal `^M` and an end-of-line anchor fails on correct output.
 
-⚠ **The harness fixture for it is falsifiable**, which is the point: it stages the real
-record in the file and a deliberately WRONG one (valid shape, all-zero tag) in
-config.json, so the correct password authenticating can only happen if the file won.
+**The fix is four x86_64-only syscalls** — `open`, `stat`, `lstat`, `pipe` —
+added under a rule narrow enough to apply mechanically: *add only where the
+other arch's counterpart is already allowed*. Each is then a parity fix granting
+no new capability, and `mkdir`/`unlink`/`chmod`/`rename`/`readlink` fall out as
+excluded without a judgement call. Filesystem mutation stays denied, and the
+harness asserts that.
+
+**`qemu/seccomp-fixture.cyr`** is the new primary evidence: a Cyrius binary run
+as **two services** — `kyb-seccomp-on` under `basic` and `kyb-seccomp-off` with
+no security block. ⚠ The control arm is load-bearing: a denial-only assertion
+cannot tell a working filter from a broken environment. The gate asserts the
+denial, that the denial is specifically **EPERM**, that an on-list syscall still
+works, and that the unconfined arm performs the same operation successfully. The
+fixture labels its output with the seccomp mode it reads from its own
+`/proc/self/status` rather than an argv it was handed, and **exits non-zero if
+it cannot report** — silent success is precisely how this hid.
+
+Verified by injection: commenting out the single `seccomp_allow(b, BS_OPEN)`
+turns the harness red with four failures and exit 1.
+
+**Also added: the `restart_config` config key** (`max_restarts`,
+`base_delay_ms`, `max_delay_ms`), validated at load and **refused rather than
+clamped** per rule 25. ⚠ `environment` and `env_files` were implemented and then
+**withheld**: both would have parsed correctly and done nothing, because
+`fork_exec_service` builds envp from `build_default_envp()` and never reads
+`svc_def_env`. The seam is in argonaut 1.15.0 (unreleased); the keys land once
+it is tagged.
+
+**Unreleased dep work sitting ready to tag:** libro **2.10.0** (the canonical-JSON
+object emitter no longer allocates for ordinary documents — an empty `{}` cost
+608 bytes of vectors before a single key was parsed, paid per nesting level, per
+audit record) and argonaut **1.15.0** (`_append_service_env`,
+`svc_def_set_ready_check`, audit source/action caching).
 
 ## Toolchain
 

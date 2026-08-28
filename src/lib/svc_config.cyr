@@ -156,6 +156,58 @@ fn _cfg_health_check(svc_obj) {
     return health_check_new(result_unwrap(tr), target, port, iv, tmo, rty);
 }
 
+# Parse `"restart_config": {"max_restarts": N, "base_delay_ms": N,
+# "max_delay_ms": N}`. Returns 1 on success (including "no block"), 0 if
+# malformed.
+#
+# These drive the restart BACKOFF, so an unvalidated value is a service that
+# either never comes back or comes back in a tight loop. Bounded and refused,
+# never clamped, for the same reason every other numeric key here is:
+# `max_restarts` 0..1000 (0 = unlimited, argonaut's own sentinel),
+# `base_delay_ms` 1..3600000, `max_delay_ms` >= base_delay_ms and <= 3600000.
+fn _cfg_restart_config_into(obj, sd) {
+    var r = json_v_obj_get(obj, "restart_config");
+    if (r == 0) { return 1; }
+    if (json_v_is_obj(r) == 0) { return 0; }
+
+    var maxr = _cfg_limit(r, "max_restarts");
+    var base = _cfg_limit(r, "base_delay_ms");
+    var maxd = _cfg_limit(r, "max_delay_ms");
+    if (maxr < 0 || base < 0 || maxd < 0) { return 0; }
+
+    var rc = restart_config_default();
+    if (maxr != 0) {
+        if (maxr > 1000) {
+            klog("config: restart_config.max_restarts above 1000 - service REFUSED");
+            return 0;
+        }
+        store64(rc, maxr);
+    }
+    if (base != 0) {
+        if (base < 1 || base > 3600000) {
+            klog("config: restart_config.base_delay_ms outside 1..3600000 - service REFUSED");
+            return 0;
+        }
+        store64(rc + 8, base);
+    }
+    if (maxd != 0) {
+        if (maxd > 3600000) {
+            klog("config: restart_config.max_delay_ms above 3600000 - service REFUSED");
+            return 0;
+        }
+        # A ceiling below the floor can never be reached, so the backoff would
+        # silently never grow — a config error worth surfacing rather than
+        # quietly writing.
+        if (maxd < load64(rc + 8)) {
+            klog("config: restart_config.max_delay_ms below base_delay_ms - service REFUSED");
+            return 0;
+        }
+        store64(rc + 16, maxd);
+    }
+    svc_def_set_restart_config(sd, rc);
+    return 1;
+}
+
 # Build one ServiceDefinition from a JSON object.
 # Returns 0 when the entry is unusable — the caller logs and skips it.
 fn svc_def_from_json(obj) {
@@ -183,6 +235,40 @@ fn svc_def_from_json(obj) {
 
     _cfg_str_array_into(obj, "args", svc_def_args(sd));
     _cfg_str_array_into(obj, "depends_on", svc_def_deps(sd));
+    # ⚠ `restart_config` — ONE OF THE SEVEN UNREACHED FIELDS. 1.6.19.
+    #
+    # `ServiceDefinition` carries 23 fields and kybernet's parser reached 10, so
+    # the restart BACKOFF was argonaut's default on every AGNOS board no matter
+    # what an operator wrote.
+    #
+    # ⚠ ONLY THIS ONE SHIPPED, AND THE REASON IS THE POINT. Three sibling keys
+    # were written and REMOVED before release because argonaut does not consult
+    # the fields they set — shipping them would have been the exact
+    # "parsed and never consulted" defect this repo has now found three times
+    # (1.6.4's `log_to_console`, 1.6.7's `interval_ms`, 1.6.12's `interval_ms`
+    # again). Checked, not assumed:
+    #   - `environment` -> `svc_def_env` is read by `spawn_service`, which is NOT
+    #     the live path. `fork_exec_service` builds envp from
+    #     `build_default_envp()` and never looks at the map. Needs an argonaut
+    #     change to merge it.
+    #   - `env_files`   -> `svc_def_env_files` is read by NOTHING in argonaut.
+    #     The field exists and is inert.
+    #   - `ready_check` -> IS live (`init.cyr:467,875`) but argonaut ships no
+    #     `svc_def_set_ready_check`, so there is no way to set it from here.
+    # All three land in argonaut 1.16.0; the keys follow in the kybernet release
+    # that consumes it.
+    #
+    # Deliberately NOT exposed at all, with reasons rather than silence:
+    #   - `resource_limits` — ⚠ NEVER. `struct ResourceLimits` is defined TWICE
+    #     with incompatible layouts (argonaut's 32 B vs agnostik's 48 B) and cyrius
+    #     does not warn; agnostik's wins, so reading argonaut's fill with an
+    #     `rlim_*` accessor returns the wrong field entirely. Standing rule 14.
+    #     Per-service limits go through `cgroup_limits`, which has no twin.
+    #   - `socket_activation` — a listening-socket protocol, not a scalar. It wants
+    #     a design, not a config key.
+    #   - `log_config` / `required_for_modes` — argonaut's defaults are correct for
+    #     every shape kybernet ships, and an unused key is a maintenance surface.
+    if (_cfg_restart_config_into(obj, sd) == 0) { return 0; }
 
     # Enum fields: reject an unrecognised value rather than defaulting.
     var type_s = _cfg_str(obj, "type", 0);

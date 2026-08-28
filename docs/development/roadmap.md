@@ -109,30 +109,60 @@ second (see the release order below).
       filesystem-mutation surface in the least recoverable process on the machine, plus
       a JSON schema, a path validator, a symlink-safe walk and a rule-27 fixture — to
       buy what one config object already buys. This is mostly an agnosticos change.
+      ⚠ **VERIFIED 1.6.19, and it is worse than this item said.** `agnos-init.sh`
+      only does `mkdir -p /run/agnos` — it never creates `agents/` or `plugins/`,
+      which are the two directories aethersafha actually binds in
+      (`apps.cyr:381`, `plugin_host.cyr:468`). A tree-wide search finds
+      `/run/agnos/agents` created in exactly one place,
+      `agnosticos/scripts/archive-pre-cyrius/edge-image.sh` — archived,
+      pre-Cyrius — and `/run/agnos/plugins` created **nowhere at all**. Since
+      `/run` is a fresh tmpfs every boot, the port has to create more than the
+      script it is replacing does.
       ⚠ Two kybernet-side blockers to close first, both real:
-        - **A failed prerequisite does not block its dependents.** `start_services`
+        - [x] **A failed prerequisite does not block its dependents.** CLOSED 1.6.18
+          (`failed_names` in `start_services`; a skipped dependent is recorded as
+          failed itself so the skip propagates, and is not counted in `failed`).
+          ⚠ **Closing it makes the ordering hazard below SHARPER, not softer**:
+          adding an `agnos-init` dependency to `aethersafha` before agnosticos
+          ships the binary now BLOCKS the compositor instead of merely running it
+          too early — a working desktop boot becomes a non-booting one. Ship the
+          binary first, then the dep. Original text: `start_services`
           (`main.cyr`) starts waves in order, but a wave-N failure only increments
           `failed` — wave N+1 runs anyway. So a broken `agnos-init` would still let the
           confined compositor start and exit 126. This is the item that actually makes
           the oneshot approach trustworthy, and it is worth doing on its own merits.
-        - **`aethersafha`'s `depends_on` is hardcoded** in argonaut's
+        - [ ] **`aethersafha`'s `depends_on` is hardcoded** in argonaut's
           `default_services(BOOT_DESKTOP)`, so making it depend on a new `agnos-init`
           needs either an argonaut change or a config that replaces the default set.
 
-- [ ] **`seccomp: basic` is measured against a dynamically linked binary only.**
-      The dev box stages Arch's dynamic busybox; CI installs `busybox-static`, whose
-      glibc start-up issues `readlinkat("/proc/self/exe")` and `prctl` that the
-      dynamic path does not. Both are denied `EPERM` and glibc tolerates it, so
-      nothing fails — but the local green and the CI green attest to two different
-      syscall sets. Decide deliberately whether `basic` covers static linkage, and
-      measure whichever answer is chosen rather than widening the list to quiet a
-      harmless denial.
+- [x] **`seccomp: basic` is measured against a dynamically linked binary only.**
+      DONE 1.6.19, and it was not a documentation tidy-up — measuring it properly
+      found that **`basic` could not open a file on x86_64, and had not been able
+      to since 1.6.0.** aarch64 is `*at`-only so the stdlib's `sys_open()`
+      compiles to `openat` (allowed); on x86_64 the same wrapper compiles to
+      legacy `open` (nr 2), which was not on the list. Under rule 28's
+      `ERRNO(EPERM)` default it failed **silently** — the service ran to
+      completion having done nothing, logged `completed (oneshot)`.
+      **The decision:** `basic` targets libc-free static binaries, because that
+      is what AGNOS ships. The allowlist is not widened for glibc start-up in
+      either linkage; the four additions are x86_64/aarch64 **parity** fixes
+      under the rule "add only where the other arch's counterpart is already
+      allowed", so they grant no new capability. See standing rules 47 and 48.
+      `qemu/seccomp-fixture.cyr` is now the primary evidence — a Cyrius binary
+      run as two services (confined + an unconfined control arm), asserting the
+      denial and its errno rather than the survival. `kyb-seccomp` stays as an
+      additional shape.
 
 ---
 
 ## v1.x.x — real, but needs a decision or is too large to date
 
-- [ ] **Give the AGNOS default services a non-root uid.** 1.6.9 made
+- [ ] **Give the AGNOS default services a non-root uid.** ⚠ **Downstream of the
+      agnos-init oneshot above, and cannot be done before it** — a service given a
+      uid needs its runtime directories to exist AND to be owned by that uid, and
+      as recorded above nothing currently creates `/run/agnos/{agents,plugins}` on
+      a Cyrius AGNOS board at all. Sequence: agnos-init creates and chowns, then
+      the uids land. 1.6.9 made
       `security.uid` / `security.gid` work and proved it end to end, but nothing in the
       shipped config or in argonaut's `default_services` actually uses it — so every
       real service still runs as root. The mechanism exists; the policy does not.
@@ -147,11 +177,23 @@ second (see the release order below).
       shipped: a bound that depends on free RAM at boot makes a credential valid on one
       board and invalid on another. Revisit if a board under 512 MB appears.
 
-- [ ] **Seven `ServiceDefinition` fields have no config key at all.** `ready_check` and
-      `restart_config` are the notable two: argonaut supports them, kybernet's parser
-      offers no way to set them, so the readiness and restart-policy surfaces are
-      argonaut defaults on every AGNOS board. Needs a decision about how much of
-      argonaut's model kybernet intends to expose.
+- [ ] **Seven `ServiceDefinition` fields have no config key at all** — now five.
+      `restart_config` landed at 1.6.19 (`max_restarts` / `base_delay_ms` /
+      `max_delay_ms`, validated at load and **refused rather than clamped**, per
+      standing rule 25). `ready_check` needs argonaut's
+      `svc_def_set_ready_check` (added in the unreleased 1.15.0), so it lands
+      once that is tagged.
+      ⚠ **`environment` and `env_files` were implemented at 1.6.19 and then
+      WITHHELD**, which is the part worth remembering: both parsed correctly and
+      would have done **nothing**. `fork_exec_service` builds the child envp from
+      `build_default_envp()` and never reads `svc_def_env`, and
+      `svc_def_env_files` is read by nothing at all — so shipping them would have
+      given operators two config keys that silently have no effect, which is
+      worse than not shipping them. The missing seam (`_append_service_env`) is in
+      argonaut 1.15.0; the keys land here once it is tagged. Before adding a
+      config key, **check that something downstream reads the field**.
+      The remainder still needs a decision about how much of argonaut's model
+      kybernet intends to expose.
 
 ---
 
@@ -212,6 +254,23 @@ Moved into the v1.6.1 gate line. Recording why here so the claim is not re-made:
       publish a binary that fails the boot-critical probe. **Close this item by
       pinning a fixed cycc and dropping the two entries from
       `AARCH64_KNOWN_BROKEN`** — the gate then fails if they are dropped early.
+      ⚠ **APPEARS FIXED UPSTREAM, OBSERVED 2026-08-28 — DO NOT ACT YET.** The
+      installed (in-flight, unreleased) cyrius tree now carries
+      `SYS_SIGNALFD4 = 1074` in `lib/syscalls_aarch64_linux.cyr:190`, i.e. exactly
+      proposed fix (A): the ≥1000 private-alias band, matching the `SYS_PPOLL =
+      1073 → 73` row beside it. Against that tree the exec gate reports
+      `observed broken: []` — signalfd AND pause both pass — and correctly FAILS,
+      because the gate detects drift in **both** directions and a stale exception
+      is how a gate goes quiet. That failure is the gate working, not a
+      regression.
+      ⚠ **The two entries must NOT be dropped until the fix is in a TAGGED cyrius
+      that CI installs.** CI resolves the pinned `cyrius = "6.5.35"`, where both
+      are still broken, so removing them now turns CI red for a fix CI cannot
+      see. Sequence: cyrius tags the fix → the user says to move the pin → bump
+      `cyrius.cyml` → drop `pause,signalfd` from `AARCH64_KNOWN_BROKEN` → the
+      aarch64 binary can boot for the first time (1.6.13 CRITICAL-1), which then
+      wants a real aarch64 boot gate rather than the syscall probe standing in
+      for one.
 
 - [ ] **cyrius stdlib filings, genuinely off-limits from here.** ioctl / termios /
       poll — `2026-08-24-sys-ioctl-wrapper-missing.md`, behind `src/lib/termios.cyr` and

@@ -280,6 +280,13 @@ enum BasicSyscalls {
     BS_RT_SIGACTION = 13; BS_RT_SIGPROCMASK = 14;
     BS_GETPID = 39;   BS_GETUID = 102;  BS_GETEUID = 107;
     BS_GETGID = 104;  BS_GETEGID = 108;
+    # x86_64 legacy-numbered equivalents of calls already allowed above. See
+    # the parity block in seccomp_basic_service. aarch64 has none of these —
+    # it is an openat-only, *at-only architecture — so there is no sibling
+    # entry in the enum below and every use is #ifdef-guarded.
+    BS_OPEN = 2;      BS_STAT = 4;      BS_LSTAT = 6;     BS_PIPE = 22;
+    # Wait/sleep primitives — see the block in seccomp_basic_service.
+    BS_POLL = 7;      BS_NANOSLEEP = 35;
 }
 #endif
 #ifdef CYRIUS_ARCH_AARCH64
@@ -303,6 +310,9 @@ enum BasicSyscalls {
     BS_RT_SIGACTION = 134; BS_RT_SIGPROCMASK = 135;
     BS_GETPID = 172;  BS_GETUID = 174;  BS_GETEUID = 175;
     BS_GETGID = 176;  BS_GETEGID = 177;
+    # Wait primitive — see the block in seccomp_basic_service. aarch64 has no
+    # `poll`; the ladder translates cyrius source-7 to ppoll, kernel nr 73.
+    BS_PPOLL = 73;
 }
 #endif
 
@@ -388,6 +398,105 @@ fn seccomp_basic_service() {
     seccomp_allow(b, BS_EXECVE);
     #ifdef CYRIUS_ARCH_X86
     seccomp_allow(b, BS_ACCESS);          # aarch64 has no `access`
+    #endif
+
+    # ---- x86_64 / aarch64 PARITY (1.6.19) ----
+    #
+    # ⚠ `basic` MADE FILE I/O IMPOSSIBLE FOR A CYRIUS SERVICE ON x86_64, WHICH
+    # IS EVERY AGNOS SERVICE ON THE ARCH AGNOS BOOTS. aarch64 is an *at-only
+    # architecture, so the stdlib's `sys_open` compiles to `openat` there — on
+    # the allowlist since 1.6.0. On x86_64 the SAME wrapper compiles to the
+    # legacy `open` (nr 2), which was not. So a confined service could not open
+    # a single file: `sys_open` returned EPERM, and because standing rule 28
+    # makes the default ERRNO rather than KILL, it did so SILENTLY — the
+    # service ran to completion having done nothing.
+    #
+    # ⚠ THE REASON IT SURVIVED FROM 1.6.0: the only fixture was a busybox shell
+    # one-liner, and glibc uses `openat`. The profile was measured exclusively
+    # against a binary shape that does not exist in production. That is standing
+    # rule 39 with the arch axis added, and qemu/seccomp-fixture.cyr — a cyrius
+    # binary, like the notify and Landlock probes — is what found it, on the
+    # first boot it ran.
+    #
+    # THE RULE FOR THIS BLOCK, AND IT IS NARROW: add a syscall here only when
+    # its aarch64 equivalent is ALREADY on the list above. Every entry is then
+    # a parity fix that grants no new capability — the same operation, reached
+    # by the other arch's number — rather than a widening. BS_ACCESS above is
+    # the same idea; it was applied once in 1.6.0 and then not carried through.
+    #
+    #   open (2)  <-> openat      already allowed
+    #   stat (4)  <-> newfstatat  already allowed
+    #   lstat (6) <-> newfstatat  already allowed
+    #   pipe (22) <-> pipe2       already allowed
+    #
+    # ⚠ WHAT DELIBERATELY STAYS OUT, AND WHY THE RULE IS WHAT MAKES IT HOLD:
+    # mkdir, rmdir, unlink, symlink, link, rename, chmod and fchownat all have
+    # stdlib wrappers on x86_64 too — and their aarch64 *at forms are NOT on
+    # the list, so the rule excludes them without needing a judgement call.
+    # Filesystem MUTATION is the confinement this profile sells; the harness
+    # probes exactly that by asserting mkdirat is denied — ⚠ at RUNTIME on
+    # x86_64 only, because that is the only architecture any gate boots. The
+    # aarch64 column of this table is verified against the kernel numbers and
+    # built by the cross-build, but no gate has ever LOADED a seccomp filter on
+    # aarch64, so "denied on both arches" would be a claim about a table rather
+    # than about behaviour. Standing rule 44 is the general form of that
+    # distinction; closing it means a seccomp arm in
+    # scripts/aarch64-exec-gate.sh, which qemu/seccomp-fixture.cyr is already
+    # arch-neutral enough to serve.
+    # readlink is out for the same mechanical reason (readlinkat is not
+    # allowed), which also keeps the static-glibc denial the 1.6.0 note
+    # describes exactly where it was.
+    #ifdef CYRIUS_ARCH_X86
+    seccomp_allow(b, BS_OPEN);
+    seccomp_allow(b, BS_STAT);
+    seccomp_allow(b, BS_LSTAT);
+    seccomp_allow(b, BS_PIPE);
+    #endif
+
+    # ---- wait / sleep (1.6.19) ----
+    #
+    # ⚠ A DAEMON THAT CANNOT SLEEP IS NOT CONFINED, IT IS BROKEN. This is a
+    # WIDENING, not a parity fix, so it gets its own justification rather than
+    # riding the block above.
+    #
+    # THE RULE: add a syscall when the capability it provides is ALREADY
+    # reachable through a syscall on the list. Same "no new capability" test as
+    # the parity block, reached the other way round. Here `epoll_wait` (232 /
+    # 22) has been allowed since 1.6.0 and is a STRICTLY more capable wait than
+    # either of these — an epoll set with no fds and a timeout is a sleep. So
+    # denying poll and nanosleep removed no ability; it only forced callers off
+    # the path the stdlib actually takes, into a busy loop.
+    #
+    # WHAT WAS MEASURED, because two live consumers were silently degraded:
+    #
+    #   - `chrono.sleep_ms` is `syscall(7, 0, 0, ms)` on BOTH arches
+    #     (chrono.cyr:170) — poll(NULL,0,ms) on x86_64, and on aarch64 the
+    #     ESYSXLAT ladder rewrites source-7 to **ppoll, kernel nr 73** (verified
+    #     by execution under qemu-aarch64, and argonaut's `ag_sys_poll` documents
+    #     the same translation). The return is DISCARDED, so a denial is a silent
+    #     no-op: every confined daemon's main loop busy-spun at 100% of a core,
+    #     on both architectures.
+    #   - sakshi's `_sk_clock_init` opens a 10 ms TSC calibration window with
+    #     `syscall(35, ...)` = nanosleep, x86_64 only (sakshi.cyr:272; the
+    #     aarch64 arm reads CNTFRQ_EL0 and issues nothing). Denied, the window
+    #     collapses and `_sk_tsc_freq_hz` came back 2.5x-4.3x low AND different
+    #     every run — measured 3.193e9 unconfined against 0.70e9-1.27e9 confined,
+    #     with the correct value restored by allowing nr 35 alone. Every log
+    #     timestamp and span duration in a confined service was fiction, and
+    #     plausible-looking fiction, which is worse.
+    #
+    # ⚠ aarch64 `nanosleep` (101) is DELIBERATELY NOT ADDED. No Cyrius code can
+    # issue it: a literal `syscall(35)` is not in the translation ladder and
+    # lands on aarch64 `unlinkat` (verified by execution — it is the first row of
+    # argonaut's syscall_compat.cyr table). Allowing 101 would grant something
+    # nothing can call, and an allowlist entry with no caller is exactly what
+    # this release spent its time removing the justification for.
+    #ifdef CYRIUS_ARCH_X86
+    seccomp_allow(b, BS_POLL);
+    seccomp_allow(b, BS_NANOSLEEP);
+    #endif
+    #ifdef CYRIUS_ARCH_AARCH64
+    seccomp_allow(b, BS_PPOLL);
     #endif
     seccomp_allow(b, BS_FACCESSAT);
     seccomp_allow(b, BS_FACCESSAT2);

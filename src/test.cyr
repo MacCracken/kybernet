@@ -1800,6 +1800,30 @@ fn test_seccomp_basic_profile() {
     vec_push(want, BS_FACCESSAT);
     vec_push(want, BS_RT_SIGACTION);
     vec_push(want, BS_RT_SIGPROCMASK);
+    # ⚠ THE 1.6.19 PARITY SET. `open` is the one whose absence made `basic`
+    # unable to open a file on x86_64 from 1.6.0 to 1.6.19 — silently, because
+    # rule 28's default is ERRNO. The other three shipped in the same sweep with
+    # nothing asserting them anywhere: not here, not in the harness, not in the
+    # fixture. A syscall on an allowlist that no test names is a syscall a
+    # future trim removes without argument, which is exactly how the first one
+    # went missing.
+    #
+    # x86_64-only by construction: aarch64 has no `open`/`stat`/`lstat`/`pipe`
+    # at all — it reaches the same operations through openat/newfstatat/pipe2,
+    # which the shared assertions above and below already cover.
+    #ifdef CYRIUS_ARCH_X86
+    vec_push(want, BS_OPEN);
+    vec_push(want, BS_STAT);
+    vec_push(want, BS_LSTAT);
+    vec_push(want, BS_PIPE);
+    #endif
+    # The counterpart of every parity addition, asserted on BOTH arches — this
+    # is the rule itself ("add only where the other arch's equivalent is already
+    # allowed") turned into something the suite enforces rather than something a
+    # comment claims. If one of these is ever dropped, the x86_64 entry it
+    # justifies becomes an unbacked widening, and this fails.
+    vec_push(want, BS_OPENAT);
+    vec_push(want, BS_PIPE2);
     for (var w = 0; w < vec_len(want); w = w + 1) {
         var need = vec_get(want, w);
         var found = 0;
