@@ -518,3 +518,60 @@ fn emerg_cred_usable(h) {
     if (kind == EMERG_CRED_ARGON2ID) { return 1; }
     return 0;
 }
+
+# Read /etc/kybernet/emergency.cred, or 0 if it is absent or unusable.
+#
+# ⚠ MODE IS CHECKED, NOT ASSUMED. A credential file that is group- or
+# world-readable buys nothing over the config key it replaced, so kybernet
+# REFUSES it and says why rather than quietly accepting a file that does not
+# have the property it exists to provide. Refusing (not falling back to the
+# config key) is deliberate: an operator who created this file meant it to be
+# the credential, and silently using a different one is how you get locked out
+# by a record you thought you had replaced.
+#
+# Trailing whitespace and a trailing newline are stripped — every way of writing
+# this file, from `printf` to an editor, produces one or the other, and a
+# credential rejected for an invisible byte is the least debuggable failure this
+# path can produce.
+var _cred_buf[80];
+
+fn emerg_cred_path_default() { return "/etc/kybernet/emergency.cred"; }
+
+fn emerg_load_cred_file() { return emerg_load_cred_file_at(emerg_cred_path_default()); }
+
+fn emerg_load_cred_file_at(path) {
+    if (sys_access(path, 0) != 0) { return 0; }
+
+    var st[STAT_BUFSZ];
+    if (sys_stat(path, &st) != 0) {
+        klog("config: emergency.cred present but unstattable - IGNORED");
+        return 0;
+    }
+    # load32: st_mode is a 32-bit mode_t. A load64 here would pull st_uid into
+    # the high bits — harmless behind the 0x1FF mask, but wrong, and the kind of
+    # thing that stops being harmless the moment someone widens the mask.
+    # STAT_MODE is the stdlib's arch-dispatched constant (x86_64 +24,
+    # aarch64 +16); the offset is NOT the same on both, so it must not be
+    # hardcoded (see CLAUDE.md rule 12's sibling for struct layout).
+    var mode = load32(&st + STAT_MODE) & 0x1FF;   # permission bits only
+    if ((mode & 0x3F) != 0) {                      # any group or other bit
+        klog("config: emergency.cred is group/world readable - REFUSED, chmod 600 it");
+        kmsg("kybernet: config: emergency.cred must be mode 0600; refusing to use it");
+        return 0;
+    }
+
+    # 78 bytes of headroom over the longest legal record (v1 with a 64-byte salt
+    # and a 64-byte tag), so a full read is distinguishable from a truncated one
+    # the way rule 30 requires everywhere else.
+    var cap = 639;
+    var n = file_read_all(path, &_cred_buf, cap + 1);
+    if (n <= 0) { return 0; }
+    if (n > cap) {
+        klog("config: emergency.cred is too large to be a credential - IGNORED");
+        return 0;
+    }
+    while (n > 0 && load8((&_cred_buf) + n - 1) <= 32) { n = n - 1; }
+    if (n == 0) { return 0; }
+    store8((&_cred_buf) + n, 0);
+    return str_new(&_cred_buf, n);
+}

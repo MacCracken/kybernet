@@ -71,7 +71,7 @@ stdlib = [
 # dm-verity is deliberately not sourced from sigil; see CHANGELOG.md [1.4.0].
 [deps.sigil]
 git = "https://github.com/MacCracken/sigil.git"
-tag = "3.12.11"
+tag = "3.12.13"
 modules = ["dist/sigil-mldsa.cyr", "src/sha_ni.cyr", "src/sha256.cyr", "src/hex.cyr", "dist/sigil-tpm.cyr", "dist/sigil-argon2.cyr"]
 
 [deps.agnostik]
@@ -81,7 +81,7 @@ modules = ["dist/agnostik.cyr"]
 
 [deps.libro]
 git = "https://github.com/MacCracken/libro.git"
-tag = "2.8.12"
+tag = "2.9.0"
 modules = ["dist/libro.cyr"]
 
 # argonaut ships no dist bundle, so imports stay selective. Order mirrors
@@ -90,7 +90,7 @@ modules = ["dist/libro.cyr"]
 # omitted — kybernet IS PID 1; that harness is argonaut's own test rig.
 [deps.argonaut]
 git = "https://github.com/MacCracken/argonaut.git"
-tag = "1.13.10"
+tag = "1.14.0"
 modules = [
     "src/syscall_compat.cyr",
     "src/types.cyr",

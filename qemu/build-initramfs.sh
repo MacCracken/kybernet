@@ -718,17 +718,40 @@ AUTHPY
         bash "${SCRIPT_DIR}/../scripts/mkcred.sh" --check "$KDF_REC" >/dev/null || {
             echo "  ERROR: mkcred-fixture emitted a record mkcred.sh --check rejects"; exit 1; }
         if [ -n "$KDF_REC" ]; then
+            # ⚠ THE REAL RECORD GOES IN THE FILE; A DELIBERATELY WRONG ONE GOES
+            # IN config.json. 1.6.18.
+            #
+            # /etc/kybernet/emergency.cred at 0600 is the credential; the
+            # config key is a deprecated fallback and the FILE must win. Staging
+            # a record in both, with only the file's being correct, makes the
+            # precedence rule falsifiable in one boot: if precedence were
+            # inverted — or if the file were silently ignored for any reason —
+            # the wrong record would be used and the correct password would fail
+            # to authenticate. A fixture that put the right record in both
+            # places would pass either way and prove nothing.
+            #
+            # The decoy is a structurally VALID v1 record (so it is not rejected
+            # as malformed and quietly dropped, which would also make the file
+            # win, for the wrong reason) with a tag that cannot match.
             python3 - "$KDF_STAGE" "$KDF_REC" << 'KDFPY'
 import sys, json, pathlib
-p = pathlib.Path(sys.argv[1]) / 'etc/kybernet/config.json'
+stage = pathlib.Path(sys.argv[1])
+rec = sys.argv[2]
+p = stage / 'etc/kybernet/config.json'
 c = json.loads(p.read_text())
 c['emergency_require_auth'] = True
-c['emergency_password_hash'] = sys.argv[2]
+# Same parameters and salt, an all-zero tag: valid shape, cannot ever match.
+parts = rec.split('$')
+parts[5] = '0' * len(parts[5])
+c['emergency_password_hash'] = '$'.join(parts)
 p.write_text(json.dumps(c, indent=2))
+cred = stage / 'etc/kybernet/emergency.cred'
+cred.write_text(rec + "\n")
+cred.chmod(0o600)
 KDFPY
             ( cd "$KDF_STAGE"
               find . | cpio -o -H newc 2>/dev/null | gzip > "${SCRIPT_DIR}/initramfs-auth-kdf.cpio.gz" )
-            echo "  staged emergency-auth fixture (argon2id v1)"
+            echo "  staged emergency-auth fixture (argon2id v1 in emergency.cred 0600; decoy in config.json)"
         else
             rm -f "${SCRIPT_DIR}/initramfs-auth-kdf.cpio.gz"
         fi

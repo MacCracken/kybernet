@@ -277,7 +277,39 @@ fn _load_config_inner(want_services) {
     # without a hash (argonaut 1.8.6 MEDIUM-3), so a half-configured pair
     # locks the shell rather than opening it. 1.5.4.
     g_emerg_require_auth = _cfg_bool(root, "emergency_require_auth", 0);
-    g_emerg_hash = _cfg_str(root, "emergency_password_hash", 0);
+    # ⚠ THE CREDENTIAL FILE TAKES PRECEDENCE OVER THE CONFIG KEY. 1.6.18.
+    #
+    # /etc/kybernet/config.json is world-readable by design — it is a service
+    # manifest, and the boot path, the operator and anything reading service
+    # definitions all want it. Putting an Argon2id credential record in it means
+    # every local unprivileged process can read the salt and tag and grind the
+    # KDF offline at its leisure.
+    #
+    # /etc/kybernet/emergency.cred at 0600 costs essentially nothing and closes
+    # that. It does NOT defeat an image-holder adversary — anyone with the disk
+    # reads the file regardless — which is precisely why this complements the
+    # 1.5.9 KDF rather than replacing it: the KDF is what makes the record
+    # expensive to attack once read, and the file mode is what stops it being
+    # read by every process on the box in the first place.
+    #
+    # The config key stays as a deprecated fallback so no board loses its
+    # credential on upgrade. When both are present the FILE wins and the config
+    # key is announced as ignored — silently preferring one over the other is
+    # how an operator ends up locked out by a record they thought they had
+    # replaced.
+    g_emerg_hash = emerg_load_cred_file();
+    var cfg_hash = _cfg_str(root, "emergency_password_hash", 0);
+    if (g_emerg_hash != 0) {
+        if (cfg_hash != 0) {
+            klog("config: emergency.cred present - the emergency_password_hash key is IGNORED");
+            kmsg("kybernet: config: emergency.cred takes precedence over emergency_password_hash");
+        }
+    } else {
+        g_emerg_hash = cfg_hash;
+        if (g_emerg_hash != 0) {
+            klog("config: emergency credential read from config.json - move it to /etc/kybernet/emergency.cred (0600)");
+        }
+    }
 
     # Validate the credential HERE, not at the prompt. Until 1.5.9 this was
     # the one config key with no validation at all: `_cfg_str` returns

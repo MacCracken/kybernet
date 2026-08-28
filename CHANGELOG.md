@@ -7,6 +7,75 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.6.18] — 2026-08-27
+
+**Consumed the three dep releases, and moved the emergency credential out of the
+world-readable config.** Suite 733 → 739 assertions. Harness 71 → **72**
+properties. sigil 3.12.11 → **3.12.13**, libro 2.8.12 → **2.9.0**, argonaut
+1.13.10 → **1.14.0**.
+
+### Closed by consuming the deps
+
+- **`check_command`'s 232 bytes per health check** (argonaut 1.14.0) — now **0**,
+  and an over-long command is refused rather than silently truncated.
+- **sigil's `exec_capture` / `exec_vec`** (sigil 3.12.13) — no module outside
+  `sys_util.cyr` calls either any more. The worst site was `dmverity_verify`,
+  which returned **Ok(true)** for a `veritysetup verify` that never ran.
+
+### Added — `/etc/kybernet/emergency.cred`, mode 0600
+
+`config.json` is world-readable **by design** — it is a service manifest, and the
+boot path, the operator and anything reading service definitions all want it.
+Putting an Argon2id record in it means every local unprivileged process can read
+the salt and tag and grind the KDF offline at its leisure.
+
+A 0600 sidecar costs essentially nothing and closes that. It does **not** defeat
+an image-holder adversary — anyone with the disk reads the file regardless —
+which is precisely why it complements the 1.5.9 KDF rather than replacing it: the
+KDF makes the record expensive to attack once read, the file mode stops it being
+read by every process on the box in the first place.
+
+The config key remains as a deprecated fallback so no board loses its credential
+on upgrade. **The file wins**, and when both are present the config key is
+announced as ignored — silently preferring one is how an operator ends up locked
+out by a record they thought they had replaced.
+
+⚠ **The mode is checked, and a group- or world-readable file is REFUSED, not
+fallen back from.** A credential file that anyone can read buys nothing over the
+config key it replaced. Refusing rather than quietly using the config key is the
+same reasoning: an operator who created this file meant it to be the credential.
+
+`st_mode` is read with `load32` through the stdlib's arch-dispatched `STAT_MODE`
+— it is a 32-bit `mode_t`, and the offset is **+24 on x86_64 and +16 on aarch64**,
+so neither the width nor the offset may be hardcoded.
+
+The loader lives in `src/lib/emergency_auth.cyr`, not `main.cyr`, so the unit
+suite can reach it — standing rule 34. Six new assertions cover absent, 0600,
+a trailing newline, and refusal at 0644 and 0640.
+
+⚠ **The harness fixture is falsifiable.** It stages the REAL record in
+`emergency.cred` and a deliberately **wrong** one — same parameters and salt, an
+all-zero tag — in `config.json`. The correct password authenticating can only
+happen if the file won; had precedence been inverted, or the file ignored for any
+reason, the decoy would have been used and nothing could have matched. The decoy
+is a structurally *valid* v1 record on purpose: a malformed one would be dropped
+at load, so the file would win for the wrong reason and the test would still pass.
+
+### Written in a dep, awaiting a tag
+
+**argonaut 1.15.0** — `audit_log_record` adopts libro 2.9.0's
+`chain_append_nokeep`, MEDIUM-10's consumer half. Per audit record on a streaming
+chain: 224 arena + 88 `fl_alloc` at 1.13.9 → **176 + 0** now, a 44% cut in real
+memory, asserted as a ceiling so it cannot climb back.
+
+⚠ **MEDIUM-10 remains open**, and the reason is measured rather than assumed: the
+remaining 176 bytes are Strs inherent to producing a link — the RFC3339 timestamp
+(40 bytes), the superseded head-hash Str, the hasher's output. Closing it needs a
+fixed-buffer hash in libro, which touches `entry_compute_hash` and therefore
+byte-identical linkage for every consumer.
+
+---
+
 ## [1.6.17] — 2026-08-27
 
 **Working the 1.5.9 sweep survivors.** Suite 725 → 733 assertions. Harness 67 →

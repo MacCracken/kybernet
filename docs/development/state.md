@@ -6,36 +6,32 @@
 
 ## Version
 
-**1.6.17** — working the 1.5.9 sweep survivors. Suite 725 → 733 assertions. Harness
-67 → **71** properties. **No dep bump**: libro 2.9.0, argonaut 1.14.0 and sigil
-3.12.13 are written, tested and clean but not yet tagged.
+**1.6.18** — consumed the three dep releases, and moved the emergency credential out
+of the world-readable config. Suite 733 → 739 assertions. Harness 71 → **72**
+properties. sigil 3.12.11 → **3.12.13**, libro 2.8.12 → **2.9.0**, argonaut 1.13.10 →
+**1.14.0**.
 
-**Added: a hard CPU cap.** `limits.cpu_max_us`. kybernet could express `cpu.weight`
-— a relative share, "matters less when they compete" — and never a ceiling, so no
-service could be capped at half a core. The blocker was mechanical: `cpu.max` takes
-`"<quota> <period>"` where every other limit file takes one integer. Verified by
-reading `cpu.max` back **from the kernel** in a real PID-1 boot.
+**Closed by the bumps:** `check_command`'s 232 bytes per health check (now 0), and
+sigil's `exec_capture`/`exec_vec` — no module outside `sys_util.cyr` calls either any
+more. The worst site there was `dmverity_verify`, which returned **Ok(true)** for a
+`veritysetup verify` that never ran.
 
-**Fixed: a failed prerequisite now blocks its dependents.** `resolve_service_waves`
-only ORDERS waves; a wave-N failure incremented `failed` and wave N+1 started anyway,
-launching a service into a world without the thing it requires. The dependent is
-skipped with its blocker named, and is itself recorded as failed so ITS dependents
-are skipped too. A skipped dependent is **not** counted in `failed` — it did not
-fail, it was never attempted, and conflating them would make the emergency-shell
-heuristic fire on one root cause times its fan-out.
+**Added: `/etc/kybernet/emergency.cred` at 0600.** config.json is world-readable *by
+design* — it is a service manifest — so an Argon2id record in it let every local
+unprivileged process read the salt and tag and grind the KDF offline. The file mode
+does not defeat an image-holder, which is exactly why it **complements** the 1.5.9 KDF
+rather than replacing it. The file wins over the config key (announced, not silent),
+and a group- or world-readable file is **REFUSED** rather than fallen back from — a
+credential file anyone can read buys nothing over the key it replaced.
 
-**Closed: the Landlock ABI item**, which was already done at 1.6.14 (HIGH-2) — ticked
-after checking `sandbox.cyr` rather than the roadmap's word.
+The loader is in `src/lib/emergency_auth.cyr`, not `main.cyr`, so the unit suite can
+reach it (rule 34). ⚠ `st_mode` is read with `load32` via the stdlib's arch-dispatched
+`STAT_MODE` — a 32-bit `mode_t` at **+24 on x86_64 and +16 on aarch64**, so neither
+width nor offset may be hardcoded.
 
-⚠ **MEDIUM-10 stays open, and the earlier analysis was wrong about why.** libro 2.9.0
-adds `chain_append_nokeep` and it works. Measured: a streaming append was **224 bytes
-of arena plus an 88-byte `fl_alloc`**; with nokeep it is **208 and no `fl_alloc`** —
-a third of the real cost, freelist half at zero, arena barely moved. **The entry
-struct was never the dominant cost**, which is what 1.6.15 assumed. What dominates is
-Strs inherent to producing a link: the RFC3339 timestamp (40 bytes), the superseded
-head-hash Str, and the hasher's output. Closing it means changing what a hash IS in
-libro — a fixed buffer rather than a fresh `Str` per record — which touches
-`entry_compute_hash` and therefore byte-identical linkage for every consumer.
+⚠ **The harness fixture for it is falsifiable**, which is the point: it stages the real
+record in the file and a deliberately WRONG one (valid shape, all-zero tag) in
+config.json, so the correct password authenticating can only happen if the file won.
 
 ## Toolchain
 
@@ -64,10 +60,10 @@ gitignored: **the contract is the lock file, not the bytes on disk.**
 
 | Dep | Tag | Commit | Shape |
 |---|---|---|---|
-| sigil | 3.12.11 | `4cf0f5b` | THIN surface — mldsa + sha_ni + sha256 + hex + tpm + argon2. **Never the monolith.** |
+| sigil | 3.12.13 | `6a422b1` | THIN surface — mldsa + sha_ni + sha256 + hex + tpm + argon2. **Never the monolith.** |
 | agnostik | 1.5.1 | `a09383a` | `dist/agnostik.cyr` full bundle |
-| libro | 2.8.12 | `f101d29` | `dist/libro.cyr` full bundle |
-| argonaut | 1.13.10 | `27166b0` | **12 selective modules**, no dist bundle |
+| libro | 2.9.0 | `ce5aa0c` | `dist/libro.cyr` full bundle |
+| argonaut | 1.14.0 | `25f39ba` | **12 selective modules**, no dist bundle |
 | patra | 1.13.10 | `490f8ff` | transitive via libro; kybernet calls no `patra_*` |
 
 Unchanged at 1.6.13 — no dep bump. `cyrius deps --verify` → **70 verified, 0 failed**,
@@ -78,8 +74,8 @@ than by a verify that runs after the resolve rewrites it.
 
 | Arch | Bytes |
 |---|---|
-| x86_64 (`CYRIUS_DCE=1`) | 1,537,288 |
-| aarch64 | 1,967,128 |
+| x86_64 (`CYRIUS_DCE=1`) | 1,542,904 |
+| aarch64 | 1,968,632 |
 
 Static data is 141,168 bytes, **+96 over 1.6.13** — deliberately. The config read
 buffer is allocated once and cached rather than living in BSS: the BSS version worked
@@ -93,9 +89,9 @@ the build; that is standing rule 32.
 
 | Gate | Count | Enforcement |
 |---|---|---|
-| `cyrius test src/test.cyr` | **733** assertions | floor read from CLAUDE.md; a shrinking suite fails |
-| `bash scripts/aarch64-exec-gate.sh` | **733** assertions + 5 syscall probes | **NEW at 1.6.13** — the only gate that executes aarch64 |
-| `bash qemu/boot-test.sh` | **71** properties, 5 passes | `HARNESS_STRICT=1` in CI makes a skip a failure |
+| `cyrius test src/test.cyr` | **739** assertions | floor read from CLAUDE.md; a shrinking suite fails |
+| `bash scripts/aarch64-exec-gate.sh` | **739** assertions + 5 syscall probes | **NEW at 1.6.13** — the only gate that executes aarch64 |
+| `bash qemu/boot-test.sh` | **72** properties, 5 passes | `HARNESS_STRICT=1` in CI makes a skip a failure |
 | `bash scripts/verify-lock.sh` | 2 halves, 5 commit pins | **NEW at 1.6.13** — the committed lock vs a fresh resolve |
 | `bash scripts/bench-history.sh` | **56** benchmarks (2 reported-not-gated) | ≥15% regression gate; a dropped benchmark must be declared `BENCH_REMOVED=n`; `LAYOUT_SENSITIVE` names the two exempt ones |
 | `cyrius lint` | 0 warnings, **0 untracked deferrals** | HARD GATE — both halves |
@@ -120,40 +116,35 @@ deferred items is among them: check their evidence, not their severity label.
 
 ## In flight
 
-**v1.6.17 is NOT tagged.** All gates green locally. The user tags.
+**v1.6.18 is NOT tagged.** All gates green locally. The user tags.
 
-⚠ **THREE dep releases are written, tested and clean but NOT TAGGED**, and they are
-independent of each other — tag them in any order, then bump kybernet once:
-
-- **libro 2.9.0** — `chain_append_nokeep` (MEDIUM-10's API half). 762 assertions.
-- **argonaut 1.14.0** — `check_command` 232 → **0** bytes per health check, and an
-  over-long command refused rather than silently truncated. 41 assertions in
-  `health_exec.tcyr`; all suites pass.
-- **sigil 3.12.13** — no module outside `sys_util.cyr` calls the stdlib's `exec_vec`
-  or `exec_capture`. All 65 suites pass; every bundle regenerated and verified
-  idempotent; `cyrius doc --check` 0 undocumented.
-
-⚠ **argonaut 1.14.0 does NOT yet adopt libro's `chain_append_nokeep`** — argonaut
-pins libro 2.8.12, so that adoption needs libro tagged first and is a further
-argonaut release. The chain is libro → argonaut → kybernet.
+⚠ **argonaut 1.15.0 is written, tested and clean but NOT TAGGED.** It adopts libro
+2.9.0's `chain_append_nokeep` in `audit_log_record` — MEDIUM-10's consumer half, worth
+312 → 176 real bytes per audit record. It is a MINOR because the return type changes
+from an entry to the head hash (nothing consumed the entry; every call site discarded
+it). Tag it, then bump kybernet's argonaut pin to bank the 44%.
 
 ## Next
 
-Remaining after the tags land: **12 survivors of the 1.5.9 sweep** plus MEDIUM-10.
-The ones with real substance:
+**12 open items**, one of which is the argonaut tag above. The ones with real
+substance, in the order I would take them:
 
-1. **MEDIUM-10's remaining bytes** — a fixed-buffer hash in libro. Blast radius is
-   every consumer's linkage, so it wants its own release and its own verification.
-2. **Give the AGNOS default services a non-root uid** — the mechanism has worked
-   since 1.6.9 and nothing uses it. Needs a uid allocation per service and matching
-   ownership on the runtime paths each one writes; mostly an agnosticos change.
-3. **Port `agnos-init.sh`'s `setup_directories()` to a oneshot** — one of its two
-   kybernet blockers is now closed (a failed prerequisite blocks its dependents); the
-   other is that `aethersafha`'s `depends_on` is hardcoded in argonaut's
-   `default_services`.
-4. **`seccomp: basic` is measured against a dynamically linked binary only** — the
-   dev box stages Arch's dynamic busybox, CI installs `busybox-static`, and the two
-   greens attest to different syscall sets.
+1. **MEDIUM-10's remaining 176 bytes** — a fixed-buffer hash in libro. ⚠ Read the
+   roadmap entry first: two attempts have now under-delivered because both assumed the
+   entry struct was the cost. It is not. The remainder is the timestamp Str, the
+   superseded head-hash Str and the hasher's output, and removing them changes what a
+   hash IS — blast radius is every consumer's linkage.
+2. **`seccomp: basic` is measured against a dynamically linked binary only** — the dev
+   box stages Arch's dynamic busybox, CI installs `busybox-static`, and the two greens
+   attest to different syscall sets. Decide whether `basic` covers static linkage and
+   measure whichever answer is chosen, rather than widening the list to quiet a
+   harmless denial.
+3. **Seven `ServiceDefinition` fields have no config key** — `ready_check` and
+   `restart_config` are the notable two, so readiness and restart policy are argonaut
+   defaults on every AGNOS board. Needs a decision about how much of argonaut's model
+   kybernet intends to expose.
+4. **Give the AGNOS default services a non-root uid** — the mechanism has worked since
+   1.6.9 and nothing uses it. Mostly an agnosticos change.
 
 ## Release order (cross-repo)
 

@@ -1439,6 +1439,29 @@ else
     else
         _auth_assert "$KDF_INITRD" "argon2id v1"
 
+        # ⚠ THE CREDENTIAL FILE WON OVER THE CONFIG KEY. 1.6.18.
+        #
+        # This fixture stages the REAL record in /etc/kybernet/emergency.cred
+        # (0600) and a deliberately wrong one — same parameters and salt, an
+        # all-zero tag — in config.json. `_auth_assert` above has just proved the
+        # correct password authenticates, which can ONLY happen if the file won:
+        # had the config key won, or had the file been ignored for any reason,
+        # the decoy would have been used and no password could have matched.
+        #
+        # The decoy is a structurally valid v1 record on purpose. A malformed one
+        # would be rejected at load and dropped, so the file would win for the
+        # wrong reason and this would still pass.
+        #
+        # This line is the direct evidence, asserted separately so a failure says
+        # which half broke: authentication, or the precedence announcement.
+        if echo "$AUTH_LAST_OK_OUT" | grep -aqF "emergency.cred present - the emergency_password_hash key is IGNORED"; then
+            echo "  OK: [argon2id v1] emergency.cred took precedence over the config key"
+        else
+            echo "  FAIL: [argon2id v1] the credential file did not take precedence"
+            echo "$AUTH_LAST_OK_OUT" | grep -aiE 'emergency.cred|password_hash' | head -3 || true
+            fail=1
+        fi
+
         # The parameters must reach the boot log. That is what turns a typo
         # into something an operator sees months before they need the shell,
         # and it is the only externally visible evidence that the KDF path —

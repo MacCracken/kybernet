@@ -2468,6 +2468,67 @@ fn _test_sigil_style_cstr(hex_cstr) {
     return p;
 }
 
+# ⚠ 1.6.18 — the emergency credential moved to /etc/kybernet/emergency.cred at
+# 0600, because config.json is world-readable BY DESIGN: it is a service
+# manifest. An Argon2id record in it means every local unprivileged process can
+# read the salt and tag and grind the KDF offline. The file mode does not defeat
+# an image-holder — anyone with the disk reads it regardless — which is exactly
+# why it COMPLEMENTS the 1.5.9 KDF rather than replacing it.
+#
+# The mode check is the security-relevant branch and the one worth pinning: a
+# credential file that is group- or world-readable buys nothing over the config
+# key it replaced.
+fn _write_file(path, content, mode) {
+    var fd = sys_open(path, 577, mode);   # O_WRONLY|O_CREAT|O_TRUNC
+    if (fd < 0) { return 0 - 1; }
+    sys_write(fd, content, strlen(content));
+    sys_close(fd);
+    return 0;
+}
+
+fn test_emerg_cred_file() {
+    println("--- emergency.cred file (1.6.18) ---");
+    var rec = _cat2("v1$2$19456$1$6b796265726e65742d746573742d3031$",
+      "2b314f63f14b4817f38b55e7c5c53e55a4973ce075d7a95ad2da3a4aa7c57c5e");
+
+    # Absent file: no credential, and no complaint.
+    assert_eq(emerg_load_cred_file_at("/tmp/kyb_cred_absent_xyz"), 0, "cred file: absent is 0");
+
+    # 0600: accepted, and the record round-trips.
+    var ok_path = "/tmp/kyb_cred_t600";
+    _write_file(ok_path, rec, 384);          # 0600
+    var loaded = emerg_load_cred_file_at(ok_path);
+    assert(loaded != 0, "cred file: 0600 is read");
+    assert_eq(emerg_cred_kind(loaded), EMERG_CRED_ARGON2ID, "cred file: parses as argon2id");
+
+    # A trailing newline must not break it — every way of writing this file
+    # produces one, and a credential rejected for an invisible byte is the least
+    # debuggable failure this path can produce.
+    var nl_path = "/tmp/kyb_cred_tnl";
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, rec);
+    str_builder_add_cstr(sb, "\n");
+    _write_file(nl_path, str_data(str_builder_build(sb)), 384);
+    var nl_loaded = emerg_load_cred_file_at(nl_path);
+    assert_eq(emerg_cred_kind(nl_loaded), EMERG_CRED_ARGON2ID,
+      "cred file: a trailing newline is stripped");
+
+    # 0644: REFUSED. Not "fall back to the config key" — an operator who created
+    # this file meant it to be the credential, and silently using a different one
+    # is how you get locked out by a record you thought you had replaced.
+    var bad_path = "/tmp/kyb_cred_t644";
+    _write_file(bad_path, rec, 420);         # 0644
+    assert_eq(emerg_load_cred_file_at(bad_path), 0, "cred file: 0644 is REFUSED");
+
+    # 0640 — group-readable only — is refused for the same reason.
+    var grp_path = "/tmp/kyb_cred_t640";
+    _write_file(grp_path, rec, 416);         # 0640
+    assert_eq(emerg_load_cred_file_at(grp_path), 0, "cred file: 0640 is REFUSED");
+
+    sys_unlink(ok_path); sys_unlink(nl_path); sys_unlink(bad_path); sys_unlink(grp_path);
+    return 0;
+}
+
 fn test_edge_compare_pcrs_cstr() {
     println("--- edge PCR compare over sigil's RAW cstr (1.6.13) ---");
     var d7  = "aabbccddeeff00112233445566778899aabbccddeeff001122334455667788ff";
@@ -3089,6 +3150,7 @@ fn main() {
     test_unsafe_service_name_refused();
     test_edge_config_rejects();
     test_edge_validators();
+    test_emerg_cred_file();
     test_edge_compare_pcrs_cstr();
     test_edge_boot_gating();
     test_notify_edge_cases();
