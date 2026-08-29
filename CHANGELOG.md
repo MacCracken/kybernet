@@ -12,9 +12,9 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 **`seccomp: basic` could not open a file on x86_64, and had not been able to
 since 1.6.0 — and a confined daemon could not sleep on either arch.** Suite 739 →
 **747** assertions (742 on aarch64 — six are x86-only, one aarch64-only).
-Harness 72 → **79** properties.
-No dep bumps — sigil 3.12.13 / agnostik 1.5.1 / libro 2.9.0 / argonaut 1.14.0 are
-unchanged, and the cyrius pin stays at 6.5.35.
+Harness 72 → **79** properties, plus a new **18-property aarch64 boot gate**.
+No dep bumps — sigil 3.12.13 / agnostik 1.5.1 / libro 2.9.0 / argonaut 1.14.0
+are unchanged. **cyrius 6.5.35 → 6.5.36**, which closes 1.6.13's CRITICAL-1.
 
 ### Fixed — the profile was broken for every binary AGNOS actually ships
 
@@ -127,6 +127,93 @@ lock and recommending the fix that breaks the build.
 Verified both ways: bumping a manifest tag without re-resolving still fails half
 1 offline, and the toolchain-drift arm was exercised against a real in-flight
 `~/.cyrius/lib` (5 stdlib files moved, 4 commit pins identical).
+
+### cyrius 6.5.35 → 6.5.36 — the aarch64 boot blocker is gone
+
+⚠ **1.6.13 CRITICAL-1 is closed, upstream, with the fix this repo proposed.**
+The aarch64 backend emitted an x86-compat translation ladder in which
+`SYS_SIGNALFD4 = 74` collided with the `74 → 82` fsync row and `SYS_PPOLL = 73`
+with the `73 → 32` flock row — two constants, one value, opposite expectations.
+`sys_signalfd()` therefore issued `fsync(-1)`, `setup_signals` returned
+`Err(EBADF)`, phase 4 took its FATAL arm, and the board powered itself off
+before loading config. **The aarch64 binary could not boot at all**, and was
+published for ten releases on the strength of a cross-build exiting 0.
+
+6.5.36 moves both into the ≥1000 private-alias band (`SYS_PPOLL = 1073`,
+`SYS_SIGNALFD4 = 1074`) — proposed fix (A) in the filing.
+
+⚠ **Verified against the RELEASED tarballs, not a local install**, and that
+distinction is load-bearing: this box carries patched copies of *both* 6.5.35
+and 6.5.36 under `~/.cyrius/versions/`, so `cyrius --version` says nothing about
+the stdlib behind it and neither tree is a reference. Fetched from the tags:
+6.5.35 has 73/74, 6.5.36 has 1073/1074.
+
+`AARCH64_KNOWN_BROKEN` is now **empty**. That is stricter than before, not
+looser — the gate fails if either primitive regresses, where previously it was
+required to stay broken.
+
+⚠ **This is not a claim that the aarch64 binary boots.** It is the removal of
+the thing that guaranteed it could not. Nothing has yet run `kybernet-aarch64`
+as PID 1; the exec gate runs the unit suite and a syscall probe under
+`qemu-user`, which is a process, not a boot. That gap is now the roadmap's
+top open item — standing rule 44's unfinished half.
+
+### Fixed — `verify-lock.sh` could not tell a pin bump from toolchain drift
+
+Found by running it *on this bump*. Both move every stdlib hash while leaving
+all commit pins identical, and the gate reported the drift case: *"Do NOT commit
+the regenerated lock — it would red CI."* Exactly backwards here — the manifest
+pin changed, so CI installs 6.5.36 and reproduces those hashes, making HEAD's
+lock the stale one. The gate now compares the manifest's `cyrius` pin against
+`git show HEAD:cyrius.cyml` and says **"COMMIT the regenerated lock together
+with cyrius.cyml"** instead. Both branches verified by exercising them.
+
+### Added — `qemu/boot-test-aarch64.sh`: the aarch64 binary BOOTS
+
+⚠ **A syscall probe is not a boot, and `qemu-user` is not PID 1.** Standing rule
+44 got kybernet as far as *executing* aarch64 in 1.6.13 — `aarch64-exec-gate.sh`
+runs the unit suite and probes boot-critical primitives — and then stopped there
+for six releases. ⚠ **That stopping point looked principled and was actually
+blocked**: while CRITICAL-1 stood, the boot could not happen at all. The
+distinction only became visible once 6.5.36 removed the blocker, and nothing
+announces when a deferral's justification expires.
+
+`kybernet-aarch64` now runs as PID 1, and it worked on the first attempt:
+
+```
+phase 2: console ready          cgroup controllers enabled: 6
+phase 3: filesystems mounted    loaded config: /etc/kybernet/config.json
+phase 4: signals ready          argonaut initialized
+phase 6: argonaut ready         reactor wakeups=21
+phase 8: services started       reboot: Power down
+phase 9: harness done           (no panic)
+```
+
+**21 wakeups is the identical count x86_64 reports** — epoll, timerfd and
+signalfd all behave in the real event loop, which is precisely where the
+ESYSXLAT collision would have bitten hardest.
+
+⚠ **`phase 4: signals ready` is the gate's CRITICAL-1 sentinel** — the one
+marker whose absence has a known, specific, catastrophic cause, and one no
+syscall probe would catch, because the probe tests signalfd in isolation rather
+than inside init's real startup. Verified by injection: forcing `setup_signals`
+to return `Err(EBADF)` — exactly what `signalfd → fsync(-1)` returned — fails
+the gate with that named message and exit 1.
+
+The kernel is a **pinned, sha256-checked** Alpine netboot image cached under
+`qemu/.cache/`: an amd64 runner has no arm64 kernel package, so it is a declared
+dependency rather than an assumed host capability (rule 33), and a checksum
+mismatch is a failure, not a silent re-download. TCG, not KVM — an x86 host
+cannot accelerate aarch64 — so the budget is `KYB_MS`, kybernet's own
+serial-timestamp span (1014 ms), never wall time (rule 37). The staleness guard
+(rule 43) and the no-panic assertion (rule 38) are both carried over, and both
+fired during development.
+
+⚠ **Scope, stated in the file rather than glossed:** it boots with **no
+services**. Most x86 fixtures exec busybox applets and an aarch64 busybox is a
+build-host capability rule 33 forbids assuming — so everything the x86 harness
+proves *about services* remains x86-only. Fixture parity is the roadmap's next
+increment; the three Cyrius fixtures already cross-build, which is the path.
 
 ### Fixed — a confined daemon could not sleep, on either architecture
 

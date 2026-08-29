@@ -233,44 +233,52 @@ Moved into the v1.6.1 gate line. Recording why here so the claim is not re-made:
 
 ## Blocked upstream / on an external consumer
 
-- [ ] **⚠ FILED 2026-08-27: the aarch64 ESYSXLAT collision behind CRITICAL-1 and
-      MEDIUM-9.** `docs/development/issues/2026-08-27-aarch64-esysxlat-eats-native-signalfd4-and-ppoll.md`
-      in the cyrius repo, with a runnable repro under `issues/repros/`. **cyrius is
-      off-limits to this repo — filing an issue is the only permitted action, and
-      that is done.** Root cause read out of `src/backend/aarch64/emit.cyr`:
-      `lib/syscalls_aarch64_linux.cyr` defines `SYS_FSYNC = 74` (the x86 number,
-      deliberately, awaiting translation `74→82` at `emit.cyr:1125`) and
-      `SYS_SIGNALFD4 = 74` (the NATIVE aarch64 number, expecting passthrough) —
-      two constants, one value, opposite expectations, and the flat rewrite cannot
-      tell them apart. Same shape for `SYS_PPOLL = 73` vs the `flock 73→32` row at
-      `:1033`, whose own comment already warns about re-catching a remapped
-      `poll(73)` while leaving a DIRECT `syscall(SYS_PPOLL, …)` — which is
-      `sys_pause()` — unprotected. **No consumer workaround exists**, established by
-      five failed attempts recorded in the filing (literal, global, runtime-computed,
-      and both x86 numbers, which have no rows). Proposed fix (A) is the ≥1000
-      private-alias band the tree already uses for `SYS_CHDIR = 1049` /
-      `SYS_FCHOWNAT = 1054`. kybernet's side is contained: the aarch64 execution gate
-      carries these as a DECLARED known-broken pair, and `release.yml` refuses to
-      publish a binary that fails the boot-critical probe. **Close this item by
-      pinning a fixed cycc and dropping the two entries from
-      `AARCH64_KNOWN_BROKEN`** — the gate then fails if they are dropped early.
-      ⚠ **APPEARS FIXED UPSTREAM, OBSERVED 2026-08-28 — DO NOT ACT YET.** The
-      installed (in-flight, unreleased) cyrius tree now carries
-      `SYS_SIGNALFD4 = 1074` in `lib/syscalls_aarch64_linux.cyr:190`, i.e. exactly
-      proposed fix (A): the ≥1000 private-alias band, matching the `SYS_PPOLL =
-      1073 → 73` row beside it. Against that tree the exec gate reports
-      `observed broken: []` — signalfd AND pause both pass — and correctly FAILS,
-      because the gate detects drift in **both** directions and a stale exception
-      is how a gate goes quiet. That failure is the gate working, not a
-      regression.
-      ⚠ **The two entries must NOT be dropped until the fix is in a TAGGED cyrius
-      that CI installs.** CI resolves the pinned `cyrius = "6.5.35"`, where both
-      are still broken, so removing them now turns CI red for a fix CI cannot
-      see. Sequence: cyrius tags the fix → the user says to move the pin → bump
-      `cyrius.cyml` → drop `pause,signalfd` from `AARCH64_KNOWN_BROKEN` → the
-      aarch64 binary can boot for the first time (1.6.13 CRITICAL-1), which then
-      wants a real aarch64 boot gate rather than the syscall probe standing in
-      for one.
+- [x] **⚠ CLOSED 1.6.19 (cyrius 6.5.36): the aarch64 ESYSXLAT collision behind
+      CRITICAL-1 and MEDIUM-9.** Filed as
+      `docs/development/issues/2026-08-27-aarch64-esysxlat-eats-native-signalfd4-and-ppoll.md`
+      with a runnable repro; **cyrius took proposed fix (A)** — the ≥1000
+      private-alias band the tree already used for `SYS_CHDIR = 1049`. Verified
+      against the RELEASED tarballs rather than a local install, because this box
+      has patched copies of both versions and neither is a reference:
+      6.5.35 has `SYS_PPOLL = 73` / `SYS_SIGNALFD4 = 74` (colliding with the
+      `73 → 32` flock and `74 → 82` fsync rows), 6.5.36 has `1073` / `1074`.
+      `AARCH64_KNOWN_BROKEN` is now **empty**, which is strictly stronger than
+      declaring the pair broken: the gate fails if either regresses.
+      ⚠ **This does not mean the aarch64 binary boots — it means the thing that
+      guaranteed it could not is gone.** See the next item, which is the actual
+      claim.
+
+- [x] **⚠ DONE 1.6.19: EXECUTE the aarch64 binary as PID 1 — standing rule 44's
+      unfinished half.** `qemu/boot-test-aarch64.sh`, 18 properties, TCG (an x86
+      host cannot accelerate aarch64) against a **pinned, sha256-checked** Alpine
+      netboot kernel cached under `qemu/.cache/` — a declared dependency, not an
+      assumed host capability (rule 33). **`kybernet-aarch64` boots**: phases
+      2/3/4/6/8/9, 6 cgroup controllers, config loaded, argonaut initialised,
+      clean `reboot: Power down`, no panic — and the reactor runs, waking **21
+      times in 5s, the identical count x86_64 reports**. It worked on the first
+      attempt. The budget is `KYB_MS`, kybernet's own serial-timestamp span
+      (1014 ms), never wall time (rule 37).
+      ⚠ `phase 4: signals ready` is the gate's **CRITICAL-1 sentinel**. Verified
+      by injection: forcing `setup_signals` to return `Err(EBADF)` — exactly what
+      `signalfd -> fsync(-1)` returned — fails the gate with that named message
+      and exit 1. See standing rule 50.
+
+- [ ] **aarch64 fixture parity — the honest remainder of the boot gate.** The
+      aarch64 boot runs with **no services**, so everything the x86 harness
+      proves ABOUT SERVICES is still x86-only: cgroup placement and limits, the
+      per-service sandbox (`kyb_pre_exec`), seccomp, Landlock, capabilities,
+      uid/gid drop, health checks, the watchdog, restart backoff, sd_notify,
+      and prerequisite blocking. That is most of standing rule 27's surface.
+      ⚠ **The blocker is honest and specific**: most x86 fixtures exec busybox
+      applets, and an aarch64 busybox is a build-host capability rule 33 forbids
+      assuming. The path forward is the one the notify/Landlock/seccomp fixtures
+      already took — they are **Cyrius binaries and cross-build to aarch64
+      today** — so a services-bearing aarch64 config can be built from the
+      cyrius fixtures alone, with the busybox-dependent services omitted rather
+      than faked. ⚠ Note this changes the `services parsed: N` and `removed
+      service cgroups: N` markers for the aarch64 config independently of x86.
+      ⚠ **Do not close this by adding services that do not assert anything** —
+      the point is the confinement effects, asserted from inside the child.
 
 - [ ] **cyrius stdlib filings, genuinely off-limits from here.** ioctl / termios /
       poll — `2026-08-24-sys-ioctl-wrapper-missing.md`, behind `src/lib/termios.cyr` and

@@ -258,7 +258,27 @@ else
     # Distinguishing this from a real dep change is the difference between
     # "commit the lock" and "do not commit the lock".
     PIN_DELTA=$(diff <(sort "$SAVED") <(sort "$RESOLVED") 2>/dev/null | grep -cE '^[<>].*(^|[[:space:]])commit[[:space:]]' || true)
-    if [ "${PIN_DELTA:-0}" -eq 0 ]; then
+
+    # ⚠ A DELIBERATE TOOLCHAIN BUMP LOOKS EXACTLY LIKE ACCIDENTAL DRIFT, AND
+    # WANTS THE OPPOSITE ACTION. Both move every stdlib hash while leaving all
+    # commit pins identical. The difference is whether the manifest's `cyrius`
+    # pin ALSO changed: if it did, CI will install the NEW toolchain and
+    # reproduce exactly these hashes, so the committed lock is the stale one and
+    # must be regenerated — the precise opposite of the drift advice below.
+    # Without this the gate confidently tells you not to commit a lock you must
+    # commit, and CI then fails for the mirror-image reason.
+    TOOLCHAIN_NOW="$(grep -E '^cyrius[[:space:]]*=' "$MANIFEST" 2>/dev/null | head -1 | sed -E 's/.*"([^"]*)".*/\1/')"
+    TOOLCHAIN_HEAD="$(git show "HEAD:$MANIFEST" 2>/dev/null | grep -E '^cyrius[[:space:]]*=' | head -1 | sed -E 's/.*"([^"]*)".*/\1/')"
+    if [ "${PIN_DELTA:-0}" -eq 0 ] && [ -n "$TOOLCHAIN_NOW" ] && [ "$TOOLCHAIN_NOW" != "$TOOLCHAIN_HEAD" ]; then
+        echo "  ⚠ This is a DELIBERATE TOOLCHAIN BUMP, not drift."
+        echo "    $MANIFEST moved cyrius ${TOOLCHAIN_HEAD:-?} -> ${TOOLCHAIN_NOW}, and every"
+        echo "    commit pin is unchanged, so the moving stdlib hashes are exactly"
+        echo "    what that bump is supposed to do. CI installs the pin, so it will"
+        echo "    reproduce the resolve you just ran."
+        echo "    ⚠ COMMIT the regenerated $LOCK together with $MANIFEST."
+        echo "    (Leaving HEAD's lock in place is what would red CI here.)"
+        echo
+    elif [ "${PIN_DELTA:-0}" -eq 0 ]; then
         echo "  ⚠ Every commit pin is IDENTICAL — the difference is only in stdlib"
         echo "    file hashes. That is a TOOLCHAIN difference, not a dependency"
         echo "    one: your ~/.cyrius/lib has been modified relative to the"

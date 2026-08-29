@@ -11,7 +11,7 @@ able to since 1.6.0. Suite 739 → **747** assertions (742 on aarch64: the secco
 allowlist is arch-specific, so six assertions are x86-only and one is
 aarch64-only, and each gate now reads its own declared floor). Harness 72 →
 **79** properties. **No dep bumps**: sigil 3.12.13 / agnostik 1.5.1 / libro 2.9.0 /
-argonaut 1.14.0, cyrius 6.5.35.
+argonaut 1.14.0. **cyrius 6.5.35 → 6.5.36.**
 
 ⚠ **The defect, and why it hid.** aarch64 is an `*at`-only architecture, so the
 stdlib's `sys_open()` compiles to `openat` there — allowed since 1.6.0. On
@@ -81,10 +81,41 @@ object emitter no longer allocates for ordinary documents — an empty `{}` cost
 audit record) and argonaut **1.15.0** (`_append_service_env`,
 `svc_def_set_ready_check`, audit source/action caching).
 
+## cyrius 6.5.36 — the aarch64 boot blocker is gone (1.6.19)
+
+⚠ **1.6.13 CRITICAL-1 is closed upstream, with the fix this repo filed.** 6.5.36
+moves `SYS_PPOLL` 73 → **1073** and `SYS_SIGNALFD4` 74 → **1074** into the ≥1000
+private-alias band, ending the ESYSXLAT collision that made `sys_signalfd()`
+issue `fsync(-1)` and stopped the aarch64 binary booting at all.
+`AARCH64_KNOWN_BROKEN` is now **empty** — stricter than declaring the pair
+broken, since the gate fails if either regresses.
+
+⚠ **Verified against the RELEASED tarballs, not the local install**, because
+this box has patched copies of both 6.5.35 and 6.5.36 and neither is a
+reference.
+
+**And the binary now BOOTS.** `qemu/boot-test-aarch64.sh` (18 properties) runs
+`kybernet-aarch64` as PID 1 under TCG: phases 2/3/4/6/8/9, 6 cgroup controllers,
+config loaded, argonaut initialised, clean `reboot: Power down`, no panic — and
+the reactor wakes **21 times in 5 s, the identical count x86_64 reports**. It
+worked on the first attempt. ⚠ `phase 4: signals ready` is the gate's CRITICAL-1
+sentinel, verified by injecting `Err(EBADF)` into `setup_signals`.
+⚠ It boots with **no services** — the x86 fixtures exec busybox applets and an
+aarch64 busybox is a host capability rule 33 forbids assuming — so everything
+the x86 harness proves about services is still x86-only. That is the roadmap's
+next item, and the three Cyrius fixtures already cross-build.
+
+⚠ **The pack-wide 6.5.35 lockstep is retired.** kybernet is on 6.5.36 alone;
+argonaut 1.15.0 / libro 2.10.0 / agnostik 1.5.1 / sigil 3.12.13 remain 6.5.35,
+which is fine — a dep's pin governs only the dep's own CI, since kybernet
+compiles dep *source* with its own toolchain.
+
 ## Toolchain
 
-**cyrius 6.5.35**, via `~/.cyrius/bin/cyrius` (`cyriusly use 6.5.35`). The whole AGNOS pack
-front pins this — kybernet / argonaut / libro / agnostik / sigil / agnostic.
+**cyrius 6.5.36**, via `~/.cyrius/bin/cyrius` (`cyriusly use 6.5.36`). ⚠ kybernet
+moved alone — the pack-wide lockstep is retired and every other repo is still on
+6.5.35. A dep's pin governs only that dep's CI; kybernet compiles dep source
+with its own toolchain. Do not move any pin without being told to.
 
 `owl` reads `.cyr` files. **`cyim` is NOT installed here** despite sibling-repo references —
 use ordinary file edits.

@@ -62,3 +62,6 @@ Thumbs.db
 /coverage/
 *.profraw
 *.profdata
+
+# aarch64 boot gate cache — pinned kernel + generated initramfs/logs.
+/qemu/.cache/

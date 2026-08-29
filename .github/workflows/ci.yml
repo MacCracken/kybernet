@@ -210,6 +210,29 @@ jobs:
           sudo apt-get install -y --no-install-recommends qemu-user-static
           bash scripts/aarch64-exec-gate.sh
 
+      - name: aarch64 boot gate (kybernet-aarch64 as PID 1)
+        # ⚠ A SYSCALL PROBE IS NOT A BOOT (standing rule 50). The gate above
+        # runs the unit suite and probes primitives under qemu-USER — a
+        # process. It exercises no mounts, no cgroup controllers, no signalfd
+        # reactor, no sys_reboot, and none of the ordering between them.
+        #
+        # This boots the artifact. It became possible only at cyrius 6.5.36,
+        # which ended the ESYSXLAT collision behind CRITICAL-1; while that bug
+        # stood, the aarch64 boot could not happen at all, which made stopping
+        # at the syscall probe look principled when it was really blocked.
+        #
+        # ⚠ `phase 4: signals ready` is the CRITICAL-1 sentinel — the one
+        # marker whose absence has a known, specific, catastrophic cause.
+        #
+        # TCG, not KVM: an amd64 runner cannot accelerate aarch64. The budget is
+        # therefore kybernet's OWN serial-timestamp span, never wall time
+        # (standing rule 37). The kernel is a pinned, sha256-checked Alpine
+        # netboot image — a declared dependency, because an amd64 runner has no
+        # arm64 kernel package and rule 33 forbids assuming a host capability.
+        run: |
+          sudo apt-get install -y --no-install-recommends qemu-system-arm
+          bash qemu/boot-test-aarch64.sh
+
       - name: Test
         # ⚠ THE COUNT IS ASSERTED, NOT JUST "0 failed". A suite that silently
         # SHRINKS passes the old check trivially — delete half the tests and

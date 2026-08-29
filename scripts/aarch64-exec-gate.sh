@@ -37,9 +37,21 @@
 #   - a declared break is now FIXED      -> the declaration is stale, and a
 #                                           stale exception is how a gate goes
 #                                           quiet (standing rule 32)
-# This is the same shape as bench-history.sh's BENCH_REMOVED. The fix for the
-# declared entries is upstream in cyrius, which CLAUDE.md places off-limits to
-# this repo; see docs/development/roadmap.md.
+# This is the same shape as bench-history.sh's BENCH_REMOVED.
+#
+# ⚠ THE LIST IS NOW EMPTY, AND THAT IS THE POINT OF HAVING HAD IT. From 1.6.13
+# to 1.6.19 it declared `signalfd,pause`: cyrius emitted an x86-compat
+# translation ladder in which `SYS_SIGNALFD4 = 74` collided with the `74 -> 82`
+# fsync row and `SYS_PPOLL = 73` with the `73 -> 32` flock row, so `sys_signalfd()`
+# issued `fsync(-1)` and kybernet's phase 4 took its FATAL arm — the aarch64
+# binary could not boot at all (1.6.13 CRITICAL-1). cyrius 6.5.36 moved both to
+# the >=1000 private-alias band (`SYS_PPOLL = 1073`, `SYS_SIGNALFD4 = 1074`),
+# which is the fix this repo filed and proposed. Confirmed against the RELEASED
+# tarballs, not a local install: 6.5.35 has 73/74, 6.5.36 has 1073/1074.
+#
+# Emptying it is not a relaxation — the gate now fails if EITHER primitive
+# breaks again, which is strictly stronger than declaring it broken. Re-adding
+# an entry means a real regression, not a workaround.
 #
 # Usage:
 #   bash scripts/aarch64-exec-gate.sh
@@ -51,7 +63,8 @@ cd "$(dirname "$0")/.."
 
 # The primitives cyrius 6.5.35's aarch64 backend is known to mis-emit.
 # Comma-separated, sorted. Empty means "expect a fully correct toolchain".
-KNOWN_BROKEN="${AARCH64_KNOWN_BROKEN-signalfd,pause}"
+# Empty since 1.6.19 (cyrius 6.5.36) — see the block above.
+KNOWN_BROKEN="${AARCH64_KNOWN_BROKEN-}"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
