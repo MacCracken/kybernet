@@ -15,7 +15,7 @@ PID 1: kybernet (small, direct syscalls, no libc)
   enforce health checks, watchdog timeouts
   coordinated shutdown via argonaut
 
-Service management library: argonaut (886 assertions across 30 suites)
+Service management library: argonaut (952 assertions across 33 suites)
   boot sequencing, service lifecycle
   health checks, watchdog enforcement, crash recovery
   audit logging via libro (SHA-256 hash-linked chain)
@@ -29,8 +29,8 @@ the 1.5.6 aarch64 syscall repairs and the 1.5.7 fail-open exec fix were both
 argonaut-side defects reachable from kybernet's boot path.
 
 What the split actually buys is that the service-management logic is
-independently tested (886 assertions in argonaut's own suite, against
-kybernet's 491) and independently versioned, so a change there is reviewed and
+independently tested (952 assertions in argonaut's own suite, against
+kybernet's 747) and independently versioned, so a change there is reviewed and
 gated on its own before kybernet pins the tag. That is real value — it is just
 not fault isolation.
 

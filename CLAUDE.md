@@ -38,9 +38,9 @@ kybernet/
 ├── VERSION, CLAUDE.md, README.md, CHANGELOG.md, LICENSE
 ├── src/
 │   ├── main.cyr           # Globals + boot sequence + event loop + harness gate
-│   ├── test.cyr           # Integration tests (739 assertions)
+│   ├── test.cyr           # Integration tests (747 assertions)
 │   ├── bench.cyr          # Microbenchmarks
-│   └── lib/
+│   └── lib/               # 20 modules
 │       ├── log.cyr        # klog / klog2 / kmsg / slog (factored out at 1.2.0)
 │       ├── cmdline.cyr    # /proc/cmdline token scan (factored out at 1.5.7)
 │       ├── termios.cyr    # console echo suppression (1.5.8; no stdlib ioctl)
@@ -59,13 +59,20 @@ kybernet/
 │       ├── svc_config.cyr  # JSON -> ServiceDefinition parsing (1.5.0)
 │       ├── emergency_auth.cyr # Argon2id credential: format, bounds, verify (1.5.9)
 │       ├── restart_queue.cyr # Deferred restarts with backoff (1.5.4)
+│       ├── console_io.cyr   # _read_line_fd / _u64_str — testable, out of main (1.6.1)
 │       └── boot_stages.cyr  # Per-stage work + OK/SKIP/FAIL status (1.5.1)
-├── qemu/                  # PID-1 boot harness (1.1.4+)
-│   ├── build-initramfs.sh # stages initramfs + edge/auth fixtures
-│   ├── boot-test.sh       # the 4-gate harness
-│   └── boot-{crash,shutdown}-test.sh  # auxiliary busybox-based variants
+├── qemu/                  # PID-1 boot harnesses (1.1.4+)
+│   ├── build-initramfs.sh # stages initramfs + edge/auth fixtures (19 kyb-* services)
+│   ├── boot-test.sh       # x86_64: 79 properties across 5 passes (needs KVM)
+│   ├── boot-test-aarch64.sh # aarch64: 18 properties, TCG, pinned kernel (1.6.19)
+│   ├── notify-fixture.cyr   # sd_notify probe — a cyrius binary, NOT busybox
+│   ├── landlock-fixture.cyr # Landlock inside/outside probe (1.6.6)
+│   ├── seccomp-fixture.cyr  # seccomp basic probe + control arm (1.6.19)
+│   ├── mkcred-fixture.cyr   # mints the Argon2id credential with sigil's own KDF
+│   └── aarch64-syscall-probe.cyr # boot-critical primitives, by observable result
 ├── benches/history.csv    # per-benchmark ns/op; the ≥15% regression gate
-├── scripts/               # bench-history.sh + version-bump.sh + mkcred.sh (1.5.9)
+├── scripts/               # bench-history.sh, version-bump.sh, mkcred.sh (1.5.9),
+│                          # aarch64-exec-gate.sh + verify-lock.sh (1.6.13)
 ├── docs/
 │   ├── architecture/overview.md
 │   ├── audit/             # P(-1) audit reports (1.1.5+)
@@ -245,4 +252,4 @@ Plus a **sibling-free reproduction** — the only gate that catches a tag which 
 - Do not add C, Rust, or assembly files — everything is Cyrius
 - Do not reference `../cyrius/` repo — use installed toolchain at `~/.cyrius/`
 - Do not bump a dep tag to a value > the highest existing git tag (CI clones from `git + tag`; an unreleased VERSION-file value fails resolution — see 1.1.0 CHANGELOG note)
-- Test after every change (739 tests + harness when KVM available)
+- Test after every change (747 tests + both harnesses when KVM available)

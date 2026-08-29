@@ -4,7 +4,7 @@
 #
 # Builds kybernet via `cyrius build` (1.1.0 removed scripts/build.sh —
 # do not reintroduce a wrapper, the manifest pin is the contract).
-# Bundles busybox if found so the boot-shutdown/boot-crash variants
+# Bundles busybox because the harness services exec its applets
 # that use shell-init wrappers still work; the primary harness path
 # (boot-test.sh with kybernet.harness=1) doesn't need busybox.
 #
@@ -65,7 +65,10 @@ mkdir -p "${INITRAMFS_DIR}"/{bin,sbin,dev,proc,sys,run,tmp,etc,usr/bin,var/log,l
 cp "$BINARY" "${INITRAMFS_DIR}/sbin/init"
 chmod +x "${INITRAMFS_DIR}/sbin/init"
 
-# Bundle busybox for the auxiliary boot-shutdown/boot-crash tests that
+# ⚠ busybox is NOT optional and the reason changed. It was once bundled only
+# for the auxiliary boot-shutdown/boot-crash variants (both deleted); today the
+# harness services themselves exec its applets, and a missing busybox is fatal
+# below rather than a skipped extra. Bundle it for the services that
 # use shell-init wrappers. Harness mode (kybernet.harness=1) doesn't
 # need busybox — kybernet runs PID 1 directly and self-shuts.
 BUSYBOX=""
