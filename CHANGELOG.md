@@ -209,6 +209,21 @@ serial-timestamp span (1014 ms), never wall time (rule 37). The staleness guard
 (rule 43) and the no-panic assertion (rule 38) are both carried over, and both
 fired during development.
 
+⚠ **It took two CI round-trips, both standing rule 39.** `-M virt` creates a
+default virtio NIC whose option ROM ships in Ubuntu's `ipxe-qemu` — a
+*Recommended* package `--no-install-recommends` drops — so QEMU 8.2 refused to
+start with `failed to find romfile "efi-virtio.rom"` while QEMU 11 on the dev box
+started fine, because it never creates that NIC. The fix is `-nic none`, **not**
+installing the ROM package: this boots a kernel and initramfs directly and
+touches no network, so the right move is to never create the device — rule 39's
+"prefer the input that cannot be absent". A gate needing no ROM cannot fail for a
+missing ROM. Two hardening changes came out of the same failure: QEMU refusing to
+start now reports itself **as an environment failure by name** rather than as
+eight missing-marker "kybernet regressions", and the initramfs build no longer
+discards `cpio`'s stderr or assumes `cpio` exists (a later CI step installs it),
+because an empty archive would boot a kernel with no `/init` and read exactly
+like a code defect. Both verified by injection.
+
 ⚠ **Scope, stated in the file rather than glossed:** it boots with **no
 services**. Most x86 fixtures exec busybox applets and an aarch64 busybox is a
 build-host capability rule 33 forbids assuming — so everything the x86 harness

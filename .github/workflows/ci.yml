@@ -229,8 +229,22 @@ jobs:
         # (standing rule 37). The kernel is a pinned, sha256-checked Alpine
         # netboot image — a declared dependency, because an amd64 runner has no
         # arm64 kernel package and rule 33 forbids assuming a host capability.
+        #
+        # ⚠ `--no-install-recommends` DROPS `ipxe-qemu`, and `-M virt` creates a
+        # default virtio NIC whose option ROM lives there — so QEMU 8.2 (Ubuntu)
+        # refused to start with `failed to find romfile "efi-virtio.rom"` while
+        # QEMU 11 (dev box) started fine, because it does not create that NIC.
+        # A dev-box-only green, standing rule 39.
+        #
+        # ⚠ The fix is `-nic none` in the gate, NOT installing ipxe-qemu here:
+        # this boots a kernel and initramfs directly and touches no network, so
+        # the right move is to never create the device rather than to ship a ROM
+        # for a NIC nothing uses. Rule 39's "prefer the input that cannot be
+        # absent" — a gate needing no ROM cannot fail for a missing ROM.
         run: |
-          sudo apt-get install -y --no-install-recommends qemu-system-arm
+          # cpio is installed by the x86 harness step, which runs LATER than
+          # this one — so name it here rather than inherit it by luck.
+          sudo apt-get install -y --no-install-recommends qemu-system-arm cpio
           bash qemu/boot-test-aarch64.sh
 
       - name: Test

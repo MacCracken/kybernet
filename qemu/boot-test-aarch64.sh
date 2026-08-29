@@ -145,15 +145,67 @@ cat > "$ROOT/etc/kybernet/config.json" << 'CFGEOF'
   "services": []
 }
 CFGEOF
-( cd "$ROOT" && find . -print0 | cpio --null -o -H newc 2> /dev/null | gzip -9 > "$CPIO" )
+# ⚠ DO NOT DISCARD cpio's STDERR, AND DO NOT ASSUME cpio EXISTS. The first
+# version was `cpio ... 2> /dev/null`, which turns a missing or failing archiver
+# into an empty initramfs — QEMU then boots a kernel with no `/init`, every
+# marker is absent, and the gate reports a wall of kybernet failures for a
+# missing package. Same shape as the romfile problem above: one environmental
+# cause wearing another subsystem's name. `cpio` is also installed by a LATER
+# CI step than this gate, so its presence here is not something to take on
+# faith (standing rule 39).
+if ! command -v cpio > /dev/null 2>&1; then
+    echo "ERROR: cpio is not installed, so the initramfs cannot be built."
+    echo "       This gate needs it BEFORE the x86 harness step that installs it."
+    exit 1
+fi
+if ! ( cd "$ROOT" && find . -print0 | cpio --null -o -H newc | gzip -9 > "$CPIO" ); then
+    echo "ERROR: building the aarch64 initramfs failed (cpio/gzip output above)."
+    exit 1
+fi
+# A valid image is ~500 KB (a statically linked PID 1). Anything tiny means the
+# archive was produced but is empty — the silent case the guard above exists for.
+CPIO_SZ="$(stat -c%s "$CPIO" 2> /dev/null || echo 0)"
+if [ "$CPIO_SZ" -lt 100000 ]; then
+    echo "ERROR: the aarch64 initramfs is only ${CPIO_SZ} bytes — it cannot contain"
+    echo "       a statically linked PID 1. Refusing to boot an empty image and"
+    echo "       report the result as kybernet's."
+    exit 1
+fi
 
+# ⚠ `-nic none` IS LOAD-BEARING, AND ITS ABSENCE WAS AN ENVIRONMENT-ONLY
+# FAILURE. `-M virt` instantiates a DEFAULT virtio NIC, whose option ROM
+# (`efi-virtio.rom`) ships in Ubuntu's `ipxe-qemu` — a package apt lists as
+# *Recommended*, which `--no-install-recommends` drops. QEMU then refuses to
+# start at all: `failed to find romfile "efi-virtio.rom"`.
+#
+# Standing rule 39: prefer the input that CANNOT be absent. This gate boots a
+# kernel and an initramfs directly and touches no network, so the correct fix is
+# to never create the device rather than to install a ROM package for a NIC
+# nothing uses. That also makes the gate independent of which QEMU the host
+# has — 8.2 adds the default NIC, 11.1 does not, which is precisely why this
+# passed on the dev box and failed on CI.
 _boot() {
     # $1 = harness mode, $2 = output file
     timeout "$TIMEOUT_S" qemu-system-aarch64 \
         -M virt -cpu cortex-a57 -m 512M -smp 1 \
+        -nic none \
         -kernel "$KERNEL" -initrd "$CPIO" \
         -append "console=ttyAMA0 kybernet.harness=$1 panic=1" \
         -nographic -no-reboot -serial mon:stdio > "$2" 2>&1 || true
+
+    # ⚠ NAME AN ENVIRONMENT FAILURE AS ONE. When QEMU cannot start, every
+    # marker is absent and the gate reports a wall of missing-marker failures
+    # that read like kybernet regressions — one environmental cause presented
+    # as eight code defects. That happened, and it is standing rule 38's
+    # principle: a gate must not report one subsystem's cause under another's
+    # name.
+    if grep -aq 'failed to find romfile' "$2"; then
+        echo "  FAIL: QEMU could not start — a missing option ROM, not a kybernet defect."
+        grep -a 'failed to find romfile' "$2" | head -2 || true
+        echo "        This gate passes -nic none precisely so no ROM is needed;"
+        echo "        seeing this means a device is being created that should not be."
+        fail=1
+    fi
 }
 
 _has() { grep -aqF "$1" "$2"; }
