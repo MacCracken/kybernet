@@ -50,6 +50,39 @@ pair each iteration and copies it into the carried one. Written the obvious way
 tag. The comment above that function, which warned about `err_code` vs `err_code_of`
 and described a "tagged Result box", was rewritten: it no longer describes the runtime.
 
+### Fixed — the bench gate reported 7 regressions in code the release never touched
+
+On a CI runner (~1.5x slower than the box that recorded every row in
+`benches/history.csv`) the gate flagged **7 regressions at +17% to +38%**, all of them in the
+syscall-bound set — `getuid`, `is_root`, `drop_caps`, `secure_pre_exec`, `epoll_wait`,
+`klog_sim`, `klog2_sim` — none of which this release modified. Three real defects, each fixed:
+
+1. ⛔ **The syscall scale could fall BELOW the ALU scale.** Measured: `SYS_PPK`=1128 against
+   `SCALE_PPK`=1414. A syscall costs everything the ALU loop costs *plus* kernel entry/exit and
+   mitigation overhead, so on a box that has slowed down it degrades **at least** as much as pure
+   register arithmetic — never less. A syscall scale under the ALU scale is not a measurement, it
+   is a bad sample, and believing it holds every syscall benchmark to a target the box cannot hit.
+   Now clamped, in the same one-way idiom the ALU scale already used.
+
+2. ⛔ **The syscall reference was one benchmark's best-of-N, sampled independently of what it
+   normalises.** `BEST` is a per-benchmark minimum collapsed across runs (`!seen[$2]++`), so
+   `getpid` returned **325** while the same invocation printed **443** and `getuid`'s own best was
+   **449** — two interchangeable register-return syscalls **38% apart**. "Contention only ever adds
+   time" holds *within* a run; it does not hold *across* runs on a box whose floor drifts
+   (frequency scaling, steal time), so different benchmarks reach their minimum in different runs
+   and the reference stops describing the sample it normalises. The reference is now the **median
+   of `getpid` / `getuid` / `is_root`** — three probes that track within ~3% of each other across
+   all 12 recorded runs — so one lucky sample can no longer skew the whole set.
+
+3. `klog_sim(3 writes)` / `klog2_sim(4 writes)` do **write syscalls** but were classified
+   ALU-bound, so they were normalised against the wrong reference. Added to `_is_syscall_bound`.
+
+With the corrected reference all seven land between **-3% and +6%** — flat, which is what
+unmodified code should look like. ⭐ **Verified non-vacuous by injection**, the same way the gate
+was originally validated: a planted regression on the ALU path (`hashmap` +98%) and on the clamped
+syscall path (`getuid` +88%) both still turn it RED. A gate change that can only go green is worse
+than the bug it fixes.
+
 ### Performance — one regression, accepted as growth tax
 
 `scripts/bench-history.sh`: **56 benchmarks, 1 regression ≥15%, 5 improvements.**

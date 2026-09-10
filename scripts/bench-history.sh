@@ -115,7 +115,8 @@ _is_syscall_bound() {
     case "$1" in
         "getpid"|"getuid"|"is_root"|"drop_caps(non-root err)"|\
         "secure_pre_exec(non-root)"|"set_no_new_privs"|\
-        "epoll(new+add+close)"|"epoll_wait(timeout=0)"|"timer_new+close") return 0 ;;
+        "epoll(new+add+close)"|"epoll_wait(timeout=0)"|"timer_new+close"|\
+        "klog_sim(3 writes)"|"klog2_sim(4 writes)") return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -248,10 +249,39 @@ else
     echo "calibration: no prior reference in history — comparing raw ns/op this run only"
 fi
 
-# The syscall-side scale, derived the same way from `getpid`.
+# The syscall-side scale.
+#
+# ⚠ IT IS THE MEDIAN OF THREE EQUIVALENT PROBES, NOT `getpid` ALONE. `getpid`,
+# `getuid` and `is_root` are all a bare register-return syscall and track within
+# ~3% of each other across every row in history.csv. Using one of them as the
+# reference makes the whole syscall-bound set hostage to that one benchmark's
+# luckiest sample.
+#
+# That is not theoretical. On a CI runner at 1.6.20 the best-of-5 came back
+# `getpid`=325 while the very same run printed 443 and `getuid`'s own best was
+# 449 — two interchangeable syscalls 38% apart, because BEST is a per-benchmark
+# minimum taken independently across runs (see the `!seen[$2]++` collapse
+# above). "Contention only ever adds time" holds within a run; it does NOT hold
+# across runs on a box whose floor drifts (frequency scaling, steal time), so
+# different benchmarks reach their minimum in different runs and the reference
+# stops describing the sample it is normalising. The scale collapsed to 1128
+# against an ALU scale of 1414 and reported FIVE untouched syscall benchmarks
+# as +35% regressions. Taking the median of the three survives one bad sample.
+_median3() {
+    printf '%s\n%s\n%s\n' "$1" "$2" "$3" | sort -n | sed -n '2p'
+}
+_best_of() { printf '%s\n' "$BEST" | awk -F"\t" -v n="$1" '$2==n {print $1}'; }
 SYS_PPK="$SCALE_PPK"
-SYS_NOW=$(printf '%s\n' "$BEST" | awk -F"\t" -v n="$CALIB_SYS_NAME" '$2==n {print $1}')
-SYS_PREV=$(_prev_for "$CALIB_SYS_NAME")
+_sn1=$(_best_of "getpid"); _sn2=$(_best_of "getuid"); _sn3=$(_best_of "is_root")
+_sp1=$(_prev_for "getpid"); _sp2=$(_prev_for "getuid"); _sp3=$(_prev_for "is_root")
+if [ -n "$_sn1" ] && [ -n "$_sn2" ] && [ -n "$_sn3" ] && [ -n "$_sp1" ] && [ -n "$_sp2" ] && [ -n "$_sp3" ]; then
+    SYS_NOW=$(_median3 "$_sn1" "$_sn2" "$_sn3")
+    SYS_PREV=$(_median3 "$_sp1" "$_sp2" "$_sp3")
+else
+    # Fall back to the historical single-probe behaviour if any row is absent.
+    SYS_NOW="$_sn1"
+    SYS_PREV="$_sp1"
+fi
 if [ -n "${NO_NORMALISE:-}" ]; then
     SYS_PPK=1000
 elif [ -n "$SYS_NOW" ] && [ -n "$SYS_PREV" ] && [ "$SYS_PREV" -gt 0 ] 2>/dev/null; then
@@ -259,7 +289,16 @@ elif [ -n "$SYS_NOW" ] && [ -n "$SYS_PREV" ] && [ "$SYS_PREV" -gt 0 ] 2>/dev/nul
     [ "$SYS_PPK" -lt 1 ] && SYS_PPK=1
     # Same one-way clamp as the ALU scale above, for the same reason.
     [ "$SYS_PPK" -lt 1000 ] && SYS_PPK=1000
-    echo "syscall scale: ${SYS_PREV} -> ${SYS_NOW} ns/op (getpid) — ${SYS_PPK}/1000"
+    # ⚠ AND NEVER BELOW THE ALU SCALE. A syscall costs everything the ALU loop
+    # costs plus kernel entry/exit, KPTI and mitigation overhead, so on a box
+    # that has slowed down the syscall set degrades AT LEAST as much as pure
+    # register arithmetic — never less. A syscall scale under the ALU scale is
+    # therefore not a measurement, it is a bad sample, and believing it holds
+    # every syscall benchmark to a target the box cannot hit. Measured at
+    # 1.6.20: SYS=1128 against ALU=1414 turned five untouched benchmarks into
+    # +35% regressions.
+    [ "$SYS_PPK" -lt "$SCALE_PPK" ] && SYS_PPK="$SCALE_PPK"
+    echo "syscall scale: ${SYS_PREV} -> ${SYS_NOW} ns/op (median of getpid/getuid/is_root) — ${SYS_PPK}/1000"
 fi
 
 while IFS="$(printf '\t')" read -r NS NAME; do
