@@ -400,7 +400,7 @@ fn bench_seccomp_build_basic() {
     var k = 0;
     while (k < iters) {
         var b = seccomp_basic_service();
-        var r = seccomp_build(b);
+        var r_t, r_v = seccomp_build(b);
         k = k + 1;
     }
     report("seccomp_basic_service+build", now_ns() - start, iters);
@@ -418,7 +418,7 @@ fn bench_seccomp_build_small() {
         seccomp_allow(b, 3);
         seccomp_allow(b, 60);
         seccomp_allow(b, 231);
-        var r = seccomp_build(b);
+        var r_t, r_v = seccomp_build(b);
         k = k + 1;
     }
     report("seccomp_build(5 syscalls)", now_ns() - start, iters);
@@ -503,8 +503,8 @@ fn bench_result_ok() {
     var start = now_ns();
     var k = 0;
     while (k < iters) {
-        var r = Ok(42);
-        is_ok(r);
+        var r_t, r_v = Ok(42);
+        is_ok(r_t);
         k = k + 1;
     }
     report("Ok+is_ok", now_ns() - start, iters);
@@ -516,8 +516,8 @@ fn bench_result_err() {
     var start = now_ns();
     var k = 0;
     while (k < iters) {
-        var r = Err(22);
-        is_err_result(r);
+        var r_t, r_v = Err(22);
+        is_err_result(r_t);
         k = k + 1;
     }
     report("Err+is_err_result", now_ns() - start, iters);
@@ -529,9 +529,9 @@ fn bench_option() {
     var start = now_ns();
     var k = 0;
     while (k < iters) {
-        var o = Some(99);
-        is_some(o);
-        unwrap(o);
+        var o_t, o_v = Some(99);
+        is_some(o_t);
+        unwrap(o_t, o_v);
         k = k + 1;
     }
     report("Some+is_some+unwrap", now_ns() - start, iters);
@@ -652,13 +652,13 @@ fn bench_epoll_lifecycle() {
     var start = now_ns();
     var k = 0;
     while (k < iters) {
-        var epfd_r = epoll_new();
-        if (is_ok(epfd_r) == 1) {
-            var epfd = result_unwrap(epfd_r);
-            var tfd_r = timer_new(1);
-            if (is_ok(tfd_r) == 1) {
-                epoll_add_read(epfd, result_unwrap(tfd_r), TOKEN_HEALTH);
-                sys_close(result_unwrap(tfd_r));
+        var epfd_r_t, epfd_r_v = epoll_new();
+        if (is_ok(epfd_r_t) == 1) {
+            var epfd = result_unwrap(epfd_r_t, epfd_r_v);
+            var tfd_r_t, tfd_r_v = timer_new(1);
+            if (is_ok(tfd_r_t) == 1) {
+                epoll_add_read(epfd, result_unwrap(tfd_r_t, tfd_r_v), TOKEN_HEALTH);
+                sys_close(result_unwrap(tfd_r_t, tfd_r_v));
             }
             owned_fd_close(epfd);
         }
@@ -697,10 +697,10 @@ fn bench_hashmap() {
 
 fn bench_epoll_wait_immediate() {
     # Create epoll with a timer, then wait with timeout=0 (immediate return)
-    var epfd_r = epoll_new();
-    var epfd = result_unwrap(epfd_r);
-    var tfd_r = timer_new(999);
-    var tfd = result_unwrap(tfd_r);
+    var epfd_r_t, epfd_r_v = epoll_new();
+    var epfd = result_unwrap(epfd_r_t, epfd_r_v);
+    var tfd_r_t, tfd_r_v = timer_new(999);
+    var tfd = result_unwrap(tfd_r_t, tfd_r_v);
     epoll_add_read(epfd, tfd, TOKEN_HEALTH);
 
     var iters = 100000;
@@ -782,8 +782,8 @@ fn bench_timer_new() {
     var start = now_ns();
     var k = 0;
     while (k < iters) {
-        var r = timer_new(30);
-        if (is_ok(r) == 1) { sys_close(result_unwrap(r)); }
+        var r_t, r_v = timer_new(30);
+        if (is_ok(r_t) == 1) { sys_close(result_unwrap(r_t, r_v)); }
         k = k + 1;
     }
     report("timer_new+close", now_ns() - start, iters);

@@ -50,6 +50,49 @@ pair each iteration and copies it into the carried one. Written the obvious way
 tag. The comment above that function, which warned about `err_code` vs `err_code_of`
 and described a "tagged Result box", was rewritten: it no longer describes the runtime.
 
+### Performance — one regression, accepted as growth tax
+
+`scripts/bench-history.sh`: **56 benchmarks, 1 regression ≥15%, 5 improvements.**
+
+| benchmark | before | after | delta |
+|---|---|---|---|
+| `agent_config(new+get+set)` | 101 | **127** ns/op | **+19%** (vs box-calibrated ~106) |
+| `Some+is_some+unwrap` | 24 | **12** ns/op | −52% |
+| `knotify_classify(READY)` | 75 | **68** ns/op | −13% |
+| `notify_status_value(2)` | 160 | **152** ns/op | −10% |
+| `knotify_classify+value` | 195 | **188** ns/op | −8% |
+| `seccomp_build(5 syscalls)` | 363 | **356** ns/op | −7% |
+
+⭐ `Some+is_some+unwrap` **halving** is the value form doing exactly what it was built for:
+construction now allocates zero bytes.
+
+⚠ **The regression is not from this release.** Bisected against the three installed 6.6.x
+toolchains, holding the source constant:
+
+| toolchain | `agent_config` |
+|---|---|
+| 6.5.36 (old pin, recorded baseline) | 101 |
+| 6.6.0 | 131 |
+| 6.6.1 | 127 |
+| 6.6.2 | 130 |
+
+Flat across all of 6.6.x, so it landed **at or before 6.6.0** — the value-form flip — and neither
+6.6.1, 6.6.2, nor kybernet's migration caused or worsened it. Two further checks ruled out the
+obvious suspects: all eight agnostik functions the benchmark calls are **byte-identical** between
+1.5.1 and 1.6.1, and `lib/alloc.cyr` / `lib/str.cyr` / `lib/string.cyr` have **zero** commits
+between 6.5.36 and 6.6.2. The benchmark itself is unchanged.
+
+Triaged per the ecosystem rule — growth tax by default, bisect only if a single patch dominates.
+None does. Accepted and recorded; `benches/history.csv` carries 127 as the new reference.
+
+### Fixed — `src/bench.cyr` was left out of the value-form migration
+
+The bench entry is a separate compilation unit from `src/main.cyr` and `src/test.cyr`, and it did
+not compile: 17 errors across 10 sites (`Ok`/`Err`/`Some` single-variable binds, 1-argument
+`result_unwrap` / `unwrap`). The bench gate's first failure was therefore **not** a perf
+regression at all — the benchmark did not build. Migrated; it is now in the release checklist
+alongside build and test.
+
 ### Fixed — `health_check_new` mis-bound between agnostik and argonaut
 
 kybernet vendors **both** agnostik and argonaut, and both exported `health_check_new`
