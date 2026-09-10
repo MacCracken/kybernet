@@ -1,4 +1,5 @@
 commit	385d0ad44da179344c817bb4bf58b419717f059b	sigil	https://github.com/MacCracken/sigil.git	3.12.16
+commit	5e1b9ed112888b9073252a267d4bf3ba6a1d9877	agnostik	https://github.com/MacCracken/agnostik.git	1.6.1
 commit	fb1992d76668b4a6b0e59b02b695ab9b5dd6ae36	libro	https://github.com/MacCracken/libro.git	2.10.0
 commit	ecc1010a60558c8eae5f6a888b16a7a1be7132e4	argonaut	https://github.com/MacCracken/argonaut.git	1.15.0
 commit	490f8ff5e2914ca6366db5e7a444662e07b9c438	patra	https://github.com/MacCracken/patra.git	1.13.10
