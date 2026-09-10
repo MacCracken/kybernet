@@ -90,8 +90,8 @@ fn _cfg_health_check(svc_obj) {
 
     var type_s = _cfg_str(hc, "type", 0);
     if (type_s == 0) { return 0 - 1; }
-    var tr = health_check_type_parse(type_s);
-    if (is_err_result(tr) == 1) { return 0 - 1; }
+    var trt, trv = health_check_type_parse(type_s);
+    if (is_err_result(trt) == 1) { return 0 - 1; }
 
     var target = _cfg_str(hc, "target", str_from(""));
 
@@ -153,7 +153,7 @@ fn _cfg_health_check(svc_obj) {
         return 0 - 1;
     }
 
-    return health_check_new(result_unwrap(tr), target, port, iv, tmo, rty);
+    return health_check_new(result_unwrap(trt, trv), target, port, iv, tmo, rty);
 }
 
 # Parse `"restart_config": {"max_restarts": N, "base_delay_ms": N,
@@ -273,9 +273,9 @@ fn svc_def_from_json(obj) {
     # Enum fields: reject an unrecognised value rather than defaulting.
     var type_s = _cfg_str(obj, "type", 0);
     if (type_s != 0) {
-        var tr = service_type_parse(type_s);
-        if (is_err_result(tr) == 1) { return 0; }
-        svc_def_set_service_type(sd, result_unwrap(tr));
+        var stt, stv = service_type_parse(type_s);
+        if (is_err_result(stt) == 1) { return 0; }
+        svc_def_set_service_type(sd, result_unwrap(stt, stv));
     }
 
     # sd_notify watchdog interval — a deadline INDEPENDENT of health_check
@@ -302,9 +302,9 @@ fn svc_def_from_json(obj) {
 
     var restart_s = _cfg_str(obj, "restart", 0);
     if (restart_s != 0) {
-        var rr = restart_policy_parse(restart_s);
-        if (is_err_result(rr) == 1) { return 0; }
-        svc_def_set_restart_policy(sd, result_unwrap(rr));
+        var rrt, rrv = restart_policy_parse(restart_s);
+        if (is_err_result(rrt) == 1) { return 0; }
+        svc_def_set_restart_policy(sd, result_unwrap(rrt, rrv));
     }
 
     svc_def_set_enabled(sd, _cfg_bool(obj, "enabled", 1));
@@ -785,9 +785,9 @@ fn svc_apply_security_json(sd, obj) {
             var e = json_v_arr_get(capv, ci);
             if (e == 0) { return 0; }
             if (json_v_is_str(e) == 0) { return 0; }
-            var cr = capability_parse(json_v_str(e));
-            if (is_err_result(cr) == 1) { return 0; }
-            vec_push(keep, result_unwrap(cr));
+            var crt, crv = capability_parse(json_v_str(e));
+            if (is_err_result(crt) == 1) { return 0; }
+            vec_push(keep, result_unwrap(crt, crv));
         }
         svc_def_set_capabilities(sd, caps);
     }

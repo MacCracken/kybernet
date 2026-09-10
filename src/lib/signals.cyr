@@ -39,8 +39,8 @@ fn setup_signals() {
 }
 
 # Get raw fd from signalfd Result
-fn signalfd_raw(sfd_result) {
-    return result_unwrap(sfd_result);
+fn signalfd_raw(sfd_tag, sfd_val) {
+    return result_unwrap(sfd_tag, sfd_val);
 }
 
 # Read signal info from signalfd

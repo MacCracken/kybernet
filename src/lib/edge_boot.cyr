@@ -624,8 +624,8 @@ fn edge_boot_run(config) {
                 if (premain < 500) { premain = 500; }
                 if (premain < pbudget) { pbudget = premain; }
             }
-            var pcr_res = tpm_read_pcr_timeout(TPM_SHA256, indices, pbudget);
-            if (is_err_result(pcr_res) == 1) {
+            var pcr_rest, pcr_resv = tpm_read_pcr_timeout(TPM_SHA256, indices, pbudget);
+            if (is_err_result(pcr_rest) == 1) {
                 # Now covers a TIMEOUT and a non-zero exit as well as a parse
                 # failure — sigil no longer reports a tool that never ran, or one
                 # that was killed at its deadline, as a successful capture.
@@ -649,7 +649,7 @@ fn edge_boot_run(config) {
             # fleet-wide refusal to boot. The structural half of this finding is
             # sigil 3.12.11's status check, which stops a tool that never ran or
             # exited non-zero from reaching here as a successful capture at all.
-            var pcr_vals = result_unwrap(pcr_res);
+            var pcr_vals = result_unwrap(pcr_rest, pcr_resv);
             var unread = 0;
             for (var pv = 0; pv < vec_len(pcr_vals); pv = pv + 1) {
                 if (edge_is_all_zero_hex(str_from(tpm_pcr_value_value(vec_get(pcr_vals, pv)))) == 1) {

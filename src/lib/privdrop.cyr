@@ -232,14 +232,14 @@ fn drop_caps_and_privileges(keep_mask, uid, gid) {
     # 2. Raise INHERITABLE to the keep-list while CAP_SETPCAP is still held.
     var perm = capget_permitted();
     if (perm < 0) { return Err(0 - perm); }
-    var ir = _capset3(perm, perm, keep_mask & perm);
-    if (is_err_result(ir) == 1) { return ir; }
+    var irt, irv = _capset3(perm, perm, keep_mask & perm);
+    if (is_err_result(irt) == 1) { return Err(irv); }
 
     # 3. Bounding set: everything outside the keep-list, gone for good.
     for (var cap = 0; cap <= CAP_LAST_CAP; cap = cap + 1) {
         if ((keep_mask & (1 << cap)) == 0) {
-            var dr = drop_cap(cap);
-            if (is_err_result(dr) == 1 && err_code_of(dr) != EINVAL) { return dr; }
+            var drt, drv = drop_cap(cap);
+            if (is_err_result(drt) == 1 && err_code_of(drt, drv) != EINVAL) { return Err(drv); }
         }
     }
 
@@ -260,8 +260,8 @@ fn drop_caps_and_privileges(keep_mask, uid, gid) {
 
     # 5. Re-raise effective from the permitted KEEPCAPS preserved.
     var keep = keep_mask & perm;
-    var cr = _capset3(keep, keep, keep);
-    if (is_err_result(cr) == 1) { return cr; }
+    var crt, crv = _capset3(keep, keep, keep);
+    if (is_err_result(crt) == 1) { return Err(crv); }
 
     # 6. Ambient — the only set that survives execve of a plain binary.
     for (var c2 = 0; c2 <= CAP_LAST_CAP; c2 = c2 + 1) {
@@ -301,8 +301,8 @@ fn drop_capabilities(keep_set) {
     var dropped = 0;
     for (var cap = 0; cap <= CAP_LAST_CAP; cap = cap + 1) {
         if ((keep_set & (1 << cap)) == 0) {
-            var r = drop_cap(cap);
-            if (is_ok(r) == 1) {
+            var rt, rv = drop_cap(cap);
+            if (is_ok(rt) == 1) {
                 dropped = dropped + 1;
             } else {
                 # Do NOT swallow this. Pre-1.4.2 a failing PR_CAPBSET_DROP
@@ -312,14 +312,14 @@ fn drop_capabilities(keep_set) {
                 # did not achieve. EINVAL means the cap does not exist on
                 # this kernel (we walk a fixed 0..CAP_LAST_CAP range), which
                 # is benign; anything else is a real failure.
-                if (err_code_of(r) != EINVAL) { return r; }
+                if (err_code_of(rt, rv) != EINVAL) { return Err(rv); }
             }
         }
     }
 
     # Bounding set is done; now actually surrender the live sets.
-    var cr = drop_cap_sets(keep_set);
-    if (is_err_result(cr) == 1) { return cr; }
+    var crt, crv = drop_cap_sets(keep_set);
+    if (is_err_result(crt) == 1) { return Err(crv); }
 
     return Ok(dropped);
 }
@@ -338,12 +338,12 @@ fn set_no_new_privs() {
 # Returns: Result
 fn secure_pre_exec(uid, gid, keep_caps) {
     # Drop capabilities first (while still root)
-    var cr = drop_capabilities(keep_caps);
-    if (is_err_result(cr) == 1) { return cr; }
+    var crt, crv = drop_capabilities(keep_caps);
+    if (is_err_result(crt) == 1) { return Err(crv); }
 
     # Set no_new_privs
-    var nr = set_no_new_privs();
-    if (is_err_result(nr) == 1) { return nr; }
+    var nrt, nrv = set_no_new_privs();
+    if (is_err_result(nrt) == 1) { return Err(nrv); }
 
     # Drop privileges last (irreversible)
     return drop_privileges(uid, gid);
@@ -362,8 +362,8 @@ fn privdrop_from_context(ctx) {
 
     # Set no_new_privs if requested (required before seccomp/landlock)
     if (secctx_no_new_privs(ctx) == 1) {
-        var nr = set_no_new_privs();
-        if (is_err_result(nr) == 1) { return nr; }
+        var nrt, nrv = set_no_new_privs();
+        if (is_err_result(nrt) == 1) { return Err(nrv); }
     }
 
     return drop_privileges(uid, gid);
@@ -401,8 +401,8 @@ fn drop_caps_from_set(caps) {
 fn secure_from_context(ctx, caps) {
     # Drop capabilities first (while still root)
     if (caps != 0) {
-        var cr = drop_caps_from_set(caps);
-        if (is_err_result(cr) == 1) { return cr; }
+        var crt, crv = drop_caps_from_set(caps);
+        if (is_err_result(crt) == 1) { return Err(crv); }
     }
 
     return privdrop_from_context(ctx);

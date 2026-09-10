@@ -149,8 +149,8 @@ fn kyb_pre_exec(svc_def) {
     # than one that quietly lost its policy. `"landlock_optional": true` is
     # the deliberate opt-out for a board on a pre-5.13 kernel.
     if (ll != 0) {
-        var lr = sandbox_from_config(ll);
-        if (is_err_result(lr) == 1) {
+        var lrt, lrv = sandbox_from_config(ll);
+        if (is_err_result(lrt) == 1) {
             # ⚠ SAY WHY. Until 1.6.6 this returned 1 silently, so the operator
             # saw only "FAILED to start: <service>" with nothing naming the
             # cause. The overwhelmingly common cause is a rule naming a path
@@ -165,7 +165,7 @@ fn kyb_pre_exec(svc_def) {
             kmsg("kybernet: pre-exec: LANDLOCK FAILED - a rule path is unopenable (does every path exist?)");
             return 1;
         }
-        if (result_unwrap(lr) == 1) {
+        if (result_unwrap(lrt, lrv) == 1) {
             var ll_opt = 0;
             if (sc != 0) { ll_opt = kyb_policy_landlock_optional(sc); }
             if (ll_opt == 0) {
@@ -208,14 +208,14 @@ fn kyb_pre_exec(svc_def) {
             # under PR_SET_KEEPCAPS, then raises AMBIENT — which is the only
             # set that survives execve of an unprivileged binary, and therefore
             # the only way a non-root service actually receives a capability.
-            var cpr = drop_caps_and_privileges(capset_keep_mask(caps), du, dg);
-            if (is_err_result(cpr) == 1) {
+            var cprt, cprv = drop_caps_and_privileges(capset_keep_mask(caps), du, dg);
+            if (is_err_result(cprt) == 1) {
                 kmsg("kybernet: pre-exec: CAPABILITY+PRIVILEGE DROP FAILED - refusing to exec");
                 return 1;
             }
         } else {
-            var pr = drop_privileges(du, dg);
-            if (is_err_result(pr) == 1) {
+            var prt, prv = drop_privileges(du, dg);
+            if (is_err_result(prt) == 1) {
                 kmsg("kybernet: pre-exec: PRIVILEGE DROP FAILED - refusing to exec as root");
                 return 1;
             }

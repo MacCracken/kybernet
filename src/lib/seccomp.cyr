@@ -186,9 +186,9 @@ fn seccomp_load(filter_ptr, filter_len) {
 # diagnostic, in a supervisor that will then restart it into the same wall.
 # systemd's SystemCallFilter defaults to EPERM for the same reason.
 fn seccomp_apply(builder) {
-    var info_r = seccomp_build_action(builder, SECCOMP_RET_ERRNO_EPERM);
-    if (is_err_result(info_r) == 1) { return info_r; }
-    var info = result_unwrap(info_r);
+    var info_rt, info_rv = seccomp_build_action(builder, SECCOMP_RET_ERRNO_EPERM);
+    if (is_err_result(info_rt) == 1) { return Err(info_rv); }
+    var info = result_unwrap(info_rt, info_rv);
     return seccomp_load(seccomp_filter_ptr(info), seccomp_filter_len(info));
 }
 

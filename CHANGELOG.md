@@ -7,6 +7,85 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.6.20] — 2026-09-10
+
+**Ecosystem migration onto cyrius 6.6.2, plus a name collision that had been
+mis-binding silently since agnostik 1.3.5.** Suite unchanged at **747 assertions,
+0 failures**.
+
+### Changed — toolchain pin 6.5.36 → **6.6.2**
+
+cyrius 6.6.0 flipped `Result` / `Option` / `Either` declared `: stack` to a **value
+form**: a payload variant now returns a `(tag, payload)` REGISTER PAIR and allocates
+nothing. 6.6.2 is the repair release — 6.6.0 had also deleted `tagged_new()` on a
+survey scoped to twelve stdlibs but written up as "the ecosystem", and deleted
+`payload()` outright.
+
+**65 first-party call sites migrated** across `src/main.cyr`, `src/test.cyr` and nine
+`src/lib/` modules. The compiler enumerated every one of them — a single-variable bind
+of a pair and a 1-argument `result_unwrap` are both hard errors now, so the migration
+surface was measured, not estimated.
+
+⚠ **The dangerous half is `return r`, not the accessors.** The naive migration of
+
+```
+var r = f();
+if (is_err_result(r) == 1) { return r; }
+```
+
+returns the **payload alone**, so `Err(77)` reaches the caller as `tag=77`,
+`is_err_result == 0` — an error that reads as SUCCESS. The same shape cost yukti 19
+silent defects. Every propagation site here re-wraps: `return Err(rv);`. Sites fixed
+that way: `_capset3` (×2), `drop_cap`, `drop_cap_sets`, `drop_capabilities`,
+`set_no_new_privs` (×2), `drop_caps_from_set`, `epoll_new`, `epoll_add_read`,
+`seccomp_build_action`, and the **required-mount** path in `mount_all` — where
+returning a bare payload would have let a failed required mount read as a successful
+one and the boot continue.
+
+⚠ **`_remove_cgroup_settled` needed restructuring, not renaming.** Its retry loop
+re-polled `r = remove_service_cgroup(nm)` inside a `while`. There is no `t, v = f();`
+reassignment form — only `var t, v = f();` binds a pair — so the loop now binds a fresh
+pair each iteration and copies it into the carried one. Written the obvious way
+(`rt = remove_service_cgroup(nm)`) it would have compiled and silently kept only the
+tag. The comment above that function, which warned about `err_code` vs `err_code_of`
+and described a "tagged Result box", was rewritten: it no longer describes the runtime.
+
+### Fixed — `health_check_new` mis-bound between agnostik and argonaut
+
+kybernet vendors **both** agnostik and argonaut, and both exported `health_check_new`
+at different arities for different types — agnostik's a zero-argument default probe
+descriptor, argonaut's `health_check_new(check_type, target, port, interval_ms,
+timeout_ms, retries)`. "Last definition wins": argonaut's loaded second and took the
+name, so agnostik's own zero-argument call read six garbage registers and stored them
+as a probe descriptor.
+
+Live and undiagnosed since agnostik 1.3.5 (2026-08-24), through every kybernet release
+since. Nothing reported it — cyrius before 6.6.2 treated a same-name different-arity
+duplicate as a `last definition wins` **warning**. 6.6.2 makes it a hard error, which
+is the only reason it surfaced.
+
+Fixed upstream in **agnostik 1.6.1**, which renames its side to
+`agnostik_health_check_new` (one caller, no external consumers). kybernet's own seven
+call sites use argonaut's six-argument form and are unchanged.
+
+### Changed — dependency pins
+
+| dep | from | to |
+|---|---|---|
+| `sigil` | 3.12.13 | **3.12.16** |
+| `agnostik` | 1.5.1 | **1.6.1** |
+| `libro` | 2.9.0 | **2.10.0** |
+| `argonaut` | 1.14.0 | **1.15.0** |
+
+### Known — libro pins a stale patra
+
+`cyrius build` reports `refusing to overwrite stdlib leaf 'patra'`: libro 2.10.0 pins
+`patra` **1.13.10** while the current release is **1.14.1**. This is benign here — cyrius
+keeps the newer stdlib snapshot and skips the dep artifact — and the resolution is
+correct, but the pin is stale on libro's side and is not kybernet's to bump.
+
+---
+
 ## [1.6.19] — 2026-08-28
 
 **`seccomp: basic` could not open a file on x86_64, and had not been able to

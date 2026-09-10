@@ -475,34 +475,34 @@ fn cgroup_apply_limits(service, limits) {
 
     var mem_max = cglim_memory_max(limits);
     if (mem_max > 0) {
-        var r1 = _cgroup_write_u64(service, "memory.max", mem_max);
-        if (is_err_result(r1) == 1) { failed = err_code_of(r1); }
+        var r1t, r1v = _cgroup_write_u64(service, "memory.max", mem_max);
+        if (is_err_result(r1t) == 1) { failed = err_code_of(r1t, r1v); }
     }
 
     var mem_high = cglim_memory_high(limits);
     if (mem_high > 0) {
-        var r2 = _cgroup_write_u64(service, "memory.high", mem_high);
-        if (is_err_result(r2) == 1) { failed = err_code_of(r2); }
+        var r2t, r2v = _cgroup_write_u64(service, "memory.high", mem_high);
+        if (is_err_result(r2t) == 1) { failed = err_code_of(r2t, r2v); }
     }
 
     var cpu_weight = cglim_cpu_weight(limits);
     if (cpu_weight > 0) {
-        var r3 = _cgroup_write_u64(service, "cpu.weight", cpu_weight);
-        if (is_err_result(r3) == 1) { failed = err_code_of(r3); }
+        var r3t, r3v = _cgroup_write_u64(service, "cpu.weight", cpu_weight);
+        if (is_err_result(r3t) == 1) { failed = err_code_of(r3t, r3v); }
     }
 
     var pids_max = cglim_pids_max(limits);
     if (pids_max > 0) {
-        var r4 = _cgroup_write_u64(service, "pids.max", pids_max);
-        if (is_err_result(r4) == 1) { failed = err_code_of(r4); }
+        var r4t, r4v = _cgroup_write_u64(service, "pids.max", pids_max);
+        if (is_err_result(r4t) == 1) { failed = err_code_of(r4t, r4v); }
     }
 
     # The hard CPU cap. 1.6.17 — see _cgroup_write_cpu_max for why this one
     # needed its own writer.
     var cpu_max = cglim_cpu_max(limits);
     if (cpu_max > 0) {
-        var r5 = _cgroup_write_cpu_max(service, cpu_max);
-        if (is_err_result(r5) == 1) { failed = err_code_of(r5); }
+        var r5t, r5v = _cgroup_write_cpu_max(service, cpu_max);
+        if (is_err_result(r5t) == 1) { failed = err_code_of(r5t, r5v); }
     }
 
     if (failed != 0) { return Err(failed); }

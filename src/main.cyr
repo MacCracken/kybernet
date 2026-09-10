@@ -241,9 +241,9 @@ fn _load_config_inner(want_services) {
     # landing on whichever branch happens to fall through.
     var mode_str = _cfg_str(root, "boot_mode", 0);
     if (mode_str != 0) {
-        var mr = boot_mode_parse(mode_str);
-        if (is_ok(mr) == 1) {
-            store64(cfg, result_unwrap(mr));
+        var mrt, mrv = boot_mode_parse(mode_str);
+        if (is_ok(mrt) == 1) {
+            store64(cfg, result_unwrap(mrt, mrv));
         } else {
             klog("config: unrecognised boot_mode - keeping default");
         }
@@ -1165,19 +1165,27 @@ enum CgroupSettle {
 #
 # ⚠ `err_code_of`, NOT `err_code`. They are not variants of each other:
 # err_code(ret) is `0 - ret` and takes a RAW negative syscall return, while
-# err_code_of(res) reads the payload out of a tagged Result box. remove_service_cgroup
-# returns a box, so err_code() on it negates the POINTER — a large negative
-# number that never equals EBUSY, so the retry loop silently never ran and the
-# teardown behaved exactly as it had before the fix. Both names are in scope
-# here (syscalls + result), neither is a compile error at the call site, and
-# the only symptom is the bug you were trying to fix appearing to persist.
+# err_code_of(tag, val) reads the error payload out of a Result. remove_service_cgroup
+# returns a Result, so err_code() on it negates the TAG — a small number that never
+# equals EBUSY, so the retry loop silently never ran and the teardown behaved exactly
+# as it had before the fix. Both names are in scope here (syscalls + result), neither
+# is a compile error at the call site, and the only symptom is the bug you were trying
+# to fix appearing to persist.
+#
+# ⚠ THE RETRY USES A TEMP PAIR, NOT REASSIGNMENT. Since cyrius 6.6.0 a `: stack`
+# Result is a two-register value, and there is no `t, v = f();` reassignment form —
+# only `var t, v = f();` binds a pair. Re-polling therefore binds a fresh pair each
+# iteration and copies it into the carried one. Writing `rt = remove_service_cgroup(nm)`
+# would compile and silently keep only the tag.
 fn _remove_cgroup_settled(nm, deadline) {
-    var r = remove_service_cgroup(nm);
-    if (is_ok(r) == 1) { return 1; }
-    while (err_code_of(r) == EBUSY && monotonic_ms() < deadline) {
+    var rt, rv = remove_service_cgroup(nm);
+    if (is_ok(rt) == 1) { return 1; }
+    while (err_code_of(rt, rv) == EBUSY && monotonic_ms() < deadline) {
         sleep_ms(CG_SETTLE_STEP_MS);
-        r = remove_service_cgroup(nm);
-        if (is_ok(r) == 1) { return 1; }
+        var nt, nv = remove_service_cgroup(nm);
+        if (is_ok(nt) == 1) { return 1; }
+        rt = nt;
+        rv = nv;
     }
     return 0;
 }
@@ -1792,16 +1800,16 @@ fn kybernet_run() {
     kmsg("phase 1: devtmpfs mounted");
 
     # Phase 2: Console
-    var con_r = setup_console();
-    if (is_err_result(con_r) == 1) {
+    var con_rt, con_rv = setup_console();
+    if (is_err_result(con_rt) == 1) {
         kmsg("phase 2: console setup failed (continuing)");
     } else {
         kmsg("phase 2: console ready");
     }
 
     # Phase 3: Mount remaining essential filesystems
-    var mount_r = mount_essential();
-    if (is_ok(mount_r) == 1) {
+    var mount_rt, mount_rv = mount_essential();
+    if (is_ok(mount_rt) == 1) {
         kmsg("phase 3: filesystems mounted");
         klog("filesystems mounted");
     } else {
@@ -1842,15 +1850,15 @@ fn kybernet_run() {
     slog_init();
 
     # Phase 4: Signals
-    var sfd_r = setup_signals();
-    if (is_err_result(sfd_r) == 1) {
+    var sfd_rt, sfd_rv = setup_signals();
+    if (is_err_result(sfd_rt) == 1) {
         kmsg("phase 4: FATAL signal setup failed");
         klog("FATAL: signal setup failed - entering shutdown");
         do_shutdown(SHUTDOWN_POWEROFF);
         sys_pause();
         return 1;
     }
-    g_sfd = result_unwrap(sfd_r);
+    g_sfd = result_unwrap(sfd_rt, sfd_rv);
     kmsg("phase 4: signals ready");
 
     # Phase 5: Event loop. Production intervals are health 30s / watchdog
@@ -1864,23 +1872,23 @@ fn kybernet_run() {
     # would round every backoff up.
     var restart_iv = 1;
     if (g_loop_harness == 1) { health_iv = 2; wdog_iv = 1; }
-    var epfd_r = eventloop_setup(g_sfd, health_iv, wdog_iv, restart_iv);
-    if (is_err_result(epfd_r) == 1) {
+    var epfd_rt, epfd_rv = eventloop_setup(g_sfd, health_iv, wdog_iv, restart_iv);
+    if (is_err_result(epfd_rt) == 1) {
         kmsg("phase 5: FATAL eventloop setup failed");
         klog("FATAL: eventloop setup failed - entering shutdown");
         do_shutdown(SHUTDOWN_POWEROFF);
         sys_pause();
         return 1;
     }
-    g_epfd = result_unwrap(epfd_r);
+    g_epfd = result_unwrap(epfd_rt, epfd_rv);
 
     # Phase 5b: Notify socket
-    var nfd_r = notify_socket_create();
+    var nfd_rt, nfd_rv = notify_socket_create();
     g_nfd = 0 - 1;
-    if (is_ok(nfd_r) == 1) {
-        g_nfd = result_unwrap(nfd_r);
-        var notify_r = eventloop_add_notify(g_epfd, g_nfd);
-        if (is_err_result(notify_r) == 1) {
+    if (is_ok(nfd_rt) == 1) {
+        g_nfd = result_unwrap(nfd_rt, nfd_rv);
+        var notify_rt, notify_rv = eventloop_add_notify(g_epfd, g_nfd);
+        if (is_err_result(notify_rt) == 1) {
             klog("notify epoll registration failed (continuing)");
             sys_close(g_nfd);
             g_nfd = 0 - 1;
@@ -2059,9 +2067,9 @@ fn kybernet_run() {
             var tok = event_token(ev);
             switch (tok) {
                 case 1: {
-                    var sig = read_signal(g_sfd);
-                    if (is_some(sig) == 1) {
-                        handle_signal(unwrap(sig));
+                    var sig_t, sig_v = read_signal(g_sfd);
+                    if (is_some(sig_t) == 1) {
+                        handle_signal(unwrap(sig_t, sig_v));
                     }
                 }
                 case 2: handle_health_tick();

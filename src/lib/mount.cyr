@@ -139,9 +139,9 @@ fn mount_essential() {
         var flg = load64(t + off + 24);
         var dat = load64(t + off + 32);
         var req = load64(t + off + 40);
-        var r = mount_if_needed(src, tgt, fst, flg, dat);
-        if (is_err_result(r) == 1) {
-            if (req == 1) { return r; }
+        var rt, rv = mount_if_needed(src, tgt, fst, flg, dat);
+        if (is_err_result(rt) == 1) {
+            if (req == 1) { return Err(rv); }
             # Optional mount failed — record the target ptr and continue.
             if (_mount_skipped_count < 16) {
                 store64(&_mount_skipped + _mount_skipped_count * 8, tgt);
@@ -149,7 +149,7 @@ fn mount_essential() {
             }
             continue;
         }
-        if (result_unwrap(r) == 0) { mounted = mounted + 1; }
+        if (result_unwrap(rt, rv) == 0) { mounted = mounted + 1; }
     }
     return Ok(mounted);
 }

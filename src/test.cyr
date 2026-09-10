@@ -103,15 +103,15 @@ fn test_epoll() {
     assert_eq(load64(ts), 10, "interval");
 
     # Live epoll test
-    var epfd_r = epoll_new();
-    assert(is_ok(epfd_r) == 1, "epoll_create");
-    if (is_ok(epfd_r) == 1) {
-        var epfd = result_unwrap(epfd_r);
-        var tfd_r = timer_new(1);
-        if (is_ok(tfd_r) == 1) {
-            var r = epoll_add_read(epfd, result_unwrap(tfd_r), TOKEN_WATCHDOG);
-            assert(is_ok(r) == 1, "epoll_add");
-            sys_close(result_unwrap(tfd_r));
+    var epfd_r_t, epfd_r_v = epoll_new();
+    assert(is_ok(epfd_r_t) == 1, "epoll_create");
+    if (is_ok(epfd_r_t) == 1) {
+        var epfd = result_unwrap(epfd_r_t, epfd_r_v);
+        var tfd_r_t, tfd_r_v = timer_new(1);
+        if (is_ok(tfd_r_t) == 1) {
+            var r_t, r_v = epoll_add_read(epfd, result_unwrap(tfd_r_t, tfd_r_v), TOKEN_WATCHDOG);
+            assert(is_ok(r_t) == 1, "epoll_add");
+            sys_close(result_unwrap(tfd_r_t, tfd_r_v));
         }
         owned_fd_close(epfd);
     }
@@ -131,16 +131,16 @@ fn test_epoll() {
 # Without (2) passing, the reactor spins.
 fn test_timerfd_drain_clears_readiness() {
     println("--- timerfd drain (CRITICAL-1 regression) ---");
-    var epfd_r = epoll_new();
-    assert(is_ok(epfd_r) == 1, "drain: epoll_create");
-    if (is_ok(epfd_r) == 0) { return 0; }
-    var epfd = result_unwrap(epfd_r);
+    var epfd_r_t, epfd_r_v = epoll_new();
+    assert(is_ok(epfd_r_t) == 1, "drain: epoll_create");
+    if (is_ok(epfd_r_t) == 0) { return 0; }
+    var epfd = result_unwrap(epfd_r_t, epfd_r_v);
 
     # 1-second repeating timer, registered exactly as eventloop_setup does.
-    var tfd_r = timer_new(1);
-    assert(is_ok(tfd_r) == 1, "drain: timer_new");
-    if (is_ok(tfd_r) == 0) { owned_fd_close(epfd); return 0; }
-    var tfd = result_unwrap(tfd_r);
+    var tfd_r_t, tfd_r_v = timer_new(1);
+    assert(is_ok(tfd_r_t) == 1, "drain: timer_new");
+    if (is_ok(tfd_r_t) == 0) { owned_fd_close(epfd); return 0; }
+    var tfd = result_unwrap(tfd_r_t, tfd_r_v);
     assert(is_ok(epoll_add_read(epfd, tfd, TOKEN_WATCHDOG)) == 1, "drain: epoll_add");
 
     # Block until it fires (timeout well past the 1s interval).
@@ -223,8 +223,8 @@ fn test_sandbox_from_config_fail_closed() {
     var mixed = sandbox_config_new();
     vec_push(sandbox_fs_rules(mixed), filesystem_rule_new("/etc", FS_NO_ACCESS));
     vec_push(sandbox_fs_rules(mixed), filesystem_rule_new("/usr", 1));
-    var r_mixed = sandbox_from_config(mixed);
-    assert(is_ok(r_mixed) == 1 || is_err_result(r_mixed) == 1,
+    var r_mixed_t, r_mixed_v = sandbox_from_config(mixed);
+    assert(is_ok(r_mixed_t) == 1 || is_err_result(r_mixed_t) == 1,
       "sbx: NO_ACCESS beside a real grant still returns a Result");
 
     # An unrecognised access must fail CLOSED with a real Err, never a bare 0
@@ -935,8 +935,8 @@ fn test_cgroup_apply_null_guard() {
     println("--- cgroup apply null guard (1.5.5) ---");
     # cglim_memory_max(0) would be a load64(0). The live call site guards,
     # but the function must not depend on that.
-    var r = cgroup_apply_limits("kyb-null-t", 0);
-    assert(is_err_result(r) == 0, "apply: null limits is Ok, not a fault");
+    var r_t, r_v = cgroup_apply_limits("kyb-null-t", 0);
+    assert(is_err_result(r_t) == 0, "apply: null limits is Ok, not a fault");
 
     # An all-zero cgroup_limits writes nothing — every field's 0 is the
     # "unset" sentinel, so this must succeed without touching the
@@ -958,8 +958,8 @@ fn test_cgroup_teardown() {
     # Removing a cgroup that was never created fails (ENOENT) rather than
     # reporting success — the shutdown sweep relies on the Result to count
     # what it actually removed.
-    var r = remove_service_cgroup("kyb-teardown-t");
-    assert(is_err_result(r) == 1, "teardown: absent cgroup errors");
+    var r_t, r_v = remove_service_cgroup("kyb-teardown-t");
+    assert(is_err_result(r_t) == 1, "teardown: absent cgroup errors");
 
     # Name validation still applies on the teardown path: an unsafe name
     # must never reach rmdir. create/move reject it (1.4.2 MEDIUM-3), so
@@ -1730,9 +1730,9 @@ fn test_privdrop() {
     var root = is_root();
     if (root == 0) {
         # Not root — verify drop_privileges returns NOT_ROOT
-        var r = drop_privileges(1000, 1000);
-        assert(is_err_result(r) == 1, "not root fails");
-        assert_eq(payload(r), PRIV_NOT_ROOT, "PRIV_NOT_ROOT");
+        var r_t, r_v = drop_privileges(1000, 1000);
+        assert(is_err_result(r_t) == 1, "not root fails");
+        assert_eq(r_v, PRIV_NOT_ROOT, "PRIV_NOT_ROOT");
     } else {
         assert(root == 1, "is root");
     }
@@ -1854,17 +1854,17 @@ fn test_seccomp_basic_profile() {
     # "Operation not permitted" and exit 1, with no directory created.
     var small = seccomp_builder_new();
     seccomp_allow(small, BS_READ);
-    var er = seccomp_build_action(small, SECCOMP_RET_ERRNO_EPERM);
-    assert(is_ok(er) == 1, "seccomp: build with an ERRNO default succeeds");
-    var einfo = result_unwrap(er);
+    var er_t, er_v = seccomp_build_action(small, SECCOMP_RET_ERRNO_EPERM);
+    assert(is_ok(er_t) == 1, "seccomp: build with an ERRNO default succeeds");
+    var einfo = result_unwrap(er_t, er_v);
     var ep = seccomp_filter_ptr(einfo);
     # 1 allowed + 5 fixed = 6 insns; the deny return is insn 4 (offset 32).
     assert_eq(load32(ep + 32 + 4), SECCOMP_RET_ERRNO_EPERM,
       "seccomp: deny action is ERRNO(EPERM) when asked");
 
-    var kr = seccomp_build_action(small, SECCOMP_RET_KILL_PROCESS);
-    assert(is_ok(kr) == 1, "seccomp: build with a KILL default still succeeds");
-    assert_eq(load32(seccomp_filter_ptr(result_unwrap(kr)) + 32 + 4), SECCOMP_RET_KILL_PROCESS,
+    var kr_t, kr_v = seccomp_build_action(small, SECCOMP_RET_KILL_PROCESS);
+    assert(is_ok(kr_t) == 1, "seccomp: build with a KILL default still succeeds");
+    assert_eq(load32(seccomp_filter_ptr(result_unwrap(kr_t, kr_v)) + 32 + 4), SECCOMP_RET_KILL_PROCESS,
       "seccomp: deny action is KILL_PROCESS when asked");
 
     # The ALLOW return is unchanged in both.
@@ -1882,10 +1882,10 @@ fn test_seccomp_builder() {
     assert_eq(seccomp_count(b), 3, "3 allowed");
 
     # Build filter
-    var info_r = seccomp_build(b);
-    assert(is_ok(info_r) == 1, "build ok");
-    if (is_ok(info_r) == 1) {
-        var info = result_unwrap(info_r);
+    var info_r_t, info_r_v = seccomp_build(b);
+    assert(is_ok(info_r_t) == 1, "build ok");
+    if (is_ok(info_r_t) == 1) {
+        var info = result_unwrap(info_r_t, info_r_v);
         var fptr = seccomp_filter_ptr(info);
         var flen = seccomp_filter_len(info);
         # 3 allowed + 5 fixed instructions = 8 instructions * 8 bytes = 64.
@@ -1924,8 +1924,8 @@ fn test_seccomp_builder() {
 
     # Empty builder fails
     var empty = seccomp_builder_new();
-    var er = seccomp_build(empty);
-    assert(is_err_result(er) == 1, "empty build fails");
+    var er_t, er_v = seccomp_build(empty);
+    assert(is_err_result(er_t) == 1, "empty build fails");
 
     # --- u8 jump-offset overflow guard (1.4.2 audit HIGH-4) ---
     # BPF jt/jf are u8. Past SECCOMP_MAX_ALLOW the offsets this layout
@@ -1966,19 +1966,19 @@ fn test_caps() {
     println("--- capabilities ---");
     # Not root — drop_capabilities should fail with PRIV_NOT_ROOT
     if (is_root() == 0) {
-        var r = drop_capabilities(0);
-        assert(is_err_result(r) == 1, "caps need root");
-        assert_eq(payload(r), PRIV_NOT_ROOT, "caps PRIV_NOT_ROOT");
+        var r_t, r_v = drop_capabilities(0);
+        assert(is_err_result(r_t) == 1, "caps need root");
+        assert_eq(r_v, PRIV_NOT_ROOT, "caps PRIV_NOT_ROOT");
     }
 
     # set_no_new_privs should work for any user
-    var nnp = set_no_new_privs();
-    assert(is_ok(nnp) == 1, "no_new_privs ok");
+    var nnp_t, nnp_v = set_no_new_privs();
+    assert(is_ok(nnp_t) == 1, "no_new_privs ok");
 
     # secure_pre_exec should fail for non-root when uid/gid given
     if (is_root() == 0) {
-        var r2 = secure_pre_exec(1000, 1000, 0);
-        assert(is_err_result(r2) == 1, "secure_pre_exec need root");
+        var r2_t, r2_v = secure_pre_exec(1000, 1000, 0);
+        assert(is_err_result(r2_t) == 1, "secure_pre_exec need root");
     }
     return 0;
 }
@@ -2133,9 +2133,9 @@ fn test_mount_table() {
     assert_eq(r3, 0, "empty target not mounted");
 
     # Verify mount_if_needed returns Ok(1) for already-mounted
-    var mr = mount_if_needed("proc", "/proc", "proc", 0, 0);
-    assert(is_ok(mr) == 1, "mount_if_needed /proc ok");
-    assert_eq(result_unwrap(mr), 1, "already mounted returns 1");
+    var mr_t, mr_v = mount_if_needed("proc", "/proc", "proc", 0, 0);
+    assert(is_ok(mr_t) == 1, "mount_if_needed /proc ok");
+    assert_eq(result_unwrap(mr_t, mr_v), 1, "already mounted returns 1");
     return 0;
 }
 
@@ -2677,25 +2677,25 @@ fn test_owned_fd() {
 fn test_eventloop_lifecycle() {
     println("--- eventloop lifecycle ---");
     # Full lifecycle: create epoll, add timer, close
-    var epfd_r = epoll_new();
-    assert(is_ok(epfd_r) == 1, "epoll create");
-    var epfd = result_unwrap(epfd_r);
+    var epfd_r_t, epfd_r_v = epoll_new();
+    assert(is_ok(epfd_r_t) == 1, "epoll create");
+    var epfd = result_unwrap(epfd_r_t, epfd_r_v);
 
     # Add a timer
-    var tfd_r = timer_new(1);
-    assert(is_ok(tfd_r) == 1, "timer create");
-    var tfd = result_unwrap(tfd_r);
+    var tfd_r_t, tfd_r_v = timer_new(1);
+    assert(is_ok(tfd_r_t) == 1, "timer create");
+    var tfd = result_unwrap(tfd_r_t, tfd_r_v);
 
-    var add_r = epoll_add_read(epfd, tfd, TOKEN_HEALTH);
-    assert(is_ok(add_r) == 1, "epoll add timer");
+    var add_r_t, add_r_v = epoll_add_read(epfd, tfd, TOKEN_HEALTH);
+    assert(is_ok(add_r_t) == 1, "epoll add timer");
 
     # Add a second timer
-    var tfd2_r = timer_new(5);
-    assert(is_ok(tfd2_r) == 1, "timer2 create");
-    var tfd2 = result_unwrap(tfd2_r);
+    var tfd2_r_t, tfd2_r_v = timer_new(5);
+    assert(is_ok(tfd2_r_t) == 1, "timer2 create");
+    var tfd2 = result_unwrap(tfd2_r_t, tfd2_r_v);
 
-    var add_r2 = epoll_add_read(epfd, tfd2, TOKEN_WATCHDOG);
-    assert(is_ok(add_r2) == 1, "epoll add timer2");
+    var add_r2_t, add_r2_v = epoll_add_read(epfd, tfd2, TOKEN_WATCHDOG);
+    assert(is_ok(add_r2_t) == 1, "epoll add timer2");
 
     # Clean up
     sys_close(tfd);
@@ -2715,10 +2715,10 @@ fn test_eventloop_setup_full() {
     var read_fd = load32(pipefd);
     var write_fd = load32(pipefd + 4);
 
-    var r = eventloop_setup(read_fd, 30, 10, 1);
-    assert(is_ok(r) == 1, "eventloop_setup ok");
-    if (is_ok(r) == 1) {
-        var epfd = result_unwrap(r);
+    var r_t, r_v = eventloop_setup(read_fd, 30, 10, 1);
+    assert(is_ok(r_t) == 1, "eventloop_setup ok");
+    if (is_ok(r_t) == 1) {
+        var epfd = result_unwrap(r_t, r_v);
         owned_fd_close(epfd);
     }
     sys_close(read_fd);
@@ -2753,8 +2753,8 @@ fn test_signal_buffer() {
     # Verify the read_signal buffer is large enough (P(-1) fix)
     # We can't easily test signalfd reads without root,
     # but we can verify None is returned on invalid fd
-    var r = read_signal(0 - 1);
-    assert(is_none(r) == 1, "read_signal(-1) is None");
+    var r_t, r_v = read_signal(0 - 1);
+    assert(is_none(r_t) == 1, "read_signal(-1) is None");
     return 0;
 }
 
@@ -3045,8 +3045,8 @@ fn test_seccomp_agnostik_bridge() {
     var b = seccomp_from_profile(prof);
     assert_eq(seccomp_count(b), 4, "bridge merged 4 syscalls");
 
-    var info_r = seccomp_build(b);
-    assert(is_ok(info_r) == 1, "bridge build ok");
+    var info_r_t, info_r_v = seccomp_build(b);
+    assert(is_ok(info_r_t) == 1, "bridge build ok");
     return 0;
 }
 
