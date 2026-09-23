@@ -26,6 +26,8 @@
 # an artifact by construction and must never be checked in.
 /qemu/initramfs-auth-kdf/
 /qemu/initramfs-auth-kdf.cpio.gz
+/qemu/initramfs-auth-refused/
+/qemu/initramfs-auth-refused.cpio.gz
 /qemu/initramfs-edge.cpio.gz
 
 # Quiet-gate fixture (1.6.4) — a copy of the staged tree with

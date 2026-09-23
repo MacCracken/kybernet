@@ -6,38 +6,39 @@
 
 ## Version
 
-**1.7.0**: toolchain **6.6.2 → 6.6.6**, and every dependency at its latest tag (sigil
-3.12.18, agnostik 1.6.3, libro 2.10.3, argonaut 1.15.2). Suite 747 → **758** assertions
-(742 → **753** on aarch64). The x86_64 harness passed **79/79** under
-`HARNESS_STRICT=1`, and the aarch64 boot gate **18/18**.
+**1.7.1**: a refused `emergency.cred` no longer falls back to the config key. 1.6.18
+promised that and did not deliver it. Suite 758 → **787** assertions
+(753 → **782** on aarch64). Harness 79 → **84** properties, all passing under
+`HARNESS_STRICT=1`. The toolchain and every dependency pin are unchanged from 1.7.0.
 
-⚠ **The bump compiled clean, and that was not the finding.** Reading what 6.6.3–6.6.6
-changed turned up three things in kybernet, and all three are fixed:
+⚠ **The defect.** `emerg_load_cred_file_at` returned 0 for "absent" and 0 for
+"refused", and `load_config` fell back to `emergency_password_hash` on any 0. So a
+0644 file was logged `REFUSED, chmod 600 it`, and then the world-readable config key's
+record answered the prompt. The loader's own test asserted the 0 that caused it,
+and the decision sat in `main.cyr`, where no unit test can reach (standing rule 34).
+It is now `emerg_resolve_cred_at` in `emergency_auth.cyr`. It uses the file when the
+file loaded and the key when the file is absent. Anything else yields **no
+credential**, and that is also its default for any state added later.
 
-- **A reload could apply DEFAULT timeouts after a read error.** 6.6.6's `file_read_all`
-  returns a negative errno when a read fails part way, where it used to return the bytes
-  read so far. `load_config`'s `n <= 0` test moved that case from "present but unusable"
-  (standing rule 30: reload keeps the running config) to "absent", and on SIGHUP that path
-  applies the default `boot_timeout_ms` / `shutdown_timeout_ms` / `log_to_console` over
-  the live ones. Only **ENOENT** is absent now. The classification is `cfg_read_class` in
-  `svc_config.cyr`, unit-tested against the real `file_read_all`: a directory must read
-  as UNREADABLE, which pins 6.6.6's contract. Injecting the old `n <= 0` logic turns the
-  suite red with 5 failures.
-- **The Landlock fixture's truncate probe ran `recvfrom` on aarch64.** 6.6.5 added a
-  `45 → 207` row to the aarch64 x86-compat ladder, and the fixture's `#ifdef`-gated native
-  `SYS_TRUNCATE_NR = 45` became x86 `recvfrom`, confirmed by `qemu-aarch64 -strace`. So its
-  denial check was vacuous on aarch64. It uses `sys_truncate` now. Standing rule 1 gained
-  a clause: an `#ifdef`-gated native aarch64 number is not safe by construction either.
-- **`read_signal` warned on every build, 1.6.20's included.** That was the mixed-return
-  diagnostic misfiring on a nullary `None()`, verified correct on both arches. It returns
-  `Ok(signum)` / `Err(errno)` now, so a failed signalfd read carries its errno.
+⚠ **Behaviour change.** A board with an unusable `emergency.cred` **and** a key in
+`config.json` now has no credential, so an edge refusal suppresses the shell. The
+boot log names the file, the reason, and that the key was not used. `chmod 600` is
+the fix. A board with no file at all is unaffected.
 
-⛔ **Found and NOT fixed: a refused `emergency.cred` falls back to the config key**,
-against 1.6.18's explicit promise that it would not. `emerg_load_cred_file_at` returns 0
-for both "absent" and "refused", and `load_config` falls back on any 0. The unit test
-asserts only the loader's 0, which is exactly the value that triggers the fallback. The
-fix changes authentication behaviour and needs its own harness fixture, so it is the first
-roadmap item rather than part of a toolchain bump.
+**A second defect in the same loader:** it returned `str_new` views of one static
+buffer. `str_new` borrows, so a same-length rotation over SIGHUP compared equal to
+itself and was never announced. It now returns an owned copy.
+
+**Harness pass 4c** boots the same real record in a 0644 `emergency.cred` and in
+`config.json`, types the right password, and asserts that it does not get in. It
+also asserts positive evidence that phase 6c ran, because "did not authenticate"
+alone would also pass on a boot that died early.
+
+1.7.0, the release before this one, moved cyrius 6.6.2 → 6.6.6 and every dep to its
+latest tag. Its three fixes (only ENOENT is an absent config, the Landlock fixture's
+truncate probe, and `read_signal` as a `Result`) are in the 1.7.0 CHANGELOG entry.
+Its first CI run failed on a kernel pinned by checksum to a mutable Alpine URL. That
+was fixed in place under 1.7.0.
 
 ## Toolchain
 
@@ -127,16 +128,16 @@ the build; that is standing rule 32.
 
 | Gate | Count | Enforcement |
 |---|---|---|
-| `cyrius test src/test.cyr` | **758** assertions | floor read from CLAUDE.md; a shrinking suite fails |
-| `bash scripts/aarch64-exec-gate.sh` | **753** assertions + 5 syscall probes | executes aarch64 under `qemu-user`; its own declared floor |
+| `cyrius test src/test.cyr` | **787** assertions | floor read from CLAUDE.md; a shrinking suite fails |
+| `bash scripts/aarch64-exec-gate.sh` | **782** assertions + 5 syscall probes | executes aarch64 under `qemu-user`; its own declared floor |
 | `bash qemu/boot-test-aarch64.sh` | **18** properties | boots `kybernet-aarch64` as PID 1 (TCG) |
-| `bash qemu/boot-test.sh` | **79** properties, 5 passes | `HARNESS_STRICT=1` in CI makes a skip a failure |
+| `bash qemu/boot-test.sh` | **84** properties, 5 passes | `HARNESS_STRICT=1` in CI makes a skip a failure |
 | `bash scripts/verify-lock.sh` | 2 halves, 5 commit pins | the committed lock (HEAD's, not the working tree's) vs a fresh resolve |
 | `bash scripts/bench-history.sh` | **56** benchmarks (2 reported-not-gated) | ≥15% regression gate; `LAYOUT_SENSITIVE` names the two exempt ones |
 | `cyrius lint` | 0 warnings, **0 untracked deferrals** | HARD GATE, both halves |
 | `cyrius fmt --check` | clean | non-mutating; never `diff <(cyrius fmt …)` |
 
-⚠ **758 and 753 are both correct, and neither floor gates the other.** Six assertions are
+⚠ **787 and 782 are both correct, and neither floor gates the other.** Six assertions are
 x86-only (`BS_OPEN`/`BS_STAT`/`BS_LSTAT`/`BS_PIPE`/`BS_POLL`/`BS_NANOSLEEP`) and one is
 aarch64-only (`BS_PPOLL`). Both floors are declared in CLAUDE.md and must be bumped
 together. **Do not pad the short arch to equalise them.**
@@ -146,8 +147,10 @@ together. **Do not pad the short arch to equalise them.**
 ## Verification posture
 
 The technique that has repeatedly worked here, and whose absence is what let defects ship:
-**inject the defect and watch the gate go red.** At 1.7.0: restoring `load_config`'s old
-`n <= 0` classification failed 5 of the new assertions (753 passed, 5 failed, exit 5).
+**inject the defect and watch the gate go red.** At 1.7.1: restoring the 1.7.0 fallback in
+`emerg_resolve_cred_at` failed 7 unit assertions and failed pass 4c on a real boot (80 OK, 4 FAIL); restoring the borrowed
+buffer failed 2. At 1.7.0: restoring `load_config`'s old `n <= 0` classification failed 5
+(753 passed, 5 failed, exit 5).
 The Landlock fix was checked under `qemu-aarch64 -strace` before and after. The raw
 literal ran `recvfrom` and got EBADF; `sys_truncate` runs `truncate`.
 
@@ -164,30 +167,22 @@ stricter bar on the next sweep.**
 
 ## In flight
 
-**v1.7.0 is ready and untagged.** ⚠ Its first CI run **failed the aarch64 boot gate**:
-the kernel's sha256 was pinned on Alpine's unversioned `netboot/` URL, which 3.21.8
-overwrote on 2026-09-17, and local runs stayed green only because `qemu/.cache/` held
-the old bytes. It is fixed in place under 1.7.0 (a versioned `netboot-3.21.7/` URL with
-the same checksum, and a guard against unversioned ones), and verified with the cached
-kernel removed: 18/18. Every dep tag it pins already exists on the remote, so nothing
-upstream has to be released first. `git show HEAD:cyrius.lock` is still 1.6.20's,
-so `verify-lock.sh` will fail half 1 **until the new lock is committed**. That is correct:
-it checks what CI checks out. It passes against a committed snapshot of this tree.
+**v1.7.1 is ready and untagged.** It changes no dependency, lock or toolchain pin,
+so `verify-lock.sh` passes against HEAD as it stands. Every gate was run on this
+tree; the numbers are in the 1.7.1 CHANGELOG entry.
 
 ## Next
 
-In the order I would take them. The full list is [roadmap.md](roadmap.md), with 15 open
+In the order I would take them. The full list is [roadmap.md](roadmap.md), with 14 open
 items.
 
-1. **Fix the `emergency.cred` fallback, with a rule-27 fixture.** It is security-relevant,
-   a promise the code does not keep, and the one open item this release found.
-2. **aarch64 fixture parity.** The boot gate still runs with **no services**. The Cyrius
+1. **aarch64 fixture parity.** The boot gate still runs with **no services**. The Cyrius
    fixtures already cross-build. It is also now the only way to test the fixed Landlock
    probe on aarch64 and an entropy-starved first audit record.
-3. **`ready_check` / `environment` / `env_files` config keys.** These have been unblocked
+2. **`ready_check` / `environment` / `env_files` config keys.** These have been unblocked
    since 1.6.20 consumed argonaut 1.15.0. Check that something downstream reads each field
    before adding its key.
-4. **Port `agnos-init.sh`'s `setup_directories()` to a oneshot.** ⚠ Ship the binary before
+3. **Port `agnos-init.sh`'s `setup_directories()` to a oneshot.** ⚠ Ship the binary before
    adding the dependency, or a working desktop boot becomes a non-booting one.
 
 ## Release order (cross-repo)

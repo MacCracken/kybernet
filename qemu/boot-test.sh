@@ -1609,6 +1609,59 @@ else
         else
             echo "  OK: [argon2id v1] neither salt nor tag reaches the log"
         fi
+
+        # Pass 4c — a REFUSED emergency.cred must not fall back to the config key.
+        # 1.7.1.
+        #
+        # The fixture holds the SAME real record in a 0644 emergency.cred and in
+        # config.json's emergency_password_hash. The loader refuses the file, and
+        # the key must then NOT answer: there is no credential, so the edge refusal
+        # suppresses the shell and the board powers off. From 1.6.18 to 1.7.0 the
+        # key answered, and the correct password authenticated against it.
+        #
+        # ⚠ "Did not authenticate" alone would also pass on a boot that died before
+        # phase 6c, so the suppression line is asserted as positive evidence that
+        # phase 6c ran and made the decision.
+        REF_INITRD="${SCRIPT_DIR}/initramfs-auth-refused.cpio.gz"
+        if [ ! -f "$REF_INITRD" ]; then
+            _skip_or_fail "refused-credential fixture absent (the no-fallback rule is ungated)"
+        else
+            ref_out=$(_auth_boot "hunter2" "$REF_INITRD" || true)
+            _assert_no_panic "$ref_out" "refused cred"
+            if echo "$ref_out" | grep -aqF "emergency.cred is group/world readable - REFUSED"; then
+                echo "  OK: [refused cred] the 0644 credential file is refused"
+            else
+                echo "  FAIL: [refused cred] the 0644 credential file was not refused (is the fixture 0644?)"
+                echo "$ref_out" | grep -aiE 'emergency.cred|credential' | head -3 || true
+                fail=1
+            fi
+            if echo "$ref_out" | grep -aqF "the emergency_password_hash key is NOT used as a fallback"; then
+                echo "  OK: [refused cred] the boot log says the config key is not a fallback"
+            else
+                echo "  FAIL: [refused cred] nothing says the config key was passed over"
+                echo "$ref_out" | grep -aiE 'emergency.cred|password_hash' | head -3 || true
+                fail=1
+            fi
+            if echo "$ref_out" | grep -aqF "emergency credential read from config.json"; then
+                echo "  FAIL: [refused cred] the config key became the credential after the file was refused"
+                fail=1
+            else
+                echo "  OK: [refused cred] the config key did not become the credential"
+            fi
+            if echo "$ref_out" | grep -aqF "NOT opening a root shell"; then
+                echo "  OK: [refused cred] phase 6c ran and suppressed the shell"
+            else
+                echo "  FAIL: [refused cred] phase 6c did not report the shell suppressed"
+                echo "$ref_out" | grep -aiE 'edge refusal|emergency|phase 6c' | head -3 || true
+                fail=1
+            fi
+            if echo "$ref_out" | grep -aqF "emergency shell: authenticated"; then
+                echo "  FAIL: [refused cred] the password authenticated via the config key (the 1.6.18-1.7.0 fallback)"
+                fail=1
+            else
+                echo "  OK: [refused cred] the correct password did not authenticate via the config key"
+            fi
+        fi
     fi
 
     rm -f "$AUTH_BAD"

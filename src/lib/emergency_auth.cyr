@@ -533,18 +533,50 @@ fn emerg_cred_usable(h) {
 # this file, from `printf` to an editor, produces one or the other, and a
 # credential rejected for an invisible byte is the least debuggable failure this
 # path can produce.
+#
+# ⚠ ABSENT AND UNUSABLE ARE DIFFERENT ANSWERS, AND THE RETURN VALUE CANNOT CARRY
+# THE DIFFERENCE. 1.7.1. Both return 0, and from 1.6.18 to 1.7.0 the caller fell
+# back to the config key on any 0, so the refusal described above never
+# happened: a 0644 file was logged as REFUSED and the config key's record then
+# answered the prompt. `emerg_cred_file_state()` reports which 0 this was, and
+# `emerg_resolve_cred_at` below is the only thing that should read it.
 var _cred_buf[80];
+
+enum EmergCredFile {
+    EMERG_CRED_FILE_ABSENT = 0;
+    EMERG_CRED_FILE_LOADED = 1;
+    EMERG_CRED_FILE_UNUSABLE = 2;
+}
+
+var _emerg_cred_file_state = 0;
+
+# What the most recent emerg_load_cred_file_at call found.
+fn emerg_cred_file_state() { return _emerg_cred_file_state; }
 
 fn emerg_cred_path_default() { return "/etc/kybernet/emergency.cred"; }
 
-fn emerg_load_cred_file() { return emerg_load_cred_file_at(emerg_cred_path_default()); }
-
 fn emerg_load_cred_file_at(path) {
-    if (sys_access(path, 0) != 0) { return 0; }
+    # Every return below is "present but unusable" unless it says otherwise, so
+    # an exit added later without a state fails closed rather than open.
+    _emerg_cred_file_state = EMERG_CRED_FILE_UNUSABLE;
+
+    # Only ENOENT is absent, the same rule as config.json (cfg_read_class).
+    # Anything else at this path is something an operator put there.
+    var acc = sys_access(path, 0);
+    if (acc == 0 - ENOENT) {
+        _emerg_cred_file_state = EMERG_CRED_FILE_ABSENT;
+        return 0;
+    }
+    if (acc != 0) {
+        klog2("config: emergency.cred present but inaccessible - REFUSED, errno ", _u64_str(0 - acc));
+        kmsg("kybernet: config: emergency.cred inaccessible; refusing to use it");
+        return 0;
+    }
 
     var st[STAT_BUFSZ];
     if (sys_stat(path, &st) != 0) {
-        klog("config: emergency.cred present but unstattable - IGNORED");
+        klog("config: emergency.cred present but unstattable - REFUSED");
+        kmsg("kybernet: config: emergency.cred unstattable; refusing to use it");
         return 0;
     }
     # load32: st_mode is a 32-bit mode_t. A load64 here would pull st_uid into
@@ -565,13 +597,91 @@ fn emerg_load_cred_file_at(path) {
     # the way rule 30 requires everywhere else.
     var cap = 639;
     var n = file_read_all(path, &_cred_buf, cap + 1);
-    if (n <= 0) { return 0; }
+    if (n < 0) {
+        klog2("config: emergency.cred could not be read - REFUSED, errno ", _u64_str(0 - n));
+        kmsg("kybernet: config: emergency.cred unreadable; refusing to use it");
+        return 0;
+    }
     if (n > cap) {
-        klog("config: emergency.cred is too large to be a credential - IGNORED");
+        klog("config: emergency.cred is too large to be a credential - REFUSED");
+        kmsg("kybernet: config: emergency.cred too large; refusing to use it");
         return 0;
     }
     while (n > 0 && load8((&_cred_buf) + n - 1) <= 32) { n = n - 1; }
-    if (n == 0) { return 0; }
-    store8((&_cred_buf) + n, 0);
-    return str_new(&_cred_buf, n);
+    if (n == 0) {
+        klog("config: emergency.cred is empty - REFUSED");
+        kmsg("kybernet: config: emergency.cred empty; refusing to use it");
+        return 0;
+    }
+    # ⚠ AN OWNED COPY, NOT A VIEW OF _cred_buf. 1.7.1. `str_new` borrows its
+    # buffer, so every credential this returned used to alias the one static
+    # buffer above. reload_config keeps the old credential and compares it with
+    # the new one, but by then the reload had overwritten the bytes both of them
+    # pointed at: a rotated record of the same length (same parameters, new salt
+    # and tag, which is the normal rotation) compared equal to itself, and the
+    # rotation was never announced.
+    var view = str_new(&_cred_buf, n);
+    var owned = 0;
+    if (view != 0) { owned = str_clone(view); }
+    if (owned == 0) {
+        klog("config: emergency.cred could not be copied (out of memory) - REFUSED");
+        kmsg("kybernet: config: emergency.cred copy failed; refusing to use it");
+        return 0;
+    }
+    _emerg_cred_file_state = EMERG_CRED_FILE_LOADED;
+    return owned;
 }
+
+# Which credential the emergency shell uses, and where it came from. 1.7.1.
+enum EmergCredSource {
+    EMERG_SRC_NONE = 0;
+    EMERG_SRC_FILE = 1;
+    EMERG_SRC_CONFIG = 2;
+    EMERG_SRC_REFUSED = 3;
+}
+
+var _emerg_cred_source = 0;
+
+# Where the credential returned by the most recent emerg_resolve_cred_at came from.
+fn emerg_cred_source() { return _emerg_cred_source; }
+
+# ⚠ THE CONFIG KEY IS A FALLBACK FOR AN ABSENT FILE, AND FOR NOTHING ELSE. 1.7.1.
+#
+# emergency.cred loaded     -> the file's record; the config key is ignored.
+# emergency.cred absent     -> the config key's record, or none.
+# emergency.cred unusable   -> NO credential. The config key is not consulted.
+#
+# The third line is the one 1.6.18 promised and 1.6.18 to 1.7.0 did not keep:
+# main.cyr used `emerg_load_cred_file() == 0` as its test, and 0 also meant
+# "refused", so a group-readable file handed the prompt to whatever the
+# world-readable config.json held. An operator who created the file meant it to
+# be the credential; answering with a different one is how a record they believe
+# they replaced keeps working. With no credential, an edge refusal suppresses
+# the shell, which is the closed outcome 1.5.9 chose.
+#
+# This decision used to be inline in load_config, which the unit suite cannot
+# reach (standing rule 34); that is why a test asserting the loader's 0 passed
+# while the behaviour it described was wrong. `cfg_cred` is the config key's
+# value, or 0 when the key is absent. Nothing here validates the record: the
+# caller still drops one `emerg_cred_usable` rejects.
+fn emerg_resolve_cred_at(path, cfg_cred) {
+    var file_cred = emerg_load_cred_file_at(path);
+    var st = emerg_cred_file_state();
+    if (st == EMERG_CRED_FILE_LOADED) {
+        _emerg_cred_source = EMERG_SRC_FILE;
+        return file_cred;
+    }
+    if (st == EMERG_CRED_FILE_ABSENT) {
+        if (cfg_cred != 0) {
+            _emerg_cred_source = EMERG_SRC_CONFIG;
+            return cfg_cred;
+        }
+        _emerg_cred_source = EMERG_SRC_NONE;
+        return 0;
+    }
+    # UNUSABLE, and any state added later: fail closed.
+    _emerg_cred_source = EMERG_SRC_REFUSED;
+    return 0;
+}
+
+fn emerg_resolve_cred(cfg_cred) { return emerg_resolve_cred_at(emerg_cred_path_default(), cfg_cred); }

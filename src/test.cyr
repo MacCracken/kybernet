@@ -2513,11 +2513,18 @@ fn _test_sigil_style_cstr(hex_cstr) {
 # The mode check is the security-relevant branch and the one worth pinning: a
 # credential file that is group- or world-readable buys nothing over the config
 # key it replaced.
+#
+# The mode is SET, not requested (1.7.1). O_CREAT applies `mode` only when it
+# creates the file, and only after the umask, so a copy left behind by an
+# interrupted run, or a runner with umask 077, would hand these tests a mode
+# they did not ask for, and the tests are about modes.
 fn _write_file(path, content, mode) {
+    sys_unlink(path);
     var fd = sys_open(path, 577, mode);   # O_WRONLY|O_CREAT|O_TRUNC
     if (fd < 0) { return 0 - 1; }
     sys_write(fd, content, strlen(content));
     sys_close(fd);
+    sys_chmod(path, mode);
     return 0;
 }
 
@@ -2528,12 +2535,14 @@ fn test_emerg_cred_file() {
 
     # Absent file: no credential, and no complaint.
     assert_eq(emerg_load_cred_file_at("/tmp/kyb_cred_absent_xyz"), 0, "cred file: absent is 0");
+    assert_eq(emerg_cred_file_state(), EMERG_CRED_FILE_ABSENT, "cred file: absent reads as ABSENT");
 
     # 0600: accepted, and the record round-trips.
     var ok_path = "/tmp/kyb_cred_t600";
     _write_file(ok_path, rec, 384);          # 0600
     var loaded = emerg_load_cred_file_at(ok_path);
     assert(loaded != 0, "cred file: 0600 is read");
+    assert_eq(emerg_cred_file_state(), EMERG_CRED_FILE_LOADED, "cred file: 0600 reads as LOADED");
     assert_eq(emerg_cred_kind(loaded), EMERG_CRED_ARGON2ID, "cred file: parses as argon2id");
 
     # A trailing newline must not break it — every way of writing this file
@@ -2554,13 +2563,124 @@ fn test_emerg_cred_file() {
     var bad_path = "/tmp/kyb_cred_t644";
     _write_file(bad_path, rec, 420);         # 0644
     assert_eq(emerg_load_cred_file_at(bad_path), 0, "cred file: 0644 is REFUSED");
+    # ⚠ 1.7.1: the 0 above is the SAME value "absent" returns, and from 1.6.18 to
+    # 1.7.0 load_config fell back to the config key on it. The state is what tells
+    # a refusal from an absence; test_emerg_cred_resolve checks the decision.
+    assert_eq(emerg_cred_file_state(), EMERG_CRED_FILE_UNUSABLE, "cred file: 0644 reads as UNUSABLE, not ABSENT");
 
     # 0640 — group-readable only — is refused for the same reason.
     var grp_path = "/tmp/kyb_cred_t640";
     _write_file(grp_path, rec, 416);         # 0640
     assert_eq(emerg_load_cred_file_at(grp_path), 0, "cred file: 0640 is REFUSED");
+    assert_eq(emerg_cred_file_state(), EMERG_CRED_FILE_UNUSABLE, "cred file: 0640 reads as UNUSABLE");
+
+    # 1.7.1: the other ways a present file can be unusable. Each used to return 0
+    # SILENTLY, which load_config read as "no file" and answered from config.json.
+    var empty_path = "/tmp/kyb_cred_tempty";
+    _write_file(empty_path, "", 384);
+    assert_eq(emerg_load_cred_file_at(empty_path), 0, "cred file: an empty file yields nothing");
+    assert_eq(emerg_cred_file_state(), EMERG_CRED_FILE_UNUSABLE, "cred file: empty reads as UNUSABLE");
+
+    var ws_path = "/tmp/kyb_cred_tws";
+    _write_file(ws_path, "  \n\n", 384);
+    assert_eq(emerg_load_cred_file_at(ws_path), 0, "cred file: whitespace only yields nothing");
+    assert_eq(emerg_cred_file_state(), EMERG_CRED_FILE_UNUSABLE, "cred file: whitespace only reads as UNUSABLE");
+
+    # 700 bytes: past the 639-byte cap, so the read hits the headroom byte.
+    var big = str_builder_new();
+    for (var bi = 0; bi < 70; bi = bi + 1) { str_builder_add_cstr(big, "aaaaaaaaaa"); }
+    var big_path = "/tmp/kyb_cred_tbig";
+    _write_file(big_path, str_data(str_builder_build(big)), 384);
+    assert_eq(emerg_load_cred_file_at(big_path), 0, "cred file: an oversized file yields nothing");
+    assert_eq(emerg_cred_file_state(), EMERG_CRED_FILE_UNUSABLE, "cred file: oversized reads as UNUSABLE");
+
+    # A 0700 directory passes the mode check, and then the read fails (EISDIR).
+    var dir_path = "/tmp/kyb_cred_tdir";
+    sys_rmdir(dir_path);
+    sys_mkdir(dir_path, 448);                # 0700
+    sys_chmod(dir_path, 448);
+    assert_eq(emerg_load_cred_file_at(dir_path), 0, "cred file: a directory yields nothing");
+    assert_eq(emerg_cred_file_state(), EMERG_CRED_FILE_UNUSABLE, "cred file: a directory reads as UNUSABLE");
+
+    # ⚠ 1.7.1: every load is an OWNED copy. reload_config compares the credential
+    # from before a SIGHUP with the one after it; while both were views of one
+    # static buffer, a same-length rotation compared the new bytes with
+    # themselves and was never announced. Same parameters and salt, new tag.
+    var rec2 = _cat2("v1$2$19456$1$6b796265726e65742d746573742d3031$",
+      "1b314f63f14b4817f38b55e7c5c53e55a4973ce075d7a95ad2da3a4aa7c57c5e");
+    var rot_path = "/tmp/kyb_cred_trot";
+    _write_file(rot_path, rec, 384);
+    var first = emerg_load_cred_file_at(rot_path);
+    _write_file(rot_path, rec2, 384);
+    var second = emerg_load_cred_file_at(rot_path);
+    assert_eq(emerg_cred_same(first, second), 0, "cred file: a same-length rotation reads as CHANGED");
+    assert_eq(emerg_cred_same(first, str_from(rec)), 1, "cred file: the earlier load still holds its record");
 
     sys_unlink(ok_path); sys_unlink(nl_path); sys_unlink(bad_path); sys_unlink(grp_path);
+    sys_unlink(empty_path); sys_unlink(ws_path); sys_unlink(big_path); sys_rmdir(dir_path);
+    sys_unlink(rot_path);
+    return 0;
+}
+
+# ⚠ 1.7.1 — THE DECISION, NOT THE LOADER. From 1.6.18 to 1.7.0 the choice between
+# emergency.cred and the config key lived inline in load_config, which this file
+# cannot reach (standing rule 34), and test_emerg_cred_file asserted only that a
+# refused file returns 0, which was exactly the value that triggered the
+# fallback. This drives emerg_resolve_cred_at through real files at real modes,
+# with the config value produced the way load_config produces it (rule 46).
+fn _cfg_hash_from_json(rec) {
+    var doc = _cat2(_cat2("{\"emergency_password_hash\": \"", rec), "\"}");
+    return _cfg_str(json_v_parse_buf(doc, strlen(doc)), "emergency_password_hash", 0);
+}
+
+fn test_emerg_cred_resolve() {
+    println("--- emergency credential source (1.7.1) ---");
+    var rec = _cat2("v1$2$19456$1$6b796265726e65742d746573742d3031$",
+      "2b314f63f14b4817f38b55e7c5c53e55a4973ce075d7a95ad2da3a4aa7c57c5e");
+    # A structurally valid record whose tag cannot match: the same decoy shape the
+    # harness stages, so "the file won" cannot pass by the config value being junk.
+    var decoy = _cat2("v1$2$19456$1$6b796265726e65742d746573742d3031$",
+      "0000000000000000000000000000000000000000000000000000000000000000");
+    var cfg_rec = _cfg_hash_from_json(rec);
+    var cfg_decoy = _cfg_hash_from_json(decoy);
+    assert(cfg_rec != 0, "cred source: the config value parses");
+
+    # Absent file: the config key answers, or nothing does.
+    var absent = "/tmp/kyb_cred_rabsent_xyz";
+    assert_eq(emerg_resolve_cred_at(absent, cfg_rec), cfg_rec, "cred source: absent file falls back to the key");
+    assert_eq(emerg_cred_source(), EMERG_SRC_CONFIG, "cred source: absent file + key is CONFIG");
+    assert_eq(emerg_resolve_cred_at(absent, 0), 0, "cred source: absent file, no key, no credential");
+    assert_eq(emerg_cred_source(), EMERG_SRC_NONE, "cred source: absent file, no key is NONE");
+
+    # 0600 file: the file wins, and the decoy in the key is ignored.
+    var ok_path = "/tmp/kyb_cred_r600";
+    _write_file(ok_path, rec, 384);          # 0600
+    var won = emerg_resolve_cred_at(ok_path, cfg_decoy);
+    assert_eq(emerg_cred_same(won, str_from(rec)), 1, "cred source: a 0600 file beats the key");
+    assert_eq(emerg_cred_source(), EMERG_SRC_FILE, "cred source: 0600 file is FILE");
+
+    # ⚠ THE DEFECT. A refused file must leave NO credential, even though the key
+    # holds the right record. 1.6.18 to 1.7.0 returned cfg_rec here.
+    var bad_path = "/tmp/kyb_cred_r644";
+    _write_file(bad_path, rec, 420);         # 0644
+    assert_eq(emerg_resolve_cred_at(bad_path, cfg_rec), 0, "cred source: a refused file does NOT fall back to the key");
+    assert_eq(emerg_cred_source(), EMERG_SRC_REFUSED, "cred source: 0644 file + key is REFUSED");
+    assert_eq(emerg_resolve_cred_at(bad_path, 0), 0, "cred source: a refused file, no key, no credential");
+    assert_eq(emerg_cred_source(), EMERG_SRC_REFUSED, "cred source: 0644 file, no key is REFUSED");
+
+    # Unusable for a reason other than mode: same answer.
+    var empty_path = "/tmp/kyb_cred_rempty";
+    _write_file(empty_path, "", 384);
+    assert_eq(emerg_resolve_cred_at(empty_path, cfg_rec), 0, "cred source: an empty file does NOT fall back");
+    assert_eq(emerg_cred_source(), EMERG_SRC_REFUSED, "cred source: empty file is REFUSED");
+    var dir_path = "/tmp/kyb_cred_rdir";
+    sys_rmdir(dir_path);
+    sys_mkdir(dir_path, 448);                # 0700
+    sys_chmod(dir_path, 448);
+    assert_eq(emerg_resolve_cred_at(dir_path, cfg_rec), 0, "cred source: an unreadable file does NOT fall back");
+    assert_eq(emerg_cred_source(), EMERG_SRC_REFUSED, "cred source: a directory is REFUSED");
+
+    sys_unlink(ok_path); sys_unlink(bad_path); sys_unlink(empty_path); sys_rmdir(dir_path);
     return 0;
 }
 
@@ -3220,6 +3340,7 @@ fn main() {
     test_edge_config_rejects();
     test_edge_validators();
     test_emerg_cred_file();
+    test_emerg_cred_resolve();
     test_cfg_read_class();
     test_edge_compare_pcrs_cstr();
     test_edge_boot_gating();

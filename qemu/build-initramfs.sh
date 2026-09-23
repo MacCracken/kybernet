@@ -25,7 +25,8 @@ set -euo pipefail
 _drop_stale_fixtures() {
     rm -f "${SCRIPT_DIR}/initramfs-edge.cpio.gz" \
           "${SCRIPT_DIR}/initramfs-auth.cpio.gz" \
-          "${SCRIPT_DIR}/initramfs-auth-kdf.cpio.gz"
+          "${SCRIPT_DIR}/initramfs-auth-kdf.cpio.gz" \
+          "${SCRIPT_DIR}/initramfs-auth-refused.cpio.gz"
     echo "  dropped stale edge/auth fixtures (${1:-reason unstated}) — those passes will SKIP"
 }
 
@@ -788,8 +789,44 @@ KDFPY
             ( cd "$KDF_STAGE"
               find . | cpio -o -H newc 2>/dev/null | gzip > "${SCRIPT_DIR}/initramfs-auth-kdf.cpio.gz" )
             echo "  staged emergency-auth fixture (argon2id v1 in emergency.cred 0600; decoy in config.json)"
+
+            # ⚠ A FOURTH IMAGE: A REFUSED emergency.cred MUST NOT FALL BACK. 1.7.1.
+            #
+            # The same REAL record goes in BOTH places, and emergency.cred is
+            # 0644, so the loader refuses it. From 1.6.18 to 1.7.0 load_config
+            # then fell back to the config key, and "hunter2" authenticated
+            # against config.json's copy. The right record in the key is what
+            # makes that visible: with the decoy there, a fallback would fail to
+            # authenticate too, and the pass could not tell the bug from the fix.
+            REFUSED_STAGE="${SCRIPT_DIR}/initramfs-auth-refused"
+            rm -rf "$REFUSED_STAGE"
+            mkdir -p "$REFUSED_STAGE"
+            tar -cf - -C "$KDF_STAGE" --exclude=./dev . | tar -xf - -C "$REFUSED_STAGE"
+            mkdir -p "${REFUSED_STAGE}/dev"
+            sudo mknod "${REFUSED_STAGE}/dev/console" c 5 1 2>/dev/null || true
+            sudo mknod "${REFUSED_STAGE}/dev/null"    c 1 3 2>/dev/null || true
+            sudo mknod "${REFUSED_STAGE}/dev/ttyS0"   c 4 64 2>/dev/null || true
+            sudo mknod "${REFUSED_STAGE}/dev/kmsg"    c 1 11 2>/dev/null || true
+            sudo chmod 666 "${REFUSED_STAGE}/dev/console" "${REFUSED_STAGE}/dev/null" \
+                "${REFUSED_STAGE}/dev/ttyS0" "${REFUSED_STAGE}/dev/kmsg" 2>/dev/null || true
+            python3 - "$REFUSED_STAGE" "$KDF_REC" << 'REFPY'
+import sys, json, pathlib
+stage = pathlib.Path(sys.argv[1])
+rec = sys.argv[2]
+p = stage / 'etc/kybernet/config.json'
+c = json.loads(p.read_text())
+c['emergency_require_auth'] = True
+c['emergency_password_hash'] = rec
+p.write_text(json.dumps(c, indent=2))
+cred = stage / 'etc/kybernet/emergency.cred'
+cred.write_text(rec + "\n")
+cred.chmod(0o644)
+REFPY
+            ( cd "$REFUSED_STAGE"
+              find . | cpio -o -H newc 2>/dev/null | gzip > "${SCRIPT_DIR}/initramfs-auth-refused.cpio.gz" )
+            echo "  staged refused-credential fixture (the same record in a 0644 emergency.cred and config.json)"
         else
-            rm -f "${SCRIPT_DIR}/initramfs-auth-kdf.cpio.gz"
+            rm -f "${SCRIPT_DIR}/initramfs-auth-kdf.cpio.gz" "${SCRIPT_DIR}/initramfs-auth-refused.cpio.gz"
         fi
 
         ( cd "$EDGE_STAGE"

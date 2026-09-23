@@ -1,10 +1,10 @@
 # Kybernet Roadmap
 
-**Current: v1.7.0** — [CHANGELOG.md](../../CHANGELOG.md) is the record of what each
+**Current: v1.7.1** — [CHANGELOG.md](../../CHANGELOG.md) is the record of what each
 release actually did. This file carries only what is **not** done; a completed item is
 deleted from here and summarised in History below, never left ticked.
 
-**Open: 15.** The 1.5.9 sweep opened **38** items (counted at the `1.6.0` tag); the
+**Open: 14.** The 1.5.9 sweep opened **38** items (counted at the `1.6.0` tag); the
 2026-08-26 P(-1) audit is fully closed (its last item, MEDIUM-10, closed when 1.6.20
 consumed libro 2.10.0 / argonaut 1.15.0). Every number is `grep -c '^- \[ \]'` against this file at
 the relevant tag, not an estimate.
@@ -14,8 +14,9 @@ bump found more than it changed.** 6.6.6's `file_read_all` fix turned a mid-read
 `load_config` into the "absent" path (fixed: only ENOENT is absent now); 6.6.5's new
 aarch64 translation row turned the Landlock fixture's native truncate literal into
 `recvfrom` (fixed: `sys_truncate`); and reading the loader around both found that a
-refused `emergency.cred` falls back to the config key, which 1.6.18 promised it would
-not. That last one is **open**, and it is the first item below.
+refused `emergency.cred` fell back to the config key, which 1.6.18 promised it would
+not. **v1.7.1 fixed that**, with a harness pass that boots the right record in both
+places and asserts the correct password does not get in.
 
 ⚠ **Two long-standing items closed at v1.6.19 and both are worth remembering for the
 shape rather than the fix.** `seccomp: basic` could not open a file on x86_64 and had
@@ -39,8 +40,8 @@ something outside this repo.
 `cyrius lint` reports **0 untracked deferrals and 0 warnings** across the tree, and as
 of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into fiction.
 
-**Gate counts at v1.7.0** (a next agent must not let these shrink; each is enforced):
-**758** test assertions on x86_64 and **753** on aarch64 · **79** harness properties ·
+**Gate counts at v1.7.1** (a next agent must not let these shrink; each is enforced):
+**787** test assertions on x86_64 and **782** on aarch64 · **84** harness properties ·
 **18** aarch64 boot-gate properties · 56 benchmarks (two reported-not-gated, declared) ·
 the aarch64 execution gate · the committed-lock gate.
 ⚠ **The two assertion counts differ on purpose and neither floor gates the other** — a
@@ -53,29 +54,6 @@ what it says. See [state.md](state.md) for the full current-state handoff.
 
 ## v1.7.x — found by the cyrius 6.6.6 bump
 
-- [ ] ⛔ **A refused `emergency.cred` falls back to the config key, and 1.6.18 promised it
-      would not.** The 1.6.18 CHANGELOG, the loader's own header
-      (`src/lib/emergency_auth.cyr`, above `emerg_cred_path_default`) and
-      `test_emerg_cred_file` all say a group- or world-readable credential file is
-      "REFUSED, not fallen back from", because an operator who created the file meant it
-      to be the credential. The code does the opposite. `emerg_load_cred_file_at` returns
-      **0** for absent, for refused-by-mode, for unreadable, for oversized and for empty,
-      and `_load_config_inner` (`src/main.cyr`) sets `g_emerg_hash = cfg_hash` whenever it
-      sees 0. So a 0644 file, which is logged as refused, hands the prompt to whatever
-      `emergency_password_hash` holds in the world-readable config. **The unit test cannot
-      see it**: it asserts the loader returns 0, and 0 is exactly the value that triggers
-      the fallback. That is standing rule 34's `test_reload_config_is_narrow` shape again.
-      cyrius 6.6.6 adds a route in, since an unreadable file (EIO) now returns 0 too.
-      **The fix**: the loader reports ABSENT separately from PRESENT-BUT-UNUSABLE (a state
-      getter, or a sentinel distinct from both 0 and a `Str`), `load_config` falls back only
-      on ABSENT, and an unusable file leaves **no** credential, with a console and dmesg line
-      naming the config key as ignored. With `emergency_require_auth` set, that suppresses
-      the shell on an edge refusal, which is the closed outcome 1.5.9 chose. **Gate it with
-      a rule-27 fixture:** a fourth auth image with the real record in a **0644**
-      `emergency.cred` and a *valid, known* record in `config.json`. Today the config-key
-      password authenticates. After the fix it must not, and the boot log must say the key
-      was not used. ⚠ It changes authentication behaviour on a misconfigured board, so it
-      ships in its own release with the reason stated, not folded into a toolchain bump.
 - [ ] **An entropy-starved first audit record has never been exercised.** libro 2.10.3's
       `uuid_v4` draws from `random_bytes`, i.e. `getrandom(…, 0)`, and it is **live** in
       PID 1: argonaut writes an audit record on every service start/stop/readiness change
@@ -291,6 +269,20 @@ Moved into the v1.6.1 gate line. Recording why here so the claim is not re-made:
 
 One line per release. Detail lives in [CHANGELOG.md](../../CHANGELOG.md).
 
+- **v1.7.1** — A refused `emergency.cred` no longer falls back to the config key. 1.6.18
+  promised that, but the loader returned 0 for both "absent" and "refused", and
+  `load_config` fell back on any 0. So a 0644 file was logged REFUSED while
+  `config.json`'s world-readable record answered the prompt, and the loader's own test
+  asserted the 0 that caused it. The decision now lives in `emerg_resolve_cred_at`,
+  which the suite can reach. It uses the file's record when the file loaded, the config
+  key's when the file is absent, and nothing when the file is present but unusable.
+  Harness pass 4c boots the right record in a 0644 file **and** in the key, and asserts
+  the right password does not get in. A second defect in the same loader was also
+  fixed: it returned views of one static buffer, so a same-length credential rotation
+  over SIGHUP compared equal to itself and was never announced. Both fixes were checked
+  by putting the old code back: the fallback fails 7 unit assertions and pass 4c, and
+  the aliasing fails 2. 758 → 787 assertions (753 → 782 on aarch64), 79 → 84 harness
+  properties.
 - **v1.7.0** — Toolchain 6.6.2 → **6.6.6**; sigil 3.12.18, agnostik 1.6.3, libro 2.10.3,
   argonaut 1.15.2. Three things the bump broke or exposed, all fixed. (1) 6.6.6's
   `file_read_all` returns an errno on a failed read instead of a prefix, which moved a

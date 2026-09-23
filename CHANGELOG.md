@@ -7,6 +7,160 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.7.1] — 2026-09-22
+
+**A refused `emergency.cred` no longer falls back to the config key.** 1.6.18
+promised this and did not deliver it. This release also restores the log line
+for a credential rotated over SIGHUP. Suite 758 → **787** assertions
+(753 → **782** on aarch64). Harness 79 → **84** properties.
+
+### Fixed — a refused credential file handed the prompt to config.json (since 1.6.18)
+
+1.6.18 moved the emergency credential into `/etc/kybernet/emergency.cred` at 0600,
+because `config.json` is world-readable by design. Its entry, the loader's own
+header and `test_emerg_cred_file` all said the same thing: a group- or
+world-readable credential file "is REFUSED, **not fallen back from**". An operator
+who created the file meant it to be the credential.
+
+The code fell back. `emerg_load_cred_file_at` returned **0** for an absent file
+and 0 for a refused one, and `load_config` set
+`g_emerg_hash = emergency_password_hash` whenever it saw 0. So a 0644 file was
+logged `REFUSED, chmod 600 it`, and then the world-readable config key's record
+answered the prompt. The same thing happened, with no log line at all, for an
+empty file, a whitespace-only file, an unreadable one, and (since cyrius 6.6.6's
+`file_read_all` change) one whose read fails part way.
+
+⚠ **Why nothing caught it.** The decision lived in `main.cyr`, which the unit
+suite cannot include (standing rule 34). The test beside the loader asserted that
+a refused file returns 0, and 0 is exactly the value that triggered the fallback,
+so the assertion could not fail on this defect. The harness fixture staged only a
+0600 file. This is `test_reload_config_is_narrow`'s shape again: a test that
+reads like coverage of a promise and cannot observe the promise being broken.
+
+**The fix:**
+
+- The loader records what it found: `emerg_cred_file_state()` returns
+  ABSENT, LOADED or UNUSABLE. **Only ENOENT is absent**, the same rule 1.7.0
+  applied to `config.json`. Every other outcome is UNUSABLE, and that is the
+  default the function starts from, so an exit added later fails closed. Every
+  UNUSABLE exit now logs why, on console and dmesg.
+- `emerg_resolve_cred_at(path, cfg_cred)` makes the decision in one place, in
+  `emergency_auth.cyr`, where the suite can reach it. LOADED uses the file.
+  ABSENT uses the config key, or nothing. Anything else, including any state
+  added later, yields **no credential** and never consults the key.
+- `load_config` calls it and says what happened. The three log lines that blamed
+  `emergency_password_hash` when the file was the source now name the actual
+  source.
+- `emerg_load_cred_file()`, which now had no caller, is deleted. Nothing can
+  consult the loader directly and rebuild the old `== 0` fallback.
+
+⚠ **Behaviour change, deliberate.** A board with a refused or unusable
+`emergency.cred` **and** a credential in `config.json` no longer authenticates
+with the config key. It has no credential, so an edge refusal suppresses the
+shell and the board powers off, which is the closed outcome 1.5.9 chose for "no
+usable credential". The boot log says so:
+
+```
+config: emergency.cred is group/world readable - REFUSED, chmod 600 it
+config: emergency.cred refused - there is NO emergency credential this boot
+config: emergency.cred refused - the emergency_password_hash key is NOT used as a fallback
+```
+
+The fix is the one the first line already names: `chmod 600` the file. A board
+with **no** `emergency.cred` is unaffected. The config key remains a deprecated
+fallback for exactly that case, as 1.6.18 intended.
+
+### Fixed — a credential rotated over SIGHUP was not announced (since 1.6.18)
+
+`str_new` **borrows** its buffer. The loader returned
+`str_new(&_cred_buf, n)`, so every credential it produced was a view of one
+static buffer. `reload_config` keeps the old credential and compares it with the
+new one, to log `config reload: emergency credential CHANGED`. By the time it
+compared, the reload had overwritten the bytes both values pointed at. A rotated
+record of the **same length** compared equal to itself and was never announced.
+Same parameters with a new salt and tag, which is what `scripts/mkcred.sh`
+produces, is the normal rotation, so the common case was the silent one.
+
+The loader now returns an owned copy (`str_clone`). If the copy cannot be
+allocated, the file is refused and the refusal is logged. The cost is about 300
+bytes of arena per load, once at boot and once per SIGHUP, in the arena PID 1
+never resets (standing rule 8). That is bounded by operator-initiated reloads,
+and it is the price of the comparison meaning anything.
+
+### Added — harness pass 4c: a refused credential file does not fall back
+
+A fourth auth image, `initramfs-auth-refused.cpio.gz`, holds **the same real
+record** in a **0644** `emergency.cred` and in `config.json`. The right record goes
+in the key on purpose: with a decoy there, a fallback would also fail to
+authenticate, and the pass could not tell the bug from the fix. The pass types
+the correct password and asserts that:
+
+- the file is refused (which confirms the fixture really is 0644);
+- the boot log says the config key is not a fallback;
+- the config key did not become the credential;
+- phase 6c ran and suppressed the shell. This is positive evidence, because "did
+  not authenticate" alone would also pass on a boot that died early;
+- the correct password did **not** authenticate;
+- and init did not panic.
+
+It is dropped with the other auth images when edge staging is abandoned, so a
+stale copy carrying an old `/sbin/init` cannot be graded (the 1.6.1 lesson in
+`_drop_stale_fixtures`).
+
+⚠ **Verified by injection at both levels.** In the unit suite, restoring the
+1.7.0 fallback in `emerg_resolve_cred_at` fails 7 assertions, and restoring the
+borrowed buffer fails 2. In the harness, a binary built with the 1.7.0 fallback
+fails the four pass-4c properties that depend on the fix (80 OK, 4 FAIL, exit 1).
+On that boot the log shows the file refused, then
+`emergency credential read from config.json`, then the correct password
+authenticating through the config key. That is the defect reproduced end to end.
+
+### Changed — the suite's `_write_file` sets the mode it is given
+
+`O_CREAT` applies a mode only when it creates the file, and only after the umask.
+A copy left behind by an interrupted run, or a runner with umask 077, would have
+handed the credential tests a mode they did not ask for, and those tests are
+about modes. It now unlinks, creates and then `chmod`s.
+
+### Tests — 29 new assertions
+
+`test_emerg_cred_file` asserts the state on every path, and adds four more
+unusable shapes (empty, whitespace-only, oversized, a directory) and the
+same-length rotation. The new `test_emerg_cred_resolve` covers the decision
+itself: absent with and without a key, a 0600 file against a decoy key, and a
+0644 file, an empty file and a directory against the **right** key. The config
+value is produced by `_cfg_str` over a parsed JSON document, the way
+`load_config` produces it (standing rule 46).
+
+### Changed — `scripts/mkcred.sh` tells operators to use the file
+
+It still told operators to paste the record into `config.json`, the world-readable
+location 1.6.18 deprecated. Its instructions now write
+`/etc/kybernet/emergency.cred` under `umask 077`, and say that a group- or
+world-readable file is refused and **not** fallen back from. Only stderr changed:
+stdout is still the bare record, which is what CI's self-test and any operator
+script consume. The printed command was run, and it produced a mode-0600 file.
+
+### Verification
+
+| gate | result |
+|---|---|
+| `cyrius test src/test.cyr` | **787 passed, 0 failed** |
+| `bash scripts/aarch64-exec-gate.sh` | **782** assertions, 0 failed; 5/5 syscall probes |
+| `bash qemu/boot-test.sh` (`HARNESS_STRICT=1`, KVM) | **84/84**, 0 skipped |
+| the same harness, binary built with the 1.7.0 fallback | **80 OK / 4 FAIL**, exit 1; all four failures in pass 4c |
+| `bash qemu/boot-test-aarch64.sh` (TCG) | **18/18**; kybernet span 1056 ms (budget 4000) |
+| `bash scripts/bench-history.sh` | 56 benchmarks, **0 regressions ≥15%**, 4 improvements |
+| `bash scripts/verify-lock.sh` | both halves OK against HEAD (no dependency or lock change) |
+| fmt `--check` / lint / vet over CI's globs; shell parse; security scan | clean |
+| CI's credential-generator self-test, replayed from `ci.yml` | passes (`mkcred.sh`'s instructions changed; see above) |
+
+Binary: x86_64 704,776 → **709,928** B; aarch64 2,166,736 → **2,167,800** B. x86_64
+DCE actually removes dead code, so `str_clone` and the new logging paths, which were
+dead before, now count; aarch64 DCE NOP-fills them either way.
+
+---
+
 ## [1.7.0] — 2026-09-22
 
 **Toolchain 6.6.2 → 6.6.6, and every dependency at its latest tag.** The bump

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # mkcred.sh — generate an emergency-shell credential for
-# /etc/kybernet/config.json.
+# /etc/kybernet/emergency.cred (mode 0600).
 #
 # Until 1.5.9 the credential was an unsalted SHA-256 digest and provisioning it
 # was `printf 'pw' | sha256sum`. That is no longer true, and there was no other
@@ -12,8 +12,10 @@
 #   ./scripts/mkcred.sh --check '<record>'   # verify a record's shape
 #   T=3 M=32768 ./scripts/mkcred.sh          # override the cost parameters
 #
-# Output is one line, the value for "emergency_password_hash":
+# Output is one line, the credential record:
 #   v1$<t>$<m>$<p>$<salt-hex>$<tag-hex>
+# It belongs in /etc/kybernet/emergency.cred at 0600 (1.6.18). The
+# "emergency_password_hash" key in config.json is the deprecated place for it.
 #
 # WHY OPENSSL AND NOT A COMPILED TOOL
 # -----------------------------------
@@ -252,10 +254,19 @@ echo "$record"
 
 cat >&2 <<EOF
 
-Put this in /etc/kybernet/config.json:
+Install it as /etc/kybernet/emergency.cred, readable by root only:
 
-  "emergency_require_auth": true,
-  "emergency_password_hash": "$record"
+  (umask 077; printf '%s\n' '$record' > /etc/kybernet/emergency.cred)
+
+and require authentication in /etc/kybernet/config.json:
+
+  "emergency_require_auth": true
+
+kybernet REFUSES a group- or world-readable emergency.cred, and a refused file
+leaves NO credential: it does not fall back to config.json (1.7.1). The
+"emergency_password_hash" config key is used only when emergency.cred is absent,
+and config.json is world-readable, so a record there can be copied and attacked
+offline by any local user.
 
 kybernet logs the parameters (never the salt or tag) at boot, so a typo shows
 up in dmesg long before the night the emergency shell is needed.

@@ -30,7 +30,7 @@ argonaut-side defects reachable from kybernet's boot path.
 
 What the split actually buys is that the service-management logic is
 independently tested (971 assertions in argonaut's own suite at 1.15.2, against
-kybernet's 758) and independently versioned, so a change there is reviewed and
+kybernet's 787) and independently versioned, so a change there is reviewed and
 gated on its own before kybernet pins the tag. That is real value — it is just
 not fault isolation.
 

@@ -45,7 +45,7 @@ Requires Cyrius 6.6.6 (`cyriusly install 6.6.6 && cyriusly use 6.6.6`).
 ```sh
 cyrius deps                                # Resolve deps from cyrius.cyml into lib/
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet   # Build (DCE recommended)
-cyrius test src/test.cyr                   # Run 758 tests
+cyrius test src/test.cyr                   # Run 787 tests
 cyrius bench src/bench.cyr                 # Run benchmarks
 ```
 
@@ -53,11 +53,11 @@ cyrius bench src/bench.cyr                 # Run benchmarks
 
 | Module | Lines | What |
 |--------|-------|------|
-| main | 2141 | Boot sequence, argonaut init, event loop, emergency shell, shutdown |
+| main | 2157 | Boot sequence, argonaut init, event loop, emergency shell, shutdown |
 | svc_config | 1028 | JSON → ServiceDefinition; security, limits and edge blocks; config-read classification |
 | edge_boot | 777 | Verified-boot pre-flight: TPM PCR, dm-verity verification |
+| emergency_auth | 687 | Argon2id credential: record format, parameter bounds, legacy migration, file-vs-key source |
 | cgroup | 623 | Cgroup v2 controllers, paths, limits, move, kill, teardown |
-| emergency_auth | 577 | Argon2id credential: record format, parameter bounds, legacy migration |
 | notify | 517 | sd_notify socket (READY, STOPPING, WATCHDOG, STATUS, RELOADING) |
 | seccomp | 516 | Seccomp BPF filter builder + loader |
 | privdrop | 408 | Capability dropping + no_new_privs + agnostik bridge |
@@ -75,7 +75,7 @@ cyrius bench src/bench.cyr                 # Run benchmarks
 | console_io | 77 | Bounded line read, integer formatting — testable helpers moved out of main |
 | cmdline | 56 | `/proc/cmdline` token scanning |
 
-**8,740 lines of Cyrius** across `main.cyr` + 20 modules.
+**8,866 lines of Cyrius** across `main.cyr` + 20 modules.
 
 ## Features
 
@@ -109,20 +109,24 @@ cyrius bench src/bench.cyr                 # Run benchmarks
   real `/dev/console` with terminal echo suppressed, on a bounded wait; a
   rejection halts rather than rebooting into the condition that caused it. The
   credential is **Argon2id** in a self-describing record that carries its own
-  cost parameters (1.5.9):
+  cost parameters (1.5.9), kept in `/etc/kybernet/emergency.cred` at mode **0600**
+  (1.6.18), with `"emergency_require_auth": true` in `config.json`:
 
   ```
-  "emergency_require_auth": true,
-  "emergency_password_hash": "v1$2$19456$1$<salt-hex>$<tag-hex>"
+  v1$2$19456$1$<salt-hex>$<tag-hex>
   ```
 
-  Generate one with `./scripts/mkcred.sh` (needs OpenSSL 3.2+, whose Argon2id
-  is byte-identical to sigil's). Parameters are validated at config-load time
-  and out-of-range values are **rejected, never clamped** — clamping a
-  verification parameter derives a different tag and would lock the board out
-  permanently. The pre-1.5.9 unsalted 64-hex SHA-256 digest still verifies for
-  one release; the two formats are provably disjoint, so a new record can never
-  be downgraded onto the old path.
+  A group- or world-readable `emergency.cred` is **refused**, and a refused file
+  leaves **no** credential: it never falls back to `config.json` (1.7.1). The
+  `emergency_password_hash` config key is still read when the file is absent, but
+  `config.json` is world-readable, so a record there can be copied and attacked
+  offline. Generate one with `./scripts/mkcred.sh` (needs OpenSSL 3.2+, whose
+  Argon2id is byte-identical to sigil's); it prints the command that installs it.
+  Parameters are validated at config-load time and out-of-range values are
+  **rejected, never clamped** — clamping a verification parameter derives a
+  different tag and would lock the board out permanently. The pre-1.5.9 unsalted
+  64-hex SHA-256 digest still verifies for one release; the two formats are
+  provably disjoint, so a new record can never be downgraded onto the old path.
 - **Audit logging** — a SHA-256 hash-linked chain via libro, maintained by
   argonaut. Note it is **in-memory only**: kybernet makes no direct `audit_*`
   call and never enables `audit_persist`, so the chain does not survive a
@@ -132,7 +136,7 @@ cyrius bench src/bench.cyr                 # Run benchmarks
 - **Data-driven mount table** — not hardcoded per-mount calls
 - **sd_notify compatible** — READY, STOPPING, WATCHDOG, STATUS, RELOADING messages via epoll
 - **String builder** for path construction and logging
-- **758 tests** (753 on aarch64 — the seccomp allowlist is arch-specific), 56 benchmarks
+- **787 tests** (782 on aarch64 — the seccomp allowlist is arch-specific), 56 benchmarks
 
 ## Dependencies
 
@@ -171,18 +175,21 @@ boot. With the working lane moved onto the caller's arena it costs +25 KB.
 ## Testing
 
 ```sh
-cyrius test src/test.cyr            # 758 assertions (753 on aarch64)
+cyrius test src/test.cyr            # 787 assertions (782 on aarch64)
 bash scripts/bench-history.sh       # 56 benchmarks, load-tolerant regression gate
 bash qemu/boot-test.sh              # PID-1 boot harness, x86_64 (needs KVM)
 bash qemu/boot-test-aarch64.sh      # PID-1 boot harness, aarch64 (TCG, no KVM)
 ```
 
 The QEMU harness is the gate that matters: it boots kybernet as real PID 1 and
-asserts 79 properties across five passes — the boot sequence, the reactor
+asserts 84 properties across five passes — the boot sequence, the reactor
 (that it sleeps rather than spins), dm-verity verification against a real
 image pair on virtio disks, and the emergency-auth prompt with a password fed
 over the serial line. Pass 4 runs against **both** credential formats: the
-deprecated unsalted SHA-256 digest, and an Argon2id `v1` record.
+deprecated unsalted SHA-256 digest, and an Argon2id `v1` record. It also boots a
+group-readable `emergency.cred` with the right record in `config.json` as well,
+and asserts that the correct password does **not** get in: a refused credential
+file leaves no credential, and the config key is never its fallback.
 
 The aarch64 harness asserts 18 properties and exists because **a cross-build
 exiting 0 is not evidence**. It boots `kybernet-aarch64` as PID 1 under TCG —

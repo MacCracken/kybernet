@@ -311,17 +311,28 @@ fn _load_config_inner(want_services) {
     # key is announced as ignored — silently preferring one over the other is
     # how an operator ends up locked out by a record they thought they had
     # replaced.
-    g_emerg_hash = emerg_load_cred_file();
+    #
+    # ⚠ WHICH ONE IS DECIDED IN emerg_resolve_cred (emergency_auth.cyr). 1.7.1.
+    # This used to test `emerg_load_cred_file() == 0` and fall back to the
+    # config key, but 0 also meant "present and REFUSED", so a group-readable
+    # emergency.cred handed the prompt to config.json's record, against the
+    # promise above. The config key now answers only when the file is ABSENT.
     var cfg_hash = _cfg_str(root, "emergency_password_hash", 0);
-    if (g_emerg_hash != 0) {
+    g_emerg_hash = emerg_resolve_cred(cfg_hash);
+    var esrc = emerg_cred_source();
+    if (esrc == EMERG_SRC_FILE && cfg_hash != 0) {
+        klog("config: emergency.cred present - the emergency_password_hash key is IGNORED");
+        kmsg("kybernet: config: emergency.cred takes precedence over emergency_password_hash");
+    }
+    if (esrc == EMERG_SRC_CONFIG) {
+        klog("config: emergency credential read from config.json - move it to /etc/kybernet/emergency.cred (0600)");
+    }
+    if (esrc == EMERG_SRC_REFUSED) {
+        # The loader has said why the file was refused; this says what that means.
+        klog("config: emergency.cred refused - there is NO emergency credential this boot");
+        kmsg("kybernet: config: emergency.cred refused, no emergency credential");
         if (cfg_hash != 0) {
-            klog("config: emergency.cred present - the emergency_password_hash key is IGNORED");
-            kmsg("kybernet: config: emergency.cred takes precedence over emergency_password_hash");
-        }
-    } else {
-        g_emerg_hash = cfg_hash;
-        if (g_emerg_hash != 0) {
-            klog("config: emergency credential read from config.json - move it to /etc/kybernet/emergency.cred (0600)");
+            klog("config: emergency.cred refused - the emergency_password_hash key is NOT used as a fallback");
         }
     }
 
@@ -340,8 +351,13 @@ fn _load_config_inner(want_services) {
     # match and then halt. Both are closed, but only one is honest.
     if (g_emerg_hash != 0) {
         if (emerg_cred_usable(g_emerg_hash) == 0) {
-            klog("config: emergency_password_hash is malformed - credential REJECTED");
-            kmsg("kybernet: config: malformed emergency_password_hash, credential rejected");
+            if (esrc == EMERG_SRC_FILE) {
+                klog("config: emergency.cred holds a malformed record - credential REJECTED");
+                kmsg("kybernet: config: malformed record in emergency.cred, credential rejected");
+            } else {
+                klog("config: emergency_password_hash is malformed - credential REJECTED");
+                kmsg("kybernet: config: malformed emergency_password_hash, credential rejected");
+            }
             g_emerg_hash = 0;
         } else {
             klog2("config: emergency credential: ", str_data(emerg_cred_describe(g_emerg_hash)));
@@ -360,7 +376,7 @@ fn _load_config_inner(want_services) {
         # already failed a boot step. `drop_to_emergency` suppresses the shell
         # in that state; this is where it can still be fixed with one edit.
         if (g_emerg_hash == 0) {
-            klog("config: WARNING require_auth is set but no usable emergency_password_hash");
+            klog("config: WARNING require_auth is set but there is no usable emergency credential");
             klog("config: the emergency shell will be SUPPRESSED - no password can authenticate");
             kmsg("kybernet: config: emergency_require_auth set with no usable credential");
         }
@@ -2003,7 +2019,7 @@ fn kybernet_run() {
             klog("edge refusal: emergency shell requires authentication");
             drop_to_emergency();
         } else {
-            klog("edge refusal: no emergency_password_hash configured - NOT opening a root shell");
+            klog("edge refusal: no usable emergency credential - NOT opening a root shell");
             kmsg("kybernet: edge refusal, no emergency auth configured - shell suppressed");
         }
         klog("FATAL: refusing to continue boot without edge prerequisites");
