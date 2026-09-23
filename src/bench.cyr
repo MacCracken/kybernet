@@ -10,6 +10,7 @@ include "src/lib/cmdline.cyr"
 include "src/lib/log.cyr"
 include "src/lib/console.cyr"
 include "src/lib/console_io.cyr"
+include "src/lib/read_whole.cyr"
 include "src/lib/termios.cyr"
 include "src/lib/signals.cyr"
 include "src/lib/reaper.cyr"
@@ -1122,6 +1123,7 @@ fn arena_reset_clean() {
     alloc_init();
     _default_allocator = 0;
     _cg_cache_reset_all();
+    _mount_cache_forget();
     return 0;
 }
 

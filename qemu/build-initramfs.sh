@@ -622,6 +622,12 @@ cat > "${INITRAMFS_DIR}/etc/kybernet/config.json" << 'CFGEOF'
   ]
 }
 CFGEOF
+# ⚠ PADDED PAST THE OLD 16 KiB LIMIT (1.7.8). kybernet refused any config.json over
+# 16,384 bytes until 1.7.8, so every boot of this image (and of the quiet image, built
+# from it) proves a larger one loads, and pass 1 checks the size kybernet reports.
+# kybernet ignores top-level keys it does not know; "comment" is one.
+_PAD="$(printf 'kybernet ignores this key; it makes this file larger than 16 KiB. %.0s' $(seq 1 200))"
+sed -i "1a\\  \"comment\": \"${_PAD}\"," "${INITRAMFS_DIR}/etc/kybernet/config.json"
 # Counted, not hardcoded — it said "2 services" from 1.5.0 until 1.6.1
 # while staging nine, which is the kind of stale number that makes a log
 # line worse than no log line.

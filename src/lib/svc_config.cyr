@@ -63,8 +63,13 @@ enum CfgRead {
     CFG_READ_TOO_BIG = 4;
 }
 
-# `n` is file_read_all's return for a read of `cap + 1` bytes: the headroom
-# byte is what lets a full read be told apart from a truncated one.
+# The config read: the buffer's first size and the largest config.json accepted (1.7.8;
+# the limit was 16,384 bytes before). main.cyr has the reasons for both numbers.
+var CFG_FIRST_CAP = 16384;
+var CFG_MAX_BYTES = 262144;
+
+# `n` is read_whole_into's return with `cap` as its ceiling (1.7.8), which is `cap + 1`
+# for a file larger than `cap`, so a full read is told apart from a truncated one.
 fn cfg_read_class(n, cap) {
     if (n == 0 - ENOENT) { return CFG_READ_ABSENT; }
     if (n < 0) { return CFG_READ_UNREADABLE; }

@@ -1,6 +1,6 @@
 # Kybernet Roadmap
 
-**Current: v1.7.7** — [CHANGELOG.md](../../CHANGELOG.md) is the record of what each
+**Current: v1.7.8** — [CHANGELOG.md](../../CHANGELOG.md) is the record of what each
 release actually did. This file carries only what is **not** done; a completed item is
 deleted from here and summarised in History below, never left ticked.
 
@@ -41,9 +41,9 @@ something outside this repo.
 `cyrius lint` reports **0 untracked deferrals and 0 warnings** across the tree, and as
 of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into fiction.
 
-**Gate counts at v1.7.7** (a next agent must not let these shrink; each is enforced):
-**855** test assertions on x86_64 and **850** on aarch64 · **120** harness properties ·
-**174** aarch64 boot-gate properties · 56 benchmarks (two reported-not-gated, declared) ·
+**Gate counts at v1.7.8** (a next agent must not let these shrink; each is enforced):
+**876** test assertions on x86_64 and **871** on aarch64 · **121** harness properties ·
+**175** aarch64 boot-gate properties · 56 benchmarks (two reported-not-gated, declared) ·
 the aarch64 execution gate · the committed-lock gate.
 ⚠ **The two assertion counts differ on purpose and neither floor gates the other** — a
 seccomp allowlist is arch-specific, so six assertions are x86-only and one aarch64-only.
@@ -64,12 +64,6 @@ what it says. See [state.md](state.md) for the full current-state handoff.
       time-mix fallback kept for the pre-5.6 EINVAL. The kernel bounds the wait on 5.4+,
       so this is a boot delay rather than a hang, and the aarch64 gate now asserts both
       that the boot was starved and that the span budget held.
-- [ ] **Adopt `file_read_whole` (cyrius 6.6.6) and retire the 16 KiB config cap.**
-      `_load_config_inner` reads into a fixed 16,385-byte buffer and refuses anything
-      larger (`CFG_READ_TOO_BIG`). That refusal is *correct*, and replacing it is a
-      behaviour change, so it needs its own bite with a test that feeds a >16 KiB config.
-      `src/lib/mount.cyr` (`/proc/self/mounts` into 8,192 bytes) has the same shape and the
-      same opportunity: a machine with many mounts is exactly where 8,192 runs out.
 - [ ] **Upstream (cyrius, filed by the user, not from here): the mixed-return diagnostic
       misfires on a nullary `None()`.** A fn returning `Some(v)` on one path and `None()` on
       another warns that "the caller reads this error as its TAG". `lib/tagged.cyr` and the
@@ -105,6 +99,13 @@ method, not about the code.
 
 ## v1.6.x — code that does nothing, and docs that say it does
 
+- [ ] **Every config load, SIGHUP included, costs about 4 bytes of arena per config
+      byte.** Found at 1.7.8, measured: `json_v_parse_buf` allocates 35,904 bytes to parse
+      an 8,983-byte config, and PID 1's arena is never reset. 1.6.14 HIGH-5
+      took the read buffer and the service definitions out of the reload, not the tree.
+      The 256 KiB config limit bounds one reload at about 1 MiB. The fix is a parse the
+      reload can release: `bayan_json_v_parse_ctx_a` into an `arena_new` region, reset
+      once the scalars and the credential are copied out.
 - [ ] **Two more benchmarks measure string-literal layout: `hashmap(3 set+4 get/has)`
       and `agent_config(new+get+set)`.** Found at 1.7.7. An unused string literal in
       `src/bench.cyr` moves `agent_config` from 110 to 131–134 ns/op and `hashmap` from
@@ -191,7 +192,9 @@ Moved into the v1.6.1 gate line. Recording why here so the claim is not re-made:
       poll — `2026-08-24-sys-ioctl-wrapper-missing.md`, behind `src/lib/termios.cyr` and
       `_read_line_fd`'s `sleep_ms` poll loop. And `fl_alloc`'s unchecked `_fl_mmap`
       return in two places (`freelist.cyr:404-406`, `:231-241`), which is why sigil's
-      own `if (mem == 0)` guards are dead code.
+      own `if (mem == 0)` guards are dead code. And `file_read_whole` (io.cyr) copies into
+      its growth `alloc()` unchecked, so at exhaustion it writes through NULL (traced at
+      1.7.8, standing rule 53).
       (The socket-wrapper filing is **closed and the follow-through has SHIPPED** —
       `sys_socket`/`sys_bind`/`sys_recvfrom` landed upstream and `notify.cyr`'s
       hand-rolled per-arch `enum SockSysNr` was deleted at **v1.6.3**, not v1.6.2 as
@@ -207,6 +210,14 @@ Moved into the v1.6.1 gate line. Recording why here so the claim is not re-made:
 
 One line per release. Detail lives in [CHANGELOG.md](../../CHANGELOG.md).
 
+- **v1.7.8** — config.json may be up to 256 KiB; over 16 KiB it was refused. The roadmap
+  named the stdlib's `file_read_whole` for this, and measuring it ruled it out for PID 1:
+  65,544 bytes allocated per call in an arena that is never reset, and on `/dev/zero` a
+  doubling that ends in a write through NULL. `read_whole_into` keeps one buffer per call
+  site and grows it to a ceiling, and a larger file is still refused. The mount-table read
+  moves onto it too, 8 KiB → 1 MiB, where a longer table had been cut short without a
+  word. Both harness configs are now over 16 KiB, and both gates go red with the old limit
+  put back.
 - **v1.7.7** — argonaut 1.15.3: on a desktop, aethersafha now depends on the `agnos-init`
   oneshot the kybernet package has shipped since 1.7.6, so its socket directories exist
   before it starts. That closes the `setup_directories()` port. A contract test pins

@@ -357,6 +357,12 @@ cat > "$ROOT/etc/kybernet/config.json" << 'CFGEOF'
   ]
 }
 CFGEOF
+# ⚠ PADDED PAST THE OLD 16 KiB LIMIT (1.7.8), as the x86 image is: kybernet refused any
+# config.json over 16,384 bytes until 1.7.8, so pass 1 (and the quiet pass, whose root
+# is a copy of this one) boots a larger one, and pass 1 checks the size kybernet
+# reports. kybernet ignores top-level keys it does not know; "comment" is one.
+_PAD="$(printf 'kybernet ignores this key; it makes this file larger than 16 KiB. %.0s' $(seq 1 200))"
+sed -i "1a\\  \"comment\": \"${_PAD}\"," "$ROOT/etc/kybernet/config.json"
 # kyb-env's env_files entry (1.7.5), the same file the x86 image stages.
 cat > "$ROOT/etc/kybernet/kyb-env.env" << 'ENVEOF'
 # kyb-env's environment file
@@ -798,6 +804,17 @@ fi
 # the syscall numbers, the seccomp allowlist and the struct layouts differ.
 _prop "config: services parsed: 24" \
     'kybernet: config: services parsed: 24([^0-9]|$)' "$OUT1"
+# 1.7.8: the config above is padded past the old 16 KiB limit. Check the size kybernet
+# itself reports, so a fixture that shrank back under 16 KiB fails here rather than
+# proving nothing.
+_cfg_bytes="$(grep -aoE 'loaded config: /etc/kybernet/config.json, bytes: [0-9]+' "$OUT1" | head -1 | grep -oE '[0-9]+$' || true)"
+if [ -n "$_cfg_bytes" ] && [ "$_cfg_bytes" -gt 16384 ]; then
+    echo "  OK: loaded a ${_cfg_bytes}-byte config.json, over the old 16,384-byte limit"
+else
+    echo "  FAIL: config.json loaded at '${_cfg_bytes:-?}' bytes; this pass needs one over 16,384"
+    grep -aE 'config' "$OUT1" | head -4 | sed 's/^/        /' || true
+    fail=1
+fi
 _prop "completed (oneshot): kyb-dep" 'completed \(oneshot\): kyb-dep' "$OUT1"
 _prop "completed (oneshot): kyb-svc, after its dependency" 'completed \(oneshot\): kyb-svc' "$OUT1"
 _prop "started: kyb-live" 'started: kyb-live' "$OUT1"

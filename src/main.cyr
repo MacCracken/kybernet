@@ -25,6 +25,7 @@ include "src/lib/cmdline.cyr"
 include "src/lib/log.cyr"
 include "src/lib/console.cyr"
 include "src/lib/console_io.cyr"
+include "src/lib/read_whole.cyr"
 include "src/lib/termios.cyr"
 include "src/lib/signals.cyr"
 include "src/lib/reaper.cyr"
@@ -139,49 +140,30 @@ var g_notify_badpid = 0;        # MAINPID malformed, or outside the sender's cgr
 # on a reload that would replace a running board's services, boot mode and
 # edge policy wholesale, and at boot it would quietly turn an edge board into
 # a normal one. Callers decide; neither may confuse the two.
-# Scratch for the config read. GLOBAL scope, so [2049] is 2049 SLOTS = 16392
-# BYTES — the 16384 cap plus the headroom byte, rounded up to a slot. See
-# CLAUDE.md standing rule 2 for why that is not [16385].
+# The config read buffer, { ptr, cap } for read_whole_into, kept for the life of the
+# process. GLOBAL scope, so [2] is 2 SLOTS = 16 bytes.
 #
-# ⚠ ALLOCATED ONCE AND CACHED, NOT PER CALL. 1.6.14 HIGH-5.
+# ⚠ KEPT, NOT ALLOCATED PER CALL. 1.6.14 HIGH-5: this was `alloc(cap + 1)` on every
+# call, in the arena PID 1 never resets, so `kill -HUP 1` (deliverable to init
+# precisely BECAUSE setup_signals blocks it) leaked 16,392 bytes a shot, even with no
+# config file at all. A config-management agent HUPing once a minute cost ~77 MB/day.
+# And not a BSS array either: a 16 KiB static shifted binary layout enough to move
+# `is_mounted` 15-19% on the bench gate (1.6.14, isolated deliberately).
 #
-# This was `alloc(cap + 1)` on every invocation, in the arena PID 1 never
-# resets — so `kill -HUP 1` (deliverable to init precisely BECAUSE
-# setup_signals blocks it) leaked 16,392 bytes a shot, and did so even with no
-# config file at all, since the alloc preceded the read. Measured ~12,500
-# reloads/s of CPU, i.e. the first 256 MiB chunk gone in under half a second.
-# A config-management agent HUPing once a minute cost ~77 MB/day in a process
-# that runs for months.
+# ⚠ THE LIMIT IS 256 KiB, NOT 16 KiB, SINCE 1.7.8 (CFG_MAX_BYTES, in svc_config.cyr
+# so the unit suite reads the same number). The buffer starts at 16 KiB and doubles
+# only for a larger file. The harness's 25 fixtures already took 8,983 bytes. The
+# limit stays, and stays a refusal: a config.json that points at /dev/zero, or a
+# runaway file, must be refused rather than read until PID 1 runs out of memory
+# (read_whole.cyr has the measurement). 256 KiB is about 700 services at the
+# harness's density. It also bounds the parse, which costs about 4 bytes of arena per
+# config byte on every load, SIGHUP included (35,904 bytes for an 8,983-byte config,
+# measured).
 #
-# ⚠ NOT A `var buf[2049]` STATIC, AND THE REASON IS MEASURED. The obvious fix
-# is a BSS array, and it works — but it grows static data by 16,392 bytes, and
-# that shifted binary layout enough to regress `is_mounted` by 15-19% on the
-# bench gate. Isolated deliberately: shrinking just this buffer, with every
-# other 1.6.14 change in place, made that regression vanish. `is_mounted` scans
-# a 2 KiB table and is the most cache-sensitive benchmark in the suite (see
-# roadmap.md), so 16 KB of new BSS is enough to move it.
-#
-# Allocating ONCE and caching the pointer costs nothing per reload, keeps BSS
-# where it was, and still closes the unchecked-`alloc()` hazard — the old code
-# handed `file_read_all` a pointer it never tested, which at real mmap
-# exhaustion is a write through NULL in PID 1.
-#
-# Standing rule 8 note: this caches an arena pointer in a global, which is
-# unsafe across `alloc_reset()`. PID 1 never resets (lifetime = process) and
-# neither the test nor the bench binary calls load_config, so nothing can
-# observe a stale pointer. If that ever changes, `_cfg_read_buf_p` must be
-# cleared alongside the cgroup cache in `arena_reset_clean()`.
-var _cfg_read_buf_p = 0;
-
-fn _cfg_read_buf() {
-    if (_cfg_read_buf_p == 0) {
-        # 16384 cap + 1 headroom byte. Checked: alloc() returns 0 on mmap
-        # failure (alloc.cyr:188), and handing a NULL to file_read_all is the
-        # unchecked-return hazard this fix also closes.
-        _cfg_read_buf_p = alloc(16385);
-    }
-    return _cfg_read_buf_p;
-}
+# Standing rule 8 note: this caches an arena pointer in a global, which is unsafe
+# across `alloc_reset()`. PID 1 never resets, and neither the test nor the bench
+# binary calls load_config. If that changes, clear `_cfg_rb` in `arena_reset_clean()`.
+var _cfg_rb[2];
 
 # `want_services` = 0 skips svc_defs_from_json entirely. SIGHUP needs the
 # scalar values and explicitly refuses to apply service definitions, so
@@ -194,18 +176,14 @@ fn load_config() { return _load_config_inner(1); }
 
 fn _load_config_inner(want_services) {
     _cfg_saw_services = 0;
-    # One byte of headroom so a full read is distinguishable from a truncated
-    # one. `file_read_all` stops at maxlen and returns maxlen with no error
-    # (io.cyr:471-476), so without this a config that outgrew the buffer came
-    # back as invalid JSON and took the defaults path — a silent 16 KiB
-    # cliff with no diagnostic.
-    var cap = 16384;
-    var buf = _cfg_read_buf();
-    if (buf == 0) {
-        klog("config: could not allocate the config read buffer - using defaults");
-        return argonaut_config_default();
-    }
-    var n = file_read_all("/etc/kybernet/config.json", buf, cap + 1);
+    # A file over the limit comes back as `cap + 1`, never as a truncated prefix: before
+    # 1.6.0 a config that outgrew the buffer came back as invalid JSON and took the
+    # defaults path, a silent cliff with no diagnostic. A buffer that cannot grow is
+    # -ENOMEM, which is UNREADABLE, so a SIGHUP then keeps the running config (1.7.8;
+    # an allocation failure used to take the defaults path).
+    var cap = CFG_MAX_BYTES;
+    var n = read_whole_into(&_cfg_rb, "/etc/kybernet/config.json", CFG_FIRST_CAP, cap);
+    var buf = read_whole_buf(&_cfg_rb);
     # ⚠ ONLY ENOENT MEANS "ABSENT". 1.7.0. Before, `n <= 0` took the defaults path for every
     # failure, and since cyrius 6.6.6 that includes a read which fails half way; on SIGHUP the
     # defaults path applies the DEFAULT timeouts over the live ones. See cfg_read_class.
@@ -225,12 +203,13 @@ fn _load_config_inner(want_services) {
         return 0;
     }
     if (rc == CFG_READ_TOO_BIG) {
-        klog("config: /etc/kybernet/config.json exceeds 16384 bytes - REFUSING to parse a truncated config");
-        kmsg("kybernet: config exceeds 16384 bytes, refusing to parse a truncated config");
+        klog2("config: /etc/kybernet/config.json is over the size limit - REFUSING it. Limit in bytes: ",
+          _u64_str(cap));
+        kmsg("kybernet: config over the size limit, refusing it");
         return 0;
     }
 
-    klog("loaded config: /etc/kybernet/config.json");
+    klog2("loaded config: /etc/kybernet/config.json, bytes: ", _u64_str(n));
 
     # 1.5.0: parse the full VALUE TREE, not the flat key/value pairs.
     # `json_parse` only yields top-level scalars, which is why services

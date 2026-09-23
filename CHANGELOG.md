@@ -7,6 +7,132 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.7.8] — 2026-09-23
+
+**config.json may be up to 256 KiB. Over 16 KiB it was refused.** The roadmap named
+the stdlib's `file_read_whole` for this. Measured, it is unsafe in PID 1, so kybernet
+reads through a bounded reader of its own, `src/lib/read_whole.cyr`. The mount-table
+read moves onto the same reader, 8 KiB → 1 MiB. Suite 855 → **876** assertions
+(850 → **871** on aarch64); harness 120 → **121**, aarch64 boot gate 174 → **175**.
+
+### Changed — the config limit is 256 KiB
+
+`_load_config_inner` read into a 16,385-byte buffer and refused any larger config. The
+harness's own 25 fixtures took 8,983 bytes, more than half of that.
+
+It now reads with `read_whole_into` into a buffer kept for the life of the process. The
+buffer starts at 16 KiB, doubles only for a larger file, and stops at 256 KiB
+(`CFG_MAX_BYTES`, in `svc_config.cyr`, so the unit suite tests the same number). A
+larger file is refused as before, and the message now gives the limit:
+`config: /etc/kybernet/config.json is over the size limit - REFUSING it. Limit in
+bytes: 262144`. The load line gives the size (`loaded config:
+/etc/kybernet/config.json, bytes: N`), which both harnesses read.
+
+The limit stays because the parse costs arena on every load. bayan's value tree takes
+about 4 bytes per config byte (35,904 bytes for the 8,983-byte config, measured), a
+SIGHUP is a load, and PID 1's arena is never reset. At 256 KiB one reload costs at
+most about 1 MiB. At the harness's density 256 KiB is about 700 services.
+
+One behaviour changes beyond the limit. A buffer that cannot be allocated used to
+take the defaults path, as if there were no file. It now reads as `-ENOMEM`, which
+classifies as UNREADABLE: boot takes the defaults loudly, as for any unusable file,
+and a SIGHUP keeps the running config rather than applying default timeouts to it.
+
+### Why not `file_read_whole` (standing rule 53)
+
+- **It allocates a new buffer on every call**: 65,544 bytes, measured, even for a
+  2-byte file. The arena is never reset, so on the SIGHUP path that is a 64 KiB leak
+  per reload, four times the one 1.6.14 HIGH-5 removed.
+- **It has no ceiling.** Pointed at `/dev/zero` under `ulimit -v 2000000`, it doubled
+  its buffer to 512 MiB and could not map the next 1 GiB. `alloc()` returned 0, and the
+  growth copy wrote through it: `SIGSEGV {si_addr=NULL}`, traced under
+  `qemu-x86_64 -strace`. In PID 1 that is a kernel panic, from a config.json that is a
+  symlink to `/dev/zero` or any runaway file. The old fixed buffer refused the same file
+  with a readable error.
+
+`read_whole_into` keeps one buffer per call site, as a two-slot global `{ ptr, cap }`.
+It opens before it allocates, so a missing file costs nothing, and it checks every
+allocation. It grows by doubling up to the ceiling, so a call site allocates at most
+about twice its ceiling over the life of the process and nothing on a read that fits.
+At the ceiling it reads one more byte into a local, so a file of exactly the ceiling is
+accepted and a larger one comes back as `ceiling + 1`, never as a prefix.
+`cfg_read_class(n, ceiling)` classifies that as TOO_BIG.
+
+### Changed — the mount table is not cut at 8 KiB
+
+`_mount_cache_load` allocated 8,192 bytes on every load after an invalidation, and
+every successful mount invalidates. It read `/proc/self/mounts` with `file_read_all`
+capped at 8,192, so a longer table was scanned as far as 8 KiB and a mount past that
+reported "not mounted", with nothing said. At phase 7 that fails the `/proc`, `/sys`
+or `/dev` stage; at phase 2 it tries to mount again. This machine's table is 27 lines in
+2,481 bytes, so 8 KiB is about 90 mounts. The table now goes through the same reader,
+into a kept buffer that grows to 1 MiB, and a table past that is logged.
+`_mount_cache_forget()` clears the kept pointer for the bench's arena reset (standing
+rule 8).
+
+### Tests
+
+- `test_read_whole` (19): absent, a directory, empty, exactly the ceiling, one byte
+  over, far over, and `/dev/zero`; that growth kept every byte in place and stopped at
+  the ceiling; that a read which fits allocates nothing; and at the production numbers,
+  that a 20,000-byte config is accepted, a config of exactly 256 KiB is too, and one
+  byte more is refused.
+- `test_cfg_read_class`: its three real-producer assertions now go through
+  `read_whole_into`, load_config's reader (standing rule 46).
+- `test_mount_table` (+2): after an invalidation the table is read again and
+  allocates nothing.
+
+Checked by putting each defect back in a copy of the tree: a new buffer on every call
+(2 failures), a silent prefix at the ceiling (4), the old 16 KiB limit (3), the old
+mount-cache load (1), and a growth that drops the copy (2).
+
+### Harness
+
+Both harness configs are padded past 16 KiB with a top-level `"comment"` key, which
+kybernet ignores: 22,200 bytes on x86 and 18,290 on aarch64. The quiet images are
+built from them and inherit it. Pass 1 on each arch checks that the size kybernet
+reports is over 16,384, so a fixture that shrank back under the old limit would fail
+there rather than prove nothing.
+
+With the old limit put back, both go red. The x86 harness exits 1 with 56 properties
+passing: the config is refused, the boot runs on defaults, and every service property
+fails with it. The aarch64 gate fails 63.
+
+### Bench
+
+56 benchmarks, no regression of 15% or more. `hashmap(3 set+4 get/has)` went
+1,254 → 971 and `agent_config(new+get+set)` 131 → 118: the two benchmarks 1.7.7
+found to measure string-literal layout moved back down with no change to their code,
+in a release that adds string literals.
+
+### Found, not fixed
+
+- Every config load costs the value tree, on SIGHUP too (roadmap v1.6.x, with the
+  fix: parse into an arena of its own).
+- `file_read_whole`'s unchecked growth `alloc()` is added to the upstream stdlib
+  filings on the roadmap.
+
+### Verification
+
+| check | result |
+|---|---|
+| `cyrius test src/test.cyr` | **876 passed, 0 failed** |
+| `bash scripts/aarch64-exec-gate.sh` | **871** assertions, 0 failed; 5/5 syscall probes |
+| `bash qemu/boot-test.sh` (`HARNESS_STRICT=1`, KVM) | **121/121**, 0 failed; config loaded at 22,200 bytes |
+| `bash qemu/boot-test-aarch64.sh` (TCG) | **175/175**, 0 failed; config loaded at 18,290 bytes |
+| both harnesses with the 16 KiB limit put back | red: x86 exit 1 (56 OK), aarch64 63 failed |
+| `bash scripts/bench-history.sh` | 56 benchmarks, no regression ≥15% |
+| `bash scripts/verify-lock.sh` | OK: HEAD's lock matches a fresh resolve |
+| `rm -rf lib && cyrius deps && cyrius deps --verify` | 76 verified, 0 failed; 5 commit pins |
+| `cyrius lint` / `fmt --check` over `src/`, `cyrius vet` | clean |
+| rebuild after the clean resolve | all four binaries byte-identical to the ones the gates ran |
+| sibling-free reproduction | lock and all four binaries byte-identical |
+
+kybernet grows 32 bytes on each arch (719,752 / 2,169,424). agnos-init does not link
+the reader and is unchanged.
+
+---
+
 ## [1.7.7] — 2026-09-23
 
 **argonaut 1.15.2 → 1.15.3: on a desktop, the compositor now waits for its

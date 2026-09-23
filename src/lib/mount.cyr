@@ -6,15 +6,31 @@
 
 struct MountEntry { source; target; fstype; flags; data; required; }
 
-# Mount cache — avoids re-reading /proc/self/mounts on every is_mounted() call
+# Mount cache — avoids re-reading /proc/self/mounts on every is_mounted() call.
+# `_mount_cache` is the table is_mounted() scans, or 0 when it must be read again.
 var _mount_cache = 0;
 var _mount_cache_len = 0;
 
+# The buffer behind it, { ptr, cap } for read_whole_into. GLOBAL: 2 slots = 16 bytes.
+#
+# 1.7.8: this was a new alloc(8192) on every load after an invalidation, filled by
+# file_read_all capped at 8,192 bytes. A longer table was scanned as far as 8 KiB and
+# anything past that reported "not mounted", with nothing said. A dev box's table is 27
+# lines in 2,481 bytes, so 8 KiB is about 90 mounts. The buffer is kept now, grows to
+# 1 MiB, and a table past that is logged.
+var _mount_rb[2];
+var MOUNT_TABLE_MAX = 1048576;
+
 fn _mount_cache_load() {
     if (_mount_cache != 0) { return 0; }
-    _mount_cache = alloc(8192);
-    _mount_cache_len = file_read_all("/proc/self/mounts", _mount_cache, 8192);
-    if (_mount_cache_len < 0) { _mount_cache_len = 0; }
+    var n = read_whole_into(&_mount_rb, "/proc/self/mounts", 8192, MOUNT_TABLE_MAX);
+    if (n > MOUNT_TABLE_MAX) {
+        klog("mount table is over 1 MiB - is_mounted() sees only the first 1 MiB");
+        n = MOUNT_TABLE_MAX;
+    }
+    if (n < 0) { n = 0; }
+    _mount_cache = read_whole_buf(&_mount_rb);
+    _mount_cache_len = n;
     return 0;
 }
 
@@ -22,6 +38,14 @@ fn _mount_cache_invalidate() {
     _mount_cache = 0;
     _mount_cache_len = 0;
     return 0;
+}
+
+# Standing rule 8: `_mount_rb` keeps an arena pointer across invalidations, so anything
+# that resets the arena must call this first. PID 1 never resets; the bench does.
+fn _mount_cache_forget() {
+    store64(&_mount_rb, 0);
+    store64(&_mount_rb + 8, 0);
+    return _mount_cache_invalidate();
 }
 
 # Check if a path is already mounted

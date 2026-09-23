@@ -60,10 +60,10 @@ services expect at boot: `/run` is a fresh tmpfs every boot, so `/run/agnos/agen
 
 | Module | Lines | What |
 |--------|-------|------|
-| main | 2157 | Boot sequence, argonaut init, event loop, emergency shell, shutdown |
-| svc_config | 1028 | JSON → ServiceDefinition; security, limits and edge blocks; config-read classification |
+| main | 2147 | Boot sequence, argonaut init, event loop, emergency shell, shutdown |
+| svc_config | 1223 | JSON → ServiceDefinition; security, limits and edge blocks; config-read classification |
 | edge_boot | 777 | Verified-boot pre-flight: TPM PCR, dm-verity verification |
-| emergency_auth | 687 | Argon2id credential: record format, parameter bounds, legacy migration, file-vs-key source |
+| emergency_auth | 707 | Argon2id credential: record format, parameter bounds, legacy migration, file-vs-key source |
 | cgroup | 623 | Cgroup v2 controllers, paths, limits, move, kill, teardown |
 | notify | 517 | sd_notify socket (READY, STOPPING, WATCHDOG, STATUS, RELOADING) |
 | seccomp | 516 | Seccomp BPF filter builder + loader |
@@ -73,16 +73,17 @@ services expect at boot: `/run` is a fresh tmpfs every boot, so `/run/agnos/agen
 | service_sandbox | 238 | Per-service pre-exec: cgroup join → no_new_privs → caps → Landlock → seccomp |
 | log | 224 | klog / klog2 / kmsg / slog |
 | boot_stages | 216 | Per-stage work with OK / SKIP / FAIL status |
-| mount | 163 | Data-driven essential mount table |
+| mount | 187 | Data-driven essential mount table; the mount-table cache |
 | termios | 120 | Console echo suppression (hand-rolled ioctl/termios) |
 | console | 113 | stdio redirect; interactive `/dev/console` open |
 | reaper | 109 | Non-blocking waitpid loop, structured results |
 | restart_queue | 100 | Deferred restarts, static storage |
 | signals | 92 | Block 5 signals, create signalfd, classify |
+| read_whole | 92 | A whole file into a kept buffer, up to a ceiling (config.json, the mount table) |
 | console_io | 77 | Bounded line read, integer formatting — testable helpers moved out of main |
 | cmdline | 56 | `/proc/cmdline` token scanning |
 
-**8,866 lines of Cyrius** across `main.cyr` + 20 modules.
+**9,187 lines of Cyrius** across `main.cyr` + 21 modules.
 
 ## Features
 
@@ -182,14 +183,14 @@ boot. With the working lane moved onto the caller's arena it costs +25 KB.
 ## Testing
 
 ```sh
-cyrius test src/test.cyr            # 849 assertions (844 on aarch64)
+cyrius test src/test.cyr            # 876 assertions (871 on aarch64)
 bash scripts/bench-history.sh       # 56 benchmarks, load-tolerant regression gate
 bash qemu/boot-test.sh              # PID-1 boot harness, x86_64 (needs KVM)
 bash qemu/boot-test-aarch64.sh      # PID-1 boot harness, aarch64 (TCG, no KVM)
 ```
 
 The QEMU harness is the gate that matters: it boots kybernet as real PID 1 and
-asserts 120 properties across five passes — the boot sequence, the reactor
+asserts 121 properties across five passes — the boot sequence, the reactor
 (that it sleeps rather than spins), dm-verity verification against a real
 image pair on virtio disks, and the emergency-auth prompt with a password fed
 over the serial line. Pass 4 runs against **both** credential formats: the
@@ -200,7 +201,7 @@ file leaves no credential, and the config key is never its fallback. After a
 correct password, the shell kybernet execs is a probe that reports its own
 descriptors, signal mask and environment, and the gate checks each one.
 
-The aarch64 harness asserts 174 properties and exists because **a cross-build
+The aarch64 harness asserts 175 properties and exists because **a cross-build
 exiting 0 is not evidence**. It boots `kybernet-aarch64` as PID 1 under TCG —
 an x86 host cannot accelerate aarch64 — against a pinned, sha256-checked kernel.
 Besides the boot sequence, cgroup controllers, a real reactor iteration and a

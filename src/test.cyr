@@ -9,6 +9,7 @@ include "src/lib/cmdline.cyr"
 include "src/lib/log.cyr"
 include "src/lib/console.cyr"
 include "src/lib/console_io.cyr"
+include "src/lib/read_whole.cyr"
 include "src/lib/termios.cyr"
 include "src/lib/signals.cyr"
 include "src/lib/reaper.cyr"
@@ -2261,6 +2262,15 @@ fn test_mount_table() {
     var mr_t, mr_v = mount_if_needed("proc", "/proc", "proc", 0, 0);
     assert(is_ok(mr_t) == 1, "mount_if_needed /proc ok");
     assert_eq(result_unwrap(mr_t, mr_v), 1, "already mounted returns 1");
+
+    # 1.7.8: the table is re-read into the buffer it already has. Every load after an
+    # invalidation used to allocate 8,192 bytes, and it happens after each mount.
+    _mount_cache_invalidate();
+    var h0 = _heap_used;
+    var r4 = is_mounted("/proc");
+    var grew = _heap_used - h0;
+    assert_eq(r4, 1, "proc is mounted after the table is read again");
+    assert_eq(grew, 0, "reading the mount table again allocates nothing");
     return 0;
 }
 
@@ -2969,9 +2979,9 @@ fn test_emerg_cred_resolve() {
 # negative errno when a read fails (it used to return the bytes read so far), and
 # load_config's `n <= 0` test sent every such failure down the defaults path,
 # which on SIGHUP applies the DEFAULT timeouts over the live ones (rule 30).
-# The last three assertions feed the classifier what file_read_all really
-# returns (rule 46), so a stdlib that went back to reporting a failed read as
-# end-of-file fails here rather than on a board.
+# The last three assertions feed the classifier what load_config's reader really
+# returns (rule 46): file_read_all until 1.7.8, read_whole_into since. A reader that
+# reported a failed read as end-of-file would fail here rather than on a board.
 fn test_cfg_read_class() {
     println("--- config read classification (1.7.0) ---");
     var cap = 16384;
@@ -2983,17 +2993,97 @@ fn test_cfg_read_class() {
     assert_eq(cfg_read_class(cap, cap), CFG_READ_OK, "cfg read: exactly cap bytes is a full read");
     assert_eq(cfg_read_class(2, cap), CFG_READ_OK, "cfg read: a small document is ok");
 
-    # 17 bytes = a 16-byte cap plus the headroom byte, as load_config sizes it.
-    var buf = alloc(17);
-    assert_eq(cfg_read_class(file_read_all("/tmp/kyb_cfg_absent_xyz", buf, 17), 16), CFG_READ_ABSENT,
+    # A 16-byte ceiling: the classification does not depend on the size.
+    var rb = _rw_new();
+    assert_eq(cfg_read_class(read_whole_into(rb, "/tmp/kyb_cfg_absent_xyz", 8, 16), 16), CFG_READ_ABSENT,
       "cfg read: a missing file reads as absent");
-    assert_eq(cfg_read_class(file_read_all("/tmp", buf, 17), 16), CFG_READ_UNREADABLE,
+    assert_eq(cfg_read_class(read_whole_into(rb, "/tmp", 8, 16), 16), CFG_READ_UNREADABLE,
       "cfg read: a directory reads as unreadable (EISDIR is an errno, not end-of-file)");
     var empty_path = "/tmp/kyb_cfg_empty";
     _write_file(empty_path, "", 384);
-    assert_eq(cfg_read_class(file_read_all(empty_path, buf, 17), 16), CFG_READ_EMPTY,
+    assert_eq(cfg_read_class(read_whole_into(rb, empty_path, 8, 16), 16), CFG_READ_EMPTY,
       "cfg read: an empty file reads as empty");
     sys_unlink(empty_path);
+    return 0;
+}
+
+# A fresh { ptr, cap } for read_whole_into.
+fn _rw_new() {
+    var rb = alloc(16);
+    store64(rb, 0);
+    store64(rb + 8, 0);
+    return rb;
+}
+
+# `len` bytes cycling through 43 printable characters. 43 does not divide any buffer
+# size, so a growth copy that dropped or shifted bytes shows up as a mismatch.
+fn _rw_pattern(len) {
+    var b = alloc(len + 1);
+    for (var i = 0; i < len; i = i + 1) { store8(b + i, 48 + (i % 43)); }
+    return b;
+}
+
+# ⚠ 1.7.8 — the reader behind load_config and the mount cache. A file larger than the
+# ceiling must come back as `ceiling + 1`, never as a prefix, and the buffer is kept:
+# a read that fits it allocates nothing. The stdlib's file_read_whole failed both,
+# measured: 65,544 bytes per call, and SIGSEGV on /dev/zero once memory ran out.
+fn test_read_whole() {
+    println("--- bounded whole-file read (1.7.8) ---");
+    var p = "/tmp/kyb_rw_file";
+    var pat = _rw_pattern(20000);
+    var rb = _rw_new();
+
+    assert_eq(read_whole_into(rb, "/tmp/kyb_rw_absent_xyz", 8, 64), 0 - ENOENT,
+      "read whole: a missing file is -ENOENT");
+    assert_eq(read_whole_buf(rb), 0, "read whole: nothing is allocated for a file that is not there");
+    assert_eq(read_whole_into(rb, "/tmp", 8, 64), 0 - EISDIR,
+      "read whole: a directory is -EISDIR, not an empty file");
+    _write_file(p, "", 384);
+    assert_eq(read_whole_into(rb, p, 8, 64), 0, "read whole: an empty file is 0 bytes");
+
+    # Exactly the ceiling, from an 8-byte start: 8 -> 16 -> 32 -> 64.
+    file_write_all(p, pat, 64);
+    assert_eq(read_whole_into(rb, p, 8, 64), 64, "read whole: a file of exactly the ceiling is read whole");
+    assert_eq(memeq(read_whole_buf(rb), pat, 64), 1, "read whole: growing the buffer kept every byte in place");
+    assert_eq(load8(read_whole_buf(rb) + 64), 0, "read whole: the data is NUL-terminated");
+    assert_eq(load64(rb + 8), 64, "read whole: the buffer grew to the ceiling and no further");
+
+    file_write_all(p, pat, 65);
+    assert_eq(read_whole_into(rb, p, 8, 64), 65, "read whole: one byte over the ceiling is ceiling + 1, not a prefix");
+    file_write_all(p, pat, 5000);
+    assert_eq(cfg_read_class(read_whole_into(rb, p, 8, 64), 64), CFG_READ_TOO_BIG,
+      "read whole: a file far over the ceiling classifies TOO_BIG");
+
+    file_write_all(p, pat, 40);
+    var h0 = _heap_used;
+    var n = read_whole_into(rb, p, 8, 64);
+    var grew = _heap_used - h0;
+    assert_eq(n, 40, "read whole: a smaller file after a larger one is read whole");
+    assert_eq(grew, 0, "read whole: a read that fits the kept buffer allocates nothing");
+
+    # /dev/zero never ends. Refused at the ceiling, having allocated about twice it.
+    var rz = _rw_new();
+    var h1 = _heap_used;
+    assert_eq(read_whole_into(rz, "/dev/zero", 8, 4096), 4097,
+      "read whole: /dev/zero is refused at the ceiling, not read until memory runs out");
+    assert_eq(_heap_used - h1 <= 2 * 4096 + 128, 1, "read whole: reaching the ceiling cost at most about twice it");
+
+    # The production limit. 20,000 bytes was refused before 1.7.8 (the limit was 16,384).
+    var rc = _rw_new();
+    file_write_all(p, pat, 20000);
+    n = read_whole_into(rc, p, CFG_FIRST_CAP, CFG_MAX_BYTES);
+    assert_eq(cfg_read_class(n, CFG_MAX_BYTES), CFG_READ_OK, "read whole: a 20,000-byte config is accepted");
+    assert_eq(n, 20000, "read whole: all 20,000 bytes");
+    assert_eq(memeq(read_whole_buf(rc), pat, 20000), 1, "read whole: the 20,000 bytes are the file's");
+    var huge = alloc(CFG_MAX_BYTES + 1);
+    memset(huge, 32, CFG_MAX_BYTES + 1);
+    file_write_all(p, huge, CFG_MAX_BYTES);
+    assert_eq(cfg_read_class(read_whole_into(rc, p, CFG_FIRST_CAP, CFG_MAX_BYTES), CFG_MAX_BYTES), CFG_READ_OK,
+      "read whole: a config of exactly the limit is accepted");
+    file_write_all(p, huge, CFG_MAX_BYTES + 1);
+    assert_eq(cfg_read_class(read_whole_into(rc, p, CFG_FIRST_CAP, CFG_MAX_BYTES), CFG_MAX_BYTES),
+      CFG_READ_TOO_BIG, "read whole: one byte over the limit is refused");
+    sys_unlink(p);
     return 0;
 }
 
@@ -3629,6 +3719,7 @@ fn main() {
     test_agnos_dirs();
     test_desktop_agnos_init_contract();
     test_cfg_read_class();
+    test_read_whole();
     test_edge_compare_pcrs_cstr();
     test_edge_boot_gating();
     test_notify_edge_cases();

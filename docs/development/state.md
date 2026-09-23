@@ -6,6 +6,16 @@
 
 ## Version
 
+**1.7.8**: config.json may be up to 256 KiB; over 16 KiB it was refused. The roadmap
+named the stdlib's `file_read_whole` for this, and measuring it ruled it out for PID 1
+(standing rule 53): it allocates 65,544 bytes per call in an arena that is never reset,
+and on `/dev/zero` it doubles until `alloc()` fails and then writes through NULL. The new
+`src/lib/read_whole.cyr` keeps one buffer per call site and grows it to a ceiling; a
+larger file is still refused. The mount-table read moved onto it as well (8 KiB → 1 MiB),
+since a longer table had been cut short without a word. Suite 876 / 871. Harness 121,
+aarch64 boot gate 175: both harness configs are now over 16 KiB (22,200 and 18,290
+bytes), and both gates go red with the old limit put back.
+
 **1.7.7**: argonaut 1.15.2 → 1.15.3. On a desktop, aethersafha now depends on the
 `agnos-init` oneshot (shipped in this package since 1.7.6), so its socket directories
 exist before it starts. That completes the `setup_directories()` port.
@@ -156,11 +166,12 @@ and byte-identical, and the warning still fires.
 
 | Arch | Bytes | `e_machine` |
 |---|---|---|
-| x86_64 (`CYRIUS_DCE=1`) | 719,720 | `0x3e` |
-| aarch64 (`CYRIUS_DCE=1`) | 2,169,392 | `0xb7` |
+| x86_64 (`CYRIUS_DCE=1`) | 719,752 | `0x3e` |
+| aarch64 (`CYRIUS_DCE=1`) | 2,169,424 | `0xb7` |
 | agnos-init x86_64 (`CYRIUS_DCE=1`) | 248,440 | `0x3e` |
 | agnos-init aarch64 (`CYRIUS_DCE=1`) | 2,034,080 | `0xb7` |
 
+1.7.8's bounded reader added 32 B to kybernet on each arch; agnos-init does not link it.
 1.7.7's argonaut 1.15.3 (one more desktop default) added 4,160 B to kybernet on x86_64
 and 56 on aarch64. 1.7.5's three service keys had added 5,552 and 1,464. The note below is
 1.7.0's, when the toolchain moved.
@@ -181,26 +192,28 @@ the build; that is standing rule 32.
 
 | Gate | Count | Enforcement |
 |---|---|---|
-| `cyrius test src/test.cyr` | **855** assertions | floor read from CLAUDE.md; a shrinking suite fails |
-| `bash scripts/aarch64-exec-gate.sh` | **850** assertions + 5 syscall probes | executes aarch64 under `qemu-user`; its own declared floor |
-| `bash qemu/boot-test-aarch64.sh` | **174** properties, all 5 passes, 24 services | boots `kybernet-aarch64` as PID 1 (TCG), entropy-starved; needs host `veritysetup` |
-| `bash qemu/boot-test.sh` | **120** properties, 5 passes | `HARNESS_STRICT=1` in CI makes a skip a failure |
+| `cyrius test src/test.cyr` | **876** assertions | floor read from CLAUDE.md; a shrinking suite fails |
+| `bash scripts/aarch64-exec-gate.sh` | **871** assertions + 5 syscall probes | executes aarch64 under `qemu-user`; its own declared floor |
+| `bash qemu/boot-test-aarch64.sh` | **175** properties, all 5 passes, 24 services | boots `kybernet-aarch64` as PID 1 (TCG), entropy-starved; needs host `veritysetup` |
+| `bash qemu/boot-test.sh` | **121** properties, 5 passes | `HARNESS_STRICT=1` in CI makes a skip a failure |
 | `bash scripts/verify-lock.sh` | 2 halves, 5 commit pins | the committed lock (HEAD's, not the working tree's) vs a fresh resolve |
 | `bash scripts/bench-history.sh` | **56** benchmarks (2 reported-not-gated) | ≥15% regression gate; `LAYOUT_SENSITIVE` names the two exempt ones |
 | `cyrius lint` | 0 warnings, **0 untracked deferrals** | HARD GATE, both halves |
 | `cyrius fmt --check` | clean | non-mutating; never `diff <(cyrius fmt …)` |
 
-⚠ **855 and 850 are both correct, and neither floor gates the other.** Six assertions are
+⚠ **876 and 871 are both correct, and neither floor gates the other.** Six assertions are
 x86-only (`BS_OPEN`/`BS_STAT`/`BS_LSTAT`/`BS_PIPE`/`BS_POLL`/`BS_NANOSLEEP`) and one is
 aarch64-only (`BS_PPOLL`). Both floors are declared in CLAUDE.md and must be bumped
 together. **Do not pad the short arch to equalise them.**
 
-21 modules in `src/lib/`. 25 services in the x86 harness and 24 in the aarch64 gate. 8 `.cyr` files under `qemu/`.
+22 modules in `src/lib/`. 25 services in the x86 harness and 24 in the aarch64 gate. 8 `.cyr` files under `qemu/`.
 
 ## Verification posture
 
 The technique that has repeatedly worked here, and whose absence is what let defects ship:
-**inject the defect and watch the gate go red.** At 1.7.3, nine defects put back on
+**inject the defect and watch the gate go red.** At 1.7.8, five defects put back in the
+reader, the mount cache and the limit each turned the unit suite red, and the old 16 KiB
+limit turned both harnesses red (x86 exit 1; aarch64 63 properties failed). At 1.7.3, nine defects put back on
 aarch64, each in its own copy of the tree, turned the gate red: a fail-open verify, the
 1.7.0 credential fallback, the shell keeping PID 1's signal mask (`SigBlk=0000000020014003`),
 the shell's fd 0 off the console, echo left on, a rejection that reboots, quiet mode
@@ -224,17 +237,21 @@ stricter bar on the next sweep.**
 
 ## In flight
 
-**v1.7.7 is ready and untagged.** It moves one dependency pin, argonaut 1.15.2 → 1.15.3
-(commit `9bae8e2`, confirmed on the remote). The 1.7.7 CHANGELOG entry has the numbers.
+**v1.7.8 is ready and untagged.** No dependency moved; the lock is unchanged from 1.7.7.
+The 1.7.8 CHANGELOG entry has the numbers.
 
 ## Next
 
 In the order I would take them. The full list is [roadmap.md](roadmap.md), with 13 open
 items.
 
-1. **Adopt `file_read_whole` and retire the 16 KiB config cap** (roadmap v1.7.x).
-2. **`hashmap` / `agent_config` measure string-literal layout** (roadmap v1.7.x): make
-   them layout-insensitive, or exempt them with the experiment.
+1. **Every config load, SIGHUP included, costs ~4 bytes of arena per config byte**
+   (roadmap v1.6.x). It is PID 1 memory that never comes back, so it goes first.
+2. **`hashmap` / `agent_config` measure string-literal layout** (roadmap v1.6.x): make
+   them layout-insensitive, or exempt them with the experiment. 1.7.8 moved both back
+   down without touching their code.
+3. **agnostik's `_hex_nibble` rename** (roadmap v1.7.x), released in agnostik and then
+   consumed.
 
 ## Release order (cross-repo)
 

@@ -30,7 +30,7 @@ argonaut-side defects reachable from kybernet's boot path.
 
 What the split actually buys is that the service-management logic is
 independently tested (976 assertions in argonaut's own suite at 1.15.3, against
-kybernet's 855) and independently versioned, so a change there is reviewed and
+kybernet's 876) and independently versioned, so a change there is reviewed and
 gated on its own before kybernet pins the tag. That is real value — it is just
 not fault isolation.
 
@@ -74,6 +74,7 @@ All under `src/lib/`, included by `src/main.cyr`.
 | `termios.cyr` | Console echo suppression — hand-rolled ioctl/termios (1.5.8) |
 | `signals.cyr` | signalfd for SIGCHLD, SIGTERM, SIGINT, SIGHUP, SIGPWR |
 | `reaper.cyr` | Zombie reaping via `sys_waitpid(-1, WNOHANG)` |
+| `read_whole.cyr` | A whole file into a buffer kept per call site, up to a ceiling: config.json (256 KiB) and the mount table (1 MiB) (1.7.8) |
 | `mount.cyr` | Essential filesystems, data-driven mount table |
 | `cgroup.cyr` | Cgroup v2: controllers, create, limits, move, kill, cleanup |
 | `privdrop.cyr` | Privilege drop: capabilities, no_new_privs, agnostik bridge |

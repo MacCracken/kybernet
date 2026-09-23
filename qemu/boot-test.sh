@@ -387,6 +387,18 @@ for marker in \
     fi
 done
 
+# 1.7.8: this image's config.json is padded past the old 16 KiB limit, so the boot
+# above proves a larger config loads. Check the size kybernet itself reports, so a
+# fixture that shrank back under 16 KiB fails here rather than proving nothing.
+_cfg_bytes="$(echo "$RUNTIME_OUT" | grep -aoE 'loaded config: /etc/kybernet/config.json, bytes: [0-9]+' | head -1 | grep -oE '[0-9]+$' || true)"
+if [ -n "$_cfg_bytes" ] && [ "$_cfg_bytes" -gt 16384 ]; then
+    echo "  OK: loaded a ${_cfg_bytes}-byte config.json, over the old 16,384-byte limit"
+else
+    echo "  FAIL: config.json loaded at '${_cfg_bytes:-?}' bytes; this pass needs one over 16,384"
+    echo "$RUNTIME_OUT" | grep -aE 'config' | head -4 || true
+    fail=1
+fi
+
 if grep -aqE "Attempted to kill init|Kernel panic" "$LOG"; then
     echo "  FAIL: kernel panicked — kybernet returned from main while PID 1"
     fail=1

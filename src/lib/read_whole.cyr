@@ -1,0 +1,92 @@
+# kybernet/read_whole.cyr — read a whole file into a buffer the caller keeps, up to a
+# ceiling. (1.7.8)
+#
+# WHY NOT THE STDLIB'S file_read_whole
+# ------------------------------------
+# cyrius 6.6.6 added `file_read_whole`, which grows its buffer until the file ends. Two
+# measured properties rule it out in PID 1:
+#
+# - It allocates a new buffer on every call, 65,544 bytes even for a 2-byte file, and
+#   PID 1's arena is never reset (standing rule 8). On the SIGHUP path that is a 64 KiB
+#   leak per reload, four times the one 1.6.14 HIGH-5 removed.
+# - It has no ceiling. Pointed at /dev/zero under a 2 GB address-space limit, it
+#   doubled its buffer to 512 MiB, could not map the next 1 GiB, and alloc() returned
+#   0. The growth copy then wrote through NULL: SIGSEGV. In PID 1 that is a kernel
+#   panic. A fixed buffer refused the same file with a readable error.
+#
+# So each caller keeps ONE buffer for the life of the process, in a two-slot global
+# { ptr, cap }. It starts at `first_cap` bytes and doubles when a file fills it, never
+# past `ceiling`. A caller therefore allocates at most about twice its ceiling over the
+# whole process, and nothing at all on a read that fits the buffer it already has.
+#
+# Returns the byte count, or `ceiling + 1` when the file is larger than `ceiling` (so
+# `cfg_read_class(n, ceiling)` calls it TOO_BIG), or a negative errno: the open's, the
+# read's, or -ENOMEM when the buffer could not grow. A file is never cut short
+# silently. The data is NUL-terminated after the last byte read, so a scan may look
+# one byte past the end.
+#
+# ⚠ Take the buffer with read_whole_buf() AFTER the read: growing replaces it.
+
+fn read_whole_buf(rb) { return load64(rb); }
+
+fn read_whole_into(rb, path, first_cap, ceiling) {
+    if (ceiling < 1) { return 0 - EINVAL; }
+    if (first_cap < 1 || first_cap > ceiling) { first_cap = ceiling; }
+    var fd = sys_open(path, O_RDONLY | O_CLOEXEC, 0);
+    if (fd < 0) { return fd; }
+    if (load64(rb) == 0) {
+        var first = alloc(first_cap + 1);
+        if (first == 0) {
+            sys_close(fd);
+            return 0 - ENOMEM;
+        }
+        store64(rb, first);
+        store64(rb + 8, first_cap);
+    }
+    var total = 0;
+    while (1 == 1) {
+        var buf = load64(rb);
+        var cap = load64(rb + 8);
+        if (cap > ceiling) { cap = ceiling; }
+        if (total == cap) {
+            if (cap == ceiling) {
+                # Full at the ceiling. One more byte tells "exactly the ceiling" from
+                # "larger"; the buffer is never grown past the ceiling to hold it.
+                var one[8];     # LOCAL: 8 bytes
+                var m = sys_read(fd, &one, 1);
+                if (m < 0) {
+                    sys_close(fd);
+                    return m;
+                }
+                if (m > 0) {
+                    sys_close(fd);
+                    store8(buf + cap, 0);
+                    return ceiling + 1;
+                }
+                break;
+            }
+            var ncap = cap + cap;
+            if (ncap > ceiling) { ncap = ceiling; }
+            var nb = alloc(ncap + 1);
+            if (nb == 0) {
+                sys_close(fd);
+                return 0 - ENOMEM;
+            }
+            memcpy(nb, buf, total);
+            store64(rb, nb);
+            store64(rb + 8, ncap);
+            buf = nb;
+            cap = ncap;
+        }
+        var n = sys_read(fd, buf + total, cap - total);
+        if (n < 0) {
+            sys_close(fd);
+            return n;
+        }
+        if (n == 0) { break; }
+        total = total + n;
+    }
+    sys_close(fd);
+    store8(load64(rb) + total, 0);
+    return total;
+}
