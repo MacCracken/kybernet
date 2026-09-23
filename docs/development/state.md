@@ -238,21 +238,22 @@ stricter bar on the next sweep.**
 
 ## In flight
 
-**v1.7.8 is ready and untagged.** No dependency moved; the lock is unchanged from 1.7.7.
-The 1.7.8 CHANGELOG entry has the numbers.
+Nothing. 1.7.8 is tagged. Four cyrius issues filed on 2026-09-23 are listed under
+"Waiting on cyrius" in [roadmap.md](roadmap.md).
 
 ## Next
 
-In the order I would take them. The full list is [roadmap.md](roadmap.md), with 14 open
-items.
+The "Next" section of [roadmap.md](roadmap.md), in order; 18 open items in all.
 
-1. **Every config load, SIGHUP included, costs ~4 bytes of arena per config byte**
-   (roadmap v1.6.x). It is PID 1 memory that never comes back, so it goes first.
-2. **`hashmap` / `agent_config` measure string-literal layout** (roadmap v1.6.x): make
-   them layout-insensitive, or exempt them with the experiment. 1.7.8 moved both back
-   down without touching their code.
-3. **agnostik's `_hex_nibble` rename** (roadmap v1.7.x), released in agnostik and then
-   consumed.
+1. **Every config load, SIGHUP included, costs ~4 bytes of arena per config byte.** It is
+   PID 1 memory that never comes back, so it goes first.
+2. **`hashmap` / `agent_config` measure string-literal layout**: make them
+   layout-insensitive, or exempt them with the experiment. 1.7.8 moved both back down
+   without touching their code.
+3. **agnostik's `_hex_nibble` rename**, released in agnostik and then consumed.
+4. **`sys_ioctl` in `termios.cyr`** (in the stdlib since cyrius 6.5.36).
+5. **Source comments pointing at roadmap entries that no longer exist**, among them a
+   stale sd_notify policy comment in `main.cyr`.
 
 ## Release order (cross-repo)
 

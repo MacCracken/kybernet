@@ -1,550 +1,108 @@
 # Kybernet Roadmap
 
-**Current: v1.7.8** — [CHANGELOG.md](../../CHANGELOG.md) is the record of what each
-release actually did. This file carries only what is **not** done; a completed item is
-deleted from here and summarised in History below, never left ticked.
+What is still to do. What shipped is in [CHANGELOG.md](../../CHANGELOG.md), and what is
+true right now, gate counts included, is in [state.md](state.md). A finished item is
+deleted from here, not ticked.
 
-**Open: 14.** The 1.5.9 sweep opened **38** items (counted at the `1.6.0` tag); the
-2026-08-26 P(-1) audit is fully closed (its last item, MEDIUM-10, closed when 1.6.20
-consumed libro 2.10.0 / argonaut 1.15.0). Every number is `grep -c '^- \[ \]'` against this file at
-the relevant tag, not an estimate.
-
-⚠ **v1.7.0 moved the toolchain 6.6.2 → 6.6.6 and every dep to its latest tag, and the
-bump found more than it changed.** 6.6.6's `file_read_all` fix turned a mid-read error in
-`load_config` into the "absent" path (fixed: only ENOENT is absent now); 6.6.5's new
-aarch64 translation row turned the Landlock fixture's native truncate literal into
-`recvfrom` (fixed: `sys_truncate`); and reading the loader around both found that a
-refused `emergency.cred` fell back to the config key, which 1.6.18 promised it would
-not. **v1.7.1 fixed that**, with a harness pass that boots the right record in both
-places and asserts the correct password does not get in.
-
-⚠ **Two long-standing items closed at v1.6.19 and both are worth remembering for the
-shape rather than the fix.** `seccomp: basic` could not open a file on x86_64 and had
-not been able to since 1.6.0 — the profile had only ever been measured against a
-busybox shell, and glibc uses `openat` where the stdlib's `sys_open` compiles to
-legacy `open`. And the aarch64 ESYSXLAT collision was fixed upstream in cyrius 6.5.36,
-which finally let `kybernet-aarch64` **boot as PID 1 for the first time**. ⚠ That
-second one had been sitting behind a gate that *looked* principled and was really
-blocked: a deferral's justification expires with its blocker, and nothing announces
-that. See standing rules 47–50.
-
-Every item names the file that proves it. Where a claim was verified by running
-something rather than by reading, it says so — and where it was verified by *injecting
-the defect and watching the gate go red*, it says that too, because this project has
-repeatedly found that a gate nobody has seen fail is a gate nobody should trust.
-
-**Pins:** `v1.7.x` is what the 1.7 releases found: the cyrius 6.6.6 bump, and then the
-aarch64 passes. `v1.6.x` is scoped work with a clear finish line. `v1.x.x` is real but needs
-a design decision or is too large to date. The last two sections are blocked on
-something outside this repo.
-
-`cyrius lint` reports **0 untracked deferrals and 0 warnings** across the tree, and as
-of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into fiction.
-
-**Gate counts at v1.7.8** (a next agent must not let these shrink; each is enforced):
-**876** test assertions on x86_64 and **871** on aarch64 · **121** harness properties ·
-**175** aarch64 boot-gate properties · 56 benchmarks (two reported-not-gated, declared) ·
-the aarch64 execution gate · the committed-lock gate.
-⚠ **The two assertion counts differ on purpose and neither floor gates the other** — a
-seccomp allowlist is arch-specific, so six assertions are x86-only and one aarch64-only.
-Both floors are declared in CLAUDE.md and each gate reads its own; padding the short
-arch to make the numbers match would buy a tidy number at the cost of the suite meaning
-what it says. See [state.md](state.md) for the full current-state handoff.
+**Open: 18** (`grep -c '^- \[ \]'` against this file).
 
 ---
 
-## v1.7.x — found by the cyrius 6.6.6 bump and the aarch64 passes
+## Next
 
-- [ ] **Upstream (cyrius, filed by the user, not from here): the hashmap seed blocks PID 1
-      at phase 6 on a board with no entropy.** `lib/hashseed.cyr` draws the per-process
-      seed with `getrandom(buf, 8, 0)` on the first map operation, which in PID 1 is
-      `argonaut_init_new`. Flags 0 waits for the kernel CRNG, and under TCG with the
-      device-tree seed disabled that was **870 ms** before the reactor exists (standing
-      rule 51). A hash seed is the documented use of `GRND_INSECURE`, with the existing
-      time-mix fallback kept for the pre-5.6 EINVAL. The kernel bounds the wait on 5.4+,
-      so this is a boot delay rather than a hang, and the aarch64 gate now asserts both
-      that the boot was starved and that the span budget held.
-- [ ] **Upstream (cyrius, filed by the user, not from here): the mixed-return diagnostic
-      misfires on a nullary `None()`.** A fn returning `Some(v)` on one path and `None()` on
-      another warns that "the caller reads this error as its TAG". `lib/tagged.cyr` and the
-      language guide both say that shape is legal, and a probe confirmed it on x86_64 and
-      under `qemu-aarch64`. kybernet sidestepped it at 1.7.0 by making `read_signal` a
-      `Result`, but any other consumer returning an `Option` gets the same false alarm.
-- [ ] **agnostik's `_hex_nibble` collides with sigil `hex.cyr`'s.** The behaviour is
-      identical (0-9/a-f/A-F to 0..15, else -1), so "last definition wins" is harmless
-      today, but it is the one duplicate-fn warning in kybernet's build that is not sigil's
-      own `crypto_scratch` family. The fix is a rename on agnostik's side, released and
-      then consumed.
-
----
-
-## v1.6.13+ — the P(-1) audit, now closed
-
-The 2026-08-26 P(-1) audit found **31** issues, and **all 31 are closed**. MEDIUM-10,
-the last, closed at 1.6.20, when kybernet consumed libro 2.10.0 (the allocation-free
-canonical-JSON emitter) and argonaut 1.15.0 (`chain_append_nokeep`). Full evidence for each —
-including the adversarial verification each one survived — is in
-[`docs/audit/2026-08-26-audit.md`](../audit/2026-08-26-audit.md).
-
-⚠ **The audit's own caveat still stands and outlives the findings.** Its verification
-pass let a finding survive unless BOTH of its two skeptics refuted it, so a single
-refutation did not kill one — a weaker bar than the 1.4.2 sweep, which refuted 13 of
-39 candidates. This one refuted none, and that is a property of the threshold rather
-than evidence that every candidate was airtight. Ten were re-verified by hand and
-marked as such in the report. **Keep the bar in mind when reading the report, and set
-a stricter one on the next sweep** — a survival rate of 100% is a finding about the
-method, not about the code.
-
----
-
-## v1.6.x — code that does nothing, and docs that say it does
+In the order they would be taken.
 
 - [ ] **Every config load, SIGHUP included, costs about 4 bytes of arena per config
-      byte.** Found at 1.7.8, measured: `json_v_parse_buf` allocates 35,904 bytes to parse
-      an 8,983-byte config, and PID 1's arena is never reset. 1.6.14 HIGH-5
-      took the read buffer and the service definitions out of the reload, not the tree.
-      The 256 KiB config limit bounds one reload at about 1 MiB. The fix is a parse the
-      reload can release: `bayan_json_v_parse_ctx_a` into an `arena_new` region, reset
-      once the scalars and the credential are copied out.
-- [ ] **Two more benchmarks measure string-literal layout: `hashmap(3 set+4 get/has)`
-      and `agent_config(new+get+set)`.** Found at 1.7.7. An unused string literal in
-      `src/bench.cyr` moves `agent_config` from 110 to 131–134 ns/op and `hashmap` from
-      about 1,000 to 1,199, with no code changed (CHANGELOG [1.7.7] has the
-      experiment). Decide as for `strlen(52 chars)`: make them layout-insensitive, or
-      exempt them in `LAYOUT_SENSITIVE` with the experiment in the same commit.
+      byte.** `json_v_parse_buf` allocates 35,904 bytes to parse an 8,983-byte config
+      (measured at 1.7.8), and PID 1's arena is never reset. The 256 KiB config limit
+      bounds one reload at about 1 MiB. Fix: parse into a region the reload can release,
+      `bayan_json_v_parse_ctx_a` into an `arena_new` arena, reset once the scalars and
+      the credential are copied out.
+- [ ] **`hashmap(3 set+4 get/has)` and `agent_config(new+get+set)` measure string-literal
+      layout.** An unused string literal in `src/bench.cyr` moves `agent_config` from 110
+      to 131–134 ns/op and `hashmap` from about 1,000 to 1,199 (CHANGELOG [1.7.7] has the
+      experiment). Make them layout-insensitive, or exempt them in `LAYOUT_SENSITIVE` with
+      the experiment in the same commit, as `strlen(52 chars)` is.
+- [ ] **agnostik's `_hex_nibble` collides with sigil `hex.cyr`'s.** The behaviour is
+      identical, so it is harmless, but it is the one duplicate-fn warning in the build
+      that is not sigil's own `crypto_scratch` family. Rename it in agnostik, release, then
+      move kybernet's agnostik pin.
+- [ ] **Use the stdlib's `sys_ioctl` in `src/lib/termios.cyr`.** cyrius 6.5.36 added it
+      (the resolved `2026-08-24-sys-ioctl-wrapper-missing.md` filing). `termios.cyr` still
+      calls `syscall(SYS_IOCTL, …)` and says no wrapper exists, and so does standing
+      rule 21.
+- [ ] **Source comments that point at roadmap entries that no longer exist.** The
+      sd_notify policy block above `handle_notify_msg` (`src/main.cyr`) says `WATCHDOG=1`
+      and `MAINPID=` are refused and "roadmapped"; the code below it has handled both since
+      1.6.8 and 1.6.10. `src/lib/edge_boot.cyr` sends readers to a "Blocked on hardware"
+      section (the `veritysetup open`, LUKS and TPM work is under Harness work below) and
+      still describes the unbounded `tpm_read_pcr` path, dead since 1.6.16.
+      `src/lib/seccomp.cyr` cites "roadmap v1.6.0" and a hardware section for the aarch64
+      numbers, which the aarch64 boot gate executes. Comments only.
 
----
+## Needs a decision
 
-## v1.x.x — real, but needs a decision or is too large to date
+- [ ] **Give the AGNOS default services a non-root uid.** `security.uid` /
+      `security.gid` work end to end (1.6.9), and agnos-init makes the runtime
+      directories (1.7.6), but nothing in the shipped config or in argonaut's
+      `default_services` sets a uid, so every real service runs as root. Needs a uid per
+      service (aethersafha, daimon, agnoshi, ...), agnos-init owning each service's
+      runtime paths to match (`/run/agnos/agents` and `/run/agnos/plugins` are root-owned
+      today), and the numeric ids in agnosticos' config. A service with
+      `"seccomp": "basic"` and a uid works only because the drop precedes the filter:
+      none of setuid/setgid/setgroups/setresuid are in that allowlist.
+- [ ] **A dynamic memory ceiling for the KDF.** `m_cost` is capped statically at
+      64 MiB. `system_free_memory()` exists (`~/.cyrius/lib/sys.cyr:458`), but a bound
+      that depends on free RAM at boot makes a credential valid on one board and invalid
+      on another. Revisit if a board under 512 MB appears.
+- [ ] **Config keys for `socket_activation`, `log_config` and `required_for_modes`**, the
+      three `ServiceDefinition` fields with none. Socket activation is a listening-socket
+      protocol, not a scalar, and argonaut's defaults for the other two fit every shape
+      kybernet ships. `resource_limits` stays unexposed on purpose (standing rule 14).
 
-- [ ] **Give the AGNOS default services a non-root uid.** ⚠ **Downstream of the
-      agnos-init oneshot above, and cannot be done before it** — a service given a
-      uid needs its runtime directories to exist AND to be owned by that uid, and
-      as recorded above nothing currently creates `/run/agnos/{agents,plugins}` on
-      a Cyrius AGNOS board at all. Sequence: agnos-init creates and chowns, then
-      the uids land. 1.6.9 made
-      `security.uid` / `security.gid` work and proved it end to end, but nothing in the
-      shipped config or in argonaut's `default_services` actually uses it — so every
-      real service still runs as root. The mechanism exists; the policy does not.
-      Needs a uid allocation per service (aethersafha, daimon, agnoshi...), matching
-      ownership on whatever runtime paths each one writes, and the numeric ids in
-      agnosticos' config. Note the ordering constraint 1.6.9 established: a service
-      with `"seccomp": "basic"` AND a uid works only because the drop precedes the
-      filter, and none of setuid/setgid/setgroups/setresuid are in that allowlist.
-- [ ] **A dynamic memory ceiling for the KDF.** 1.5.9 caps `m_cost` statically at
-      64 MiB, the bottom edge of the band where an anonymous mmap succeeds and the touch
-      OOMs. `system_free_memory()` exists (`~/.cyrius/lib/sys.cyr:366`). Deliberately not
-      shipped: a bound that depends on free RAM at boot makes a credential valid on one
-      board and invalid on another. Revisit if a board under 512 MB appears.
+## Harness work
 
-- [ ] **Three `ServiceDefinition` fields have no config key: `socket_activation`,
-      `log_config` and `required_for_modes`.** Seven had none at 1.6.18.
-      `restart_config` landed at 1.6.19, and `environment`, `env_files` and
-      `ready_check` at 1.7.5, each once something downstream was confirmed to read the
-      field. (`env_files` is still read by nothing in argonaut, so kybernet reads those
-      files itself at load.) What remains needs a decision about how much of argonaut's
-      model kybernet exposes: socket activation is a listening-socket protocol, not a
-      scalar, and argonaut's defaults for the other two fit every shape kybernet ships.
-      `resource_limits` stays unexposed on purpose (standing rule 14).
+- [ ] **TPM attestation, PCR read and LUKS2 token unlock under `swtpm`.** QEMU exposes
+      `tpm-tis` and `tpm-crb`, and `swtpm` and `tpm2-tools` are in Arch `extra`: a real
+      TPM 2.0 with real PCRs and sealing, enough to exercise `tpm_detect`, the PCR read
+      and compare, and a sealed LUKS2 token end to end. No harness pass covers them.
+- [ ] **`veritysetup open` and a read-only mount of the verified target.** The edge
+      passes prove `veritysetup verify` only. The host has `dm-verity.ko.zst` and
+      `dm-mod`; the blocker is that Arch's initcpio busybox has no `insmod`/`modprobe`.
+      Stage a static loader or the modules, or boot a kernel with DM built in. Never a
+      module loader inside PID 1.
 
----
+## Needs real hardware
 
-## Needs real silicon — and it is only two things
+- [ ] **RPi4 / NUC boot validation.**
+- [ ] **Argon2 cost measured on real ARM.** TCG runs it (about 2.7 s at phase 6c), but
+      its timings mean nothing, and the work cap is about time.
 
-⚠ **This section used to hold six items and claim all six were hardware-blocked. Four of
-them were not** — they were harness investment mislabelled as a hardware wall, which is
-the same shape as the "blocked upstream" framing the 2026-08-24 audit retracted for
-argonaut. Checked, not assumed:
+## Waiting on cyrius
 
-- [ ] **RPi4 / NUC boot validation.** Genuinely needs the board.
-- [ ] **Argon2 cost measured on real ARM.** Genuinely needs ARM silicon or an ARM CI
-      runner — `qemu-system-aarch64` under TCG will run the code but its *timings* mean
-      nothing, and timing is the whole point of the 1.5.9 work cap. ⚠ Correctness on
-      aarch64 is a different question and is **not** blocked — `qemu/boot-test-aarch64.sh`
-      boots the binary as PID 1 under TCG, so what remains genuinely unmeasurable here
-      is the KDF's WALL TIME, nothing else. Under TCG it added ~2.7 s at phase 6c at
-      1.7.3, which settles liveness (the prompt's deadline is 120 s), not cost.
+Filed in the cyrius repo's `docs/development/issues/`.
 
-### Reclassified — harness work, not hardware
+- [ ] **`file_read_whole` has no ceiling, does not check its growth `alloc()`, and
+      allocates a new 64 KiB buffer per call**
+      (`2026-09-23-kybernet-file-read-whole-no-ceiling-unchecked-growth-alloc.md`). When it
+      is fixed, config.json and the mount table move onto it and `src/lib/read_whole.cyr`
+      goes.
+- [ ] **The hashmap seed blocks PID 1 at phase 6 until the kernel CRNG seeds**, about
+      0.9 s under TCG with no entropy source
+      (`2026-09-23-kybernet-hashseed-getrandom-blocks-pid1-before-crng-seeds.md`). When a
+      toolchain with the fix is pinned, the aarch64 gate's phase 4 → 6 span should drop
+      by that much.
+- [ ] **`fl_alloc` faults at address -12 when its mmap is refused**
+      (`2026-09-23-kybernet-fl-alloc-unchecked-fl-mmap-faults-at-minus-12.md`). kybernet's
+      Argon2 already avoids that path (standing rule 24), so nothing changes here when it
+      lands.
+- [ ] **The mixed-return warning misfires on a nullary `None()`**
+      (`2026-09-23-kybernet-mixed-return-diagnostic-misfires-on-nullary-none.md`).
+      `read_signal` returns a `Result` since 1.7.0, so nothing changes here when it lands.
 
-Moved into the v1.6.1 gate line. Recording why here so the claim is not re-made:
+## Waiting on a consumer
 
-- **TPM attestation, PCR read, and LUKS2 token unlock.** This QEMU already exposes
-  `tpm-tis` and `tpm-crb` (`qemu-system-x86_64 -device help`), and `swtpm` (0.10.1) and
-  `tpm2-tools` (5.8) are both in Arch `extra`. `swtpm` is a real TPM 2.0 with real PCRs
-  and real sealing — enough to exercise `tpm_detect`, `tpm_read_pcr`, PCR comparison,
-  and a sealed LUKS2 token end to end. What a board would add beyond that is a *trusted*
-  root, not a *testable* one.
-- **`veritysetup open` + read-only mount of the verified target.** `dm-verity.ko.zst`
-  and `dm-mod` are present on this host under `/usr/lib/modules/$(uname -r)/`. The
-  actual blocker is narrower than "no device-mapper": Arch's `/usr/lib/initcpio/busybox`
-  ships **no `insmod`/`modprobe`** (`busybox --list` confirms), so the initramfs has no
-  way to load them. Stage a static loader or the modules, or boot a kernel with DM
-  built in. Note this does **not** mean putting a module loader inside PID 1 — that
-  remains scaffolding in the one process that must never crash, and stays rejected.
-- **Executing the aarch64 seccomp table.** `qemu-system-aarch64` is installed. Whether
-  the eight hand-copied syscall numbers are right is a correctness question TCG answers
-  perfectly well.
-
-## Blocked upstream / on an external consumer
-
-- [ ] **cyrius stdlib filings, genuinely off-limits from here.** ioctl / termios /
-      poll — `2026-08-24-sys-ioctl-wrapper-missing.md`, behind `src/lib/termios.cyr` and
-      `_read_line_fd`'s `sleep_ms` poll loop. And `fl_alloc`'s unchecked `_fl_mmap`
-      return in two places (`freelist.cyr:404-406`, `:231-241`), which is why sigil's
-      own `if (mem == 0)` guards are dead code.
-      (The socket-wrapper filing is **closed and the follow-through has SHIPPED** —
-      `sys_socket`/`sys_bind`/`sys_recvfrom` landed upstream and `notify.cyr`'s
-      hand-rolled per-arch `enum SockSysNr` was deleted at **v1.6.3**, not v1.6.2 as
-      this line used to predict. `notify.cyr:8` records the retirement.)
-- [ ] **Adopt `file_read_whole` once cyrius fixes it.** Filed 2026-09-23 as cyrius
-      `docs/development/issues/2026-09-23-kybernet-file-read-whole-no-ceiling-unchecked-growth-alloc.md`:
-      it has no size ceiling, its growth `alloc()` is unchecked (`/dev/zero` ends in a
-      write through NULL, traced), and it allocates a new 64 KiB buffer on every call. 1.7.8
-      retired the 16 KiB config cap with kybernet's own `read_whole_into` as the stopgap.
-      When the fix lands, config.json and the mount table move onto `file_read_whole`, and
-      `src/lib/read_whole.cyr` goes.
-- [ ] **Control socket for agnoshi runtime commands** — a separate transport surface,
-      pinned until an agnoshi consumer drives the protocol shape.
-- [ ] **Binary signing on release** — pinned until libro signing/timestamping is
-      consumer-driven from outside kybernet's tree.
-
----
-
-## History
-
-One line per release. Detail lives in [CHANGELOG.md](../../CHANGELOG.md).
-
-- **v1.7.8** — config.json may be up to 256 KiB; over 16 KiB it was refused. The roadmap
-  named the stdlib's `file_read_whole` for this, and measuring it found two defects that
-  matter in PID 1, now filed with cyrius: 65,544 bytes allocated per call in an arena
-  that is never reset, and on `/dev/zero` a doubling that ends in a write through NULL.
-  Until they are fixed, `read_whole_into` keeps one buffer per call site and grows it to
-  a ceiling, and a larger file is still refused. The mount-table read
-  moves onto it too, 8 KiB → 1 MiB, where a longer table had been cut short without a
-  word. Both harness configs are now over 16 KiB, and both gates go red with the old limit
-  put back.
-- **v1.7.7** — argonaut 1.15.3: on a desktop, aethersafha now depends on the `agnos-init`
-  oneshot the kybernet package has shipped since 1.7.6, so its socket directories exist
-  before it starts. That closes the `setup_directories()` port. A contract test pins
-  both halves across the two repos, and fails against argonaut 1.15.2. The bench gate's
-  two flags were shown to be string-literal layout by an inert-padding experiment.
-- **v1.7.6** — `agnos-init`, a separate oneshot program the kybernet package ships at
-  `/usr/lib/agnos/agnos-init`, makes the AGNOS directory layout: the `/run/agnos`
-  socket directories aethersafha binds in (which nothing created before), `/run/user/1000`,
-  and `setup_directories()`'s `/var` and `/etc` directories, with modes and owners
-  from `/etc/passwd`. It checks every path with `lstat`, sets owners only on the
-  directories it lists, never recursively, and exits 1 on any directory it cannot
-  make. It is never linked into PID 1. Both harnesses run it and `lstat` the result
-  from a dependent service. aethersafha's dependency on it, in argonaut, is next.
-- **v1.7.5** — Three service keys: `environment` and `ready_check`, whose fields argonaut
-  1.15.0 reads, and `env_files`, whose field argonaut still ignores, so kybernet reads
-  the files itself at load. A file overrides `environment`, as in systemd. The ready
-  check blocks PID 1 (at phase 8 and on every restart in the reactor), so its bounds are
-  refusals: timeout 100 to 60,000 ms. Both harnesses assert, from inside a child,
-  that a config value, a file value and the override arrived, and that one ready
-  check passes and one fails.
-- **v1.7.4** — An edge board no longer opens an unauthenticated emergency shell when a
-  required boot stage fails. 1.5.7 had required authentication only for the phase-6c
-  refusal; phase 7 and the service wave followed `emergency_require_auth`, default false.
-  `drop_to_emergency()` now requires it on every edge-board path, deciding through
-  `emerg_shell_needs_auth()`, which the unit suite covers, and with no credential it
-  suppresses the shell. Both harnesses assert it on the intact-image edge boot, which
-  reaches that path through the fixture's missing daimon.
-- **v1.7.3** — The aarch64 edge, emergency-auth and quiet passes: the aarch64 gate now runs
-  all five passes, 66 → 158 properties. There is no aarch64 veritysetup to stage, so
-  `qemu/verity-fixture.cyr` stands in for `veritysetup verify`, and it must match the
-  host's real veritysetup on five cases before any edge boot counts. The pinned kernel
-  has no virtio-blk, so `qemu/preinit-fixture.cyr` loads the image into `/dev/ram0` and
-  execs kybernet. Every property held on the first run. The auth passes also found that
-  no auth pass on either arch had ever run a shell: `/usr/bin/agnoshi` was busybox,
-  which refuses that name. `svc-fixture` now stands in for it on both arches and reports
-  the shell's descriptors, signal mask and environment (x86 84 → 104). With a shell able to run,
-  the logs showed an edge board opening the emergency shell **without authentication**
-  when a required boot stage fails. That is open above, not fixed here. Nine defects
-  put back on aarch64 each turned the gate red.
-- **v1.7.2** — aarch64 fixture parity. The aarch64 boot gate ran with **no services** from
-  1.6.19 to 1.7.1. It now stages 19, built only from the repo's Cyrius fixtures (the new
-  `qemu/svc-fixture.cyr` stands in for the busybox one-liners), and asserts on aarch64 what
-  the x86 harness asserts about services: 18 → 66 properties. Every property held on the
-  first run, so no kybernet defect turned up on aarch64. Three things did: the gate's span
-  had been measuring kernel boot plus kybernet since it was written (rule 37); the
-  health-check and watchdog assertions were a race between two timers, fixed on both
-  harnesses by giving each its own service (rule 36); and PID 1 waits for entropy at
-  phase 6, in the stdlib's hashmap seed, not at the first audit record as this file had
-  assumed (rule 51). The gate now boots entropy-starved and proves it. Checked by putting
-  each defect back: an aarch64-only allowlist regression (no `ppoll`) turns it red, and so
-  does a seeded boot.
-- **v1.7.1** — A refused `emergency.cred` no longer falls back to the config key. 1.6.18
-  promised that, but the loader returned 0 for both "absent" and "refused", and
-  `load_config` fell back on any 0. So a 0644 file was logged REFUSED while
-  `config.json`'s world-readable record answered the prompt, and the loader's own test
-  asserted the 0 that caused it. The decision now lives in `emerg_resolve_cred_at`,
-  which the suite can reach. It uses the file's record when the file loaded, the config
-  key's when the file is absent, and nothing when the file is present but unusable.
-  Harness pass 4c boots the right record in a 0644 file **and** in the key, and asserts
-  the right password does not get in. A second defect in the same loader was also
-  fixed: it returned views of one static buffer, so a same-length credential rotation
-  over SIGHUP compared equal to itself and was never announced. Both fixes were checked
-  by putting the old code back: the fallback fails 7 unit assertions and pass 4c, and
-  the aliasing fails 2. 758 → 787 assertions (753 → 782 on aarch64), 79 → 84 harness
-  properties.
-- **v1.7.0** — Toolchain 6.6.2 → **6.6.6**; sigil 3.12.18, agnostik 1.6.3, libro 2.10.3,
-  argonaut 1.15.2. Three things the bump broke or exposed, all fixed. (1) 6.6.6's
-  `file_read_all` returns an errno on a failed read instead of a prefix, which moved a
-  mid-read failure in `load_config` from "unusable" to "absent", and on SIGHUP that path
-  applies default timeouts. Only ENOENT is absent now, via a unit-tested
-  `cfg_read_class`. (2) 6.6.5's new `45 → 207` aarch64 ladder row made the Landlock
-  fixture's native truncate literal issue `recvfrom`. It uses `sys_truncate` now.
-  (3) `read_signal`'s mixed-return warning, shipped unexplained in 1.6.20, turned out to be
-  a false positive on nullary `None()`. It returns a `Result` now and carries the errno.
-  Found and **not** fixed: a refused `emergency.cred` falls back to the config key,
-  against 1.6.18's promise. `is_root` now comes from the stdlib's `sys.cyr`, and
-  `_reap_empty_vec` was renamed out of argonaut's namespace. Every dep change was checked
-  against the DCE list: agnostik's exit-70 `_fill_random` is dead in PID 1, and libro's
-  `getrandom` `uuid_v4` is live. 747 → 758 assertions (742 → 753 on aarch64); binaries and
-  lock byte-identical in a sibling-free reproduction. ⚠ The first CI run failed the aarch64
-  boot gate: the kernel was pinned by checksum to Alpine's unversioned `netboot/` URL,
-  which 3.21.8 overwrote, and a warm `qemu/.cache/` hid that locally. It now uses a
-  versioned URL with the same checksum and refuses an unversioned one.
-- **v1.6.20** — cyrius 6.5.36 → 6.6.2, the value-form flip: 65 call sites migrated, with
-  every `return r` propagation re-wrapped as `return Err(rv)`. Consumed libro 2.10.0 and
-  argonaut 1.15.0, **closing MEDIUM-10**. 6.6.2's same-name different-arity refusal
-  surfaced agnostik's `health_check_new` mis-binding against argonaut's (fixed in agnostik
-  1.6.1). The bench gate's syscall reference was repaired: a median of three probes,
-  clamped at the ALU scale.
-
-- **v1.6.19** — Two security findings and the aarch64 milestone. ⚠ **`seccomp:
-  basic` could not open a file on x86_64, and had not been able to since 1.6.0.**
-  aarch64 is `*at`-only so the stdlib's `sys_open` compiles to `openat` (allowed);
-  on x86_64 the same wrapper compiles to legacy `open`, which was not — and under
-  rule 28's deliberate `ERRNO(EPERM)` default it failed SILENTLY, the service
-  running to completion having done nothing. It survived six releases because the
-  only fixture was a busybox shell and **glibc uses `openat`**: the profile had
-  never been executed against the binary shape AGNOS actually ships, a static
-  libc-free Cyrius binary. Fixed by four x86-only parity syscalls under the rule
-  *add only where the other arch's counterpart is already allowed*. An adversarial
-  review then found a second hole in the same profile — **a confined daemon could
-  not sleep on either arch**, so its main loop busy-spun a core, and sakshi's TSC
-  calibration came back 2.5–4.3× low and different every run, making every log
-  timestamp fiction. ⚠ **`kybernet-aarch64` now BOOTS as PID 1** — cyrius 6.5.36
-  ended the ESYSXLAT collision behind 1.6.13 CRITICAL-1, and the new 18-property
-  boot gate runs the real thing: phases 2/3/4/6/8/9, 6 cgroup controllers, clean
-  power down, **reactor wakeups=21 — the identical count x86_64 reports**. It
-  worked on the first attempt. Also: `restart_config` config key, and
-  `verify-lock.sh` fixed twice — it had been reading the working tree rather than
-  HEAD (reproducing rule 45's tautology one level up), and could not tell a
-  deliberate pin bump from accidental toolchain drift, which want opposite
-  actions. 739 → 747 assertions (742 on aarch64), 72 → 79 harness properties.
-- **v1.6.18** — Consumed sigil 3.12.13, libro 2.9.0 and argonaut 1.14.0, closing the
-  `check_command` allocation and the sigil `exec_vec`/`exec_capture` items. Moved the
-  emergency credential to `/etc/kybernet/emergency.cred` at **0600**: config.json is
-  world-readable by design, so an Argon2id record in it let every local unprivileged
-  process read the salt and tag and grind the KDF offline. The file wins over the
-  config key, a group- or world-readable file is REFUSED rather than fallen back from,
-  and the harness fixture is falsifiable — the real record goes in the file and a
-  deliberately wrong one in config.json, so authentication succeeding proves precedence.
-  argonaut 1.15.0 (awaiting a tag) adopts libro's `chain_append_nokeep`: 312 -> 176
-  real bytes per audit record. 733 -> 739 assertions, 71 -> 72 harness properties.
-- **v1.6.17** — Working the 1.5.9 sweep survivors. kybernet gained a HARD CPU cap
-  (`limits.cpu_max_us`): it could express `cpu.weight`, a relative share, and never a
-  ceiling, blocked on the mechanical fact that `cpu.max` takes two numbers where every
-  other limit file takes one. Verified by reading `cpu.max` back from the kernel in a
-  real PID-1 boot. And a failed prerequisite now BLOCKS its dependents —
-  `resolve_service_waves` only ordered the waves, so a service whose dependency did
-  not come up was started anyway, into a world without the thing it requires. The
-  Landlock ABI item was already closed at 1.6.14 and is ticked after checking the
-  source rather than the roadmap. In deps awaiting tags: libro 2.9.0
-  (`chain_append_nokeep`), argonaut 1.14.0 (`check_command` 232 -> 0 bytes/call, plus
-  a silently-truncated over-long command), sigil 3.12.13 (no module outside
-  `sys_util.cyr` still calls the stdlib's `exec_vec`/`exec_capture`; the worst site
-  reported a `veritysetup verify` that never ran as VERIFIED).
-  ⚠ MEDIUM-10 stays open and the reason is now measured rather than assumed: the
-  entry struct was never the dominant cost. 725 -> 733 assertions, 67 -> 71 harness
-  properties.
-- **v1.6.16** — The last of the P(-1) audit. Consumed argonaut 1.13.10 and sigil
-  3.12.11, closing MEDIUM-4 (the HTTP health check's unbounded `connect`, ~127 s of
-  frozen reactor per tick) and MEDIUM-8 (`tpm2_pcrread` unbounded AND
-  status-discarding, so a wedged TPM hung PID 1 at phase 6c and a missing tool became
-  a zero-filled PCR bank). Then all six LOWs: a rejected `edge` block left its device
-  paths committed so verification ran on a board just told it was disabled; a typo in
-  `depends_on` became a phantom service with its own cgroup and a `FAILED` line naming
-  a service nobody configured; a fail-closed guard used F_OK and passed a `chmod 000`
-  binary; `mkcred.sh --check` blessed a record kybernet classifies INVALID; and the
-  watchdog KILL ran on every gate run with nothing asserting it. LOW-6 was already
-  closed at 1.6.14. 718 -> 725 assertions, 66 -> 72 harness properties.
-  ⚠ Worth keeping: the first injection used to verify the watchdog assertion was
-  itself broken — a stub in `lib/` is restored by `cyrius build`'s re-resolve, so the
-  gate stayed green for the wrong reason. **`lib/` is not a valid injection point.**
-- **v1.6.15** — All ten deferred MEDIUMs. A `landlock` block that granted nothing
-  confined nothing while reporting "applied"; a config service whose name collided
-  with a built-in was counted, dropped and never mentioned; unvalidated health-check
-  integers derived a SIGKILL deadline, so `"retries": 0` flapped a healthy service
-  forever and a negative `timeout_ms` reached `poll(2)` as INFINITE; a quoted number
-  in `security` fell back to permissive defaults and started the service as root,
-  unfiltered; `"uid": N` alone left it as group root; and `require_auth` with no
-  credential prompted for a password nothing could match and then halted PID 1
-  permanently. Consumed argonaut 1.13.9 (closing HIGH-6). MEDIUM-4 and MEDIUM-8 are
-  fixed in argonaut 1.13.10 / sigil 3.12.11 awaiting tags, MEDIUM-9 was closed by
-  filing upstream, and **MEDIUM-10 is partial and stays open** — 224 -> 192 bytes,
-  with the remaining fix needing a libro API change that its own tests refuse.
-  702 -> 718 assertions.
-- **v1.6.14** — All five HIGH findings from the P(-1) audit. Landlock was frozen at
-  ABI v1, so `truncate(2)` was **entirely unchecked** for every confined service while
-  the sandbox reported "applied" — measured: open denied, truncate allowed, a 16-byte
-  file reduced to 0. `capabilities` and `uid` could not be used together at all: the
-  capability drop surrendered CAP_SETUID/CAP_SETGID before the privilege drop needed
-  them, so the canonical "bind a low port as an unprivileged user" policy was accepted
-  by the parser and exited 126 every time; the fix raises AMBIENT capabilities, the
-  only set that survives execve of a plain binary. Every SIGHUP leaked ~38 KB, and did
-  so even with no config file. dm-verity verification borrowed an undocumented
-  hardcoded 10 s, so a board with an INTACT rootfs powered off blaming a veritysetup
-  that was present and running. argonaut 1.13.9 fixes the health-command exec (found
-  en route: it could never run a command with an argument, on either implementation).
-  Also settled the benchmark question three releases old, by proving with inert
-  padding that `strlen`/`is_mounted` measure layout. 681 -> 702 assertions,
-  62 -> 72 harness properties.
-- **v1.6.13** — The P(-1) audit, ten releases late, and the arch half of the product
-  could not boot. 31 findings (2 CRITICAL, 9 HIGH, 13 MEDIUM, 7 LOW); 9 closed, 1
-  mitigated, 21 deferred with evidence. **CRITICAL-1: `sys_signalfd()` issues
-  `fsync(-1)` on aarch64**, so phase 4 takes its FATAL arm and every aarch64 board
-  powers itself off before loading config — a published artifact that was 100%
-  non-functional while every gate was green, because no gate had ever executed one
-  aarch64 instruction. Exactly two of 34 syscall wrappers are wrong; the fix is
-  upstream in cyrius, so kybernet added the execution gate and made `release.yml`
-  refuse to publish a binary that cannot boot. **CRITICAL-2: the PCR comparison read
-  sigil's raw cstr digest as a boxed `Str`** and dereferenced eight ASCII hex
-  characters as a pointer — SIGSEGV in PID 1, on the SUCCESS path of an attesting edge
-  board, in a function no fixture had ever executed. Also: a default boot SIGKILLed
-  healthy services (the health cadence ignored argonaut's defaults — the same bug 1.5.0
-  fixed for the start path); an 8 KiB-per-datagram OOM primitive against PID 1;
-  `kybernet.edge=permissive` dropped the board into an emergency shell three lines
-  after saying it would continue; the harness aborted silently whenever kybernet failed
-  to boot; and standing rule 2 had been half wrong since 1.1.5 (`var X[N]` is N BYTES
-  local, N SLOTS global — measured). 676 → 681 assertions, now green on aarch64 too.
-- **v1.6.12** — argonaut 1.13.8 redep: three things unobservable, unschedulable or
-  unbounded in the long-lived path. The orphan-reap count is logged, so the `kyb-orphan`
-  fixture is **asserted** after eleven releases documented "NOT ASSERTED" — argonaut
-  discarded the count and kybernet had no way to ask, so reparented children were reaped
-  correctly and invisibly. Health probes are now scheduled per service (`interval_ms` was
-  parsed, stored, exposed, and read by nothing), so kybernet's poll timer is a tick
-  resolution rather than the cadence every service got. The in-memory audit chain streams
-  by default — it retained 240 bytes per record, ~0.68 MB/day/service in the one arena PID 1
-  never resets; `chain_with_capacity` was checked and does NOT free (rotation archives into
-  `overflow`), while streaming keeps linkage byte-identical. Also: the harness had **never
-  built what it tests**, so "edit src/, run boot-test.sh" graded the previous binary — found
-  by an inject-the-defect run that returned 62 OK / 0 FAIL when it had to fail. 676 tests,
-  62 harness properties.
-- **v1.6.11** — Deleted a benchmark of dead code without weakening the gate that forbids
-  it. `sandbox_from_ruleset` and `_ll_access_to_kernel` had no production caller; the latter
-  had justified standing rule 9 for seven releases as "the per-service Landlock path where a
-  miscompile is a PID-1 crash" while its only caller chain terminated in `bench.cyr`. The
-  bench gate fails on a shrinking suite, so the removal is *declared* (`BENCH_REMOVED=1`),
-  verified to still fail when undeclared. 57 → 56 benchmarks.
-- **v1.6.10** — `MAINPID=` honoured behind two independent checks, and the difference
-  between authentication and authorisation: `SCM_CREDENTIALS` proves who *sent* a datagram,
-  not which pid it may speak for, so a forged MAINPID is refused on cgroup membership.
-  Reject reasons are counted separately — a single "rejected: N" cannot distinguish
-  "SO_PASSCRED is broken" from "the sender was not a live service". 58 → 61 properties.
-- **v1.6.9** — Services can run as something other than root. The entire uid/gid half of
-  `privdrop.cyr` was unreachable — `drop_privileges` had no caller. Ordering is
-  load-bearing: the drop must precede seccomp, because none of
-  setuid/setgid/setgroups/setresuid are in the `basic` allowlist. 56 → 58 properties.
-- **v1.6.8** — sd_notify READY and WATCHDOG *honoured*, not merely observed. 1.6.3 built
-  the whole substrate and then dropped every message on the floor. argonaut 1.13.5 → 1.13.7.
-- **v1.6.7** — `health_check.interval_ms` was parsed, stored, and never reached the timer:
-  the reactor polled on a hardcoded 30 s, so a service asking for 5 s got 30 — and argonaut
-  sizes the watchdog deadline from the service's OWN interval, so a mis-sized watchdog can
-  kill a healthy service. 667 → 676 assertions.
-- **v1.6.6** — The last confinement mechanism with no fixture, and a gate that had been
-  passing by luck. Picks up argonaut 1.13.4's two per-tick arena leaks. 53 → 55 properties.
-- **v1.6.5** — A per-SIGCHLD arena leak needing no socket, no credentials and no config:
-  `reap_zombies` allocated 152 bytes on **every** SIGCHLD, idle or not. Measured 304,000
-  bytes over 2000 idle calls, now 152 total.
-- **v1.6.4** — Config keys parsed and never consulted, and code with no callers.
-  `log_to_console` had exactly two readers in the tree: its own definition and the copy in
-  reload. 660 → 667 assertions.
-- **v1.6.3** — sd_notify was received, classified, logged and **discarded** — and leaked
-  doing it: `notify_read` allocated 512 bytes per datagram on the reactor hot path, a
-  root-triggerable memory-exhaustion DoS against PID 1. Retired the hand-rolled per-arch
-  socket syscall table. 632 → 660 assertions.
-- **v1.6.2** — Code that does nothing, and docs that say it does. Boot phase 6b was a
-  provable no-op carrying three defects; argonaut's import list dropped 13 → 12 modules
-  (`tmpfiles.cyr` had no call site in the link set).
-- **v1.6.1** — Gates that could not fail, and the kernel panic the first new one found.
-  A fixture with a failing health check made PID 1 SIGSEGV on its first tick: argonaut's
-  `init_enforce_watchdog` passed a cstr to `proc_table_pid`, which takes a boxed `Str` —
-  and the function had never executed in any release of either repo, because nothing had
-  ever configured a `health_check` (so there was no watchdog at all). Fixed in argonaut
-  1.13.3 with a test verified to SIGSEGV on the unfixed source. Six gates made able to go
-  red: the QEMU harness (was `continue-on-error`, and skipped silently without KVM), the
-  bench gate (never run by CI at all), the aarch64 build (no-oped, and release shipped
-  without the artifact), the test count (a shrinking suite passed), CI's `raw system()`
-  scan (BRE vs ERE — always "clean"), and `cyrius lint`, now hard at 0 deferrals and 0
-  warnings. 28 of the harness assertions had never run in CI for want of two apt packages;
-  `HARNESS_STRICT=1` makes a skip a failure there. New coverage for orphan reaping,
-  structured logging, main.cyr's extracted helpers, and the credential path. Retired two
-  broken orphan scripts. The first cut failed its own new bench gate — `is_mounted` was
-  scanning the host's real `/proc/self/mounts`, so it measured the runner's mount table
-  (+641%) while every other benchmark improved; the calibration normalises CPU speed, not
-  how much data the host hands you. Fixed hermetically, and the Argon2 benchmark (memory-
-  bound, same class) with it. 632 tests, 45 harness properties, 57 benchmarks.
-- **v1.6.0** — The confinement path did not confine, and one of the four ways was
-  fatal: `"seccomp": "basic"` had no `execve` on its 37-syscall allowlist and denied
-  with `KILL_PROCESS`, so it killed every service it was applied to from 1.4.3 onward
-  (verified: SIGSYS). The allowlist gained the measured exec+loader set and the default
-  action became `ERRNO(EPERM)` — a hand list is never complete, so an omission must
-  degrade rather than execute. Landlock now fails closed instead of reporting success on
-  a kernel without it; `_stage_verify_rootfs` is keyed on the verification RESULT (rule
-  18) instead of the dm probe; `edge_apply_defaults` clears all five fields so nobody
-  inherits a 3-second poweroff budget; a malformed config no longer replaces a running
-  one on SIGHUP, and the silent 16 KiB read cliff is a readable error; `enabled: false`
-  is skipped rather than counted as a failure that drops the board to an emergency
-  shell; unsafe service names are refused at load and on kill/rmdir. New `kyb-seccomp`
-  harness fixture — its absence is why this shipped for three releases. 608 tests, 44
-  harness properties.
-- **v1.5.9** — Salted, memory-hard emergency credential. Argon2id in a self-describing
-  `v1$t$m$p$salt$tag` record (agnostic's format, adopted rather than invented);
-  `scripts/mkcred.sh` over `openssl kdf`, byte-identical to sigil; parameter bounds are
-  rejections, never clamps. sigil 3.12.10 moved the Argon2 lane onto the caller's arena
-  (+377 KB link → +25 KB) and took the toolchain 6.5.21 → 6.5.35. Legacy digests still
-  verify; both formats gated. 567 tests, 42 harness properties.
-- **v1.5.8** — The emergency-auth gate did not work at all: the prompt read fd 0, which
-  is `/dev/null` by design, so no password could ever authenticate — and 1.5.7's forced
-  `require_auth` made that a reboot loop. Interactive reads now open their own console;
-  echo suppression in a new `termios.cyr`; a rejection halts instead of rebooting.
-- **v1.5.7** — Edge boot actually verifies, via `veritysetup verify` (pure userspace). An
-  absent `edge` block now means detection-only rather than an un-overridable demand.
-- **v1.5.6** — Consumed argonaut 1.13.1's arch repairs; no forked service had its own
-  session on ARM. Restored two dropped commit pins.
-- **v1.5.5** — Cgroup limits actually applied: no controller was ever enabled, and
-  `ResourceLimits` is defined twice with incompatible layouts.
-- **v1.5.4** — Rust port complete, `rust-old/` removed. Eight dropped behaviours closed,
-  including deferred restarts and `$NOTIFY_SOCKET`.
-- **v1.5.3** — Lifecycle cleanup: cgroup teardown wired, `reload_config` narrowed,
-  refusals reach dmesg.
-- **v1.5.2** — Per-service security profiles as config data; capability numbers corrected
-  across agnostik and argonaut (both disagreed with the kernel).
-- **v1.5.1** — Boot stages that do something; `execute_boot_stage` had been `return 1`
-  for all eleven arms.
-- **v1.5.0** — Config-driven services; three defects in a start path that had never run.
-- **v1.4.3** — 686 lines of security code reachable from nothing reached a production
-  path, via argonaut 1.9.0's pre-exec hook.
-- **v1.4.2** — P(-1) audit: 20 findings, both CRITICALs gate-invisible (spinning
-  timerfds, an x86_64-only `epoll_event` layout). Added the reactor gate.
-- **v1.4.1** — Toolchain 6.5.35 + dependency refresh; retired the `path` overrides that
-  made tag pins inert.
-- **v1.4.0** — THIN sigil surface: 14.35 MB → 0.96 MB.
-- **v1.3.x** — Benchmarks became a regression-gated release gate; the 6.0.x → 6.2.11
-  leap; agnosys dropped for sigil.
-- **v1.2.x** — Edge boot scaffolding: capability detection, PCR reads, the flag gate.
-- **v1.1.x** — Modernization: the QEMU PID-1 harness, cgroup path precomputation, the
-  fourth P(-1) audit.
-- **v1.0.x** — The Rust → Cyrius port and its toolchain rebases.
-
-⚠ The roadmap ITEMS once numbered v1.2.1 and v1.2.2 were never what shipped under those
-tags. That work is now v1.5.7 (real verification) and the hardware section above.
-
-**Closed and removed from this file:** the v1.5.9 KDF items (all five shipped);
-`drop_cap_sets()` privileged validation (the 1.5.2 `kyb-confined` harness service asserts
-`CapEff=0` / `NoNewPrivs=1` as real root under QEMU).
+- [ ] **Control socket for agnoshi runtime commands**, once an agnoshi consumer drives
+      the protocol shape.
+- [ ] **Binary signing on release**, once libro signing and timestamping are driven from
+      outside kybernet.
