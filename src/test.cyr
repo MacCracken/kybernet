@@ -2877,6 +2877,43 @@ fn test_agnos_dirs() {
     return 0;
 }
 
+# 1.7.7 — the contract between argonaut's desktop defaults (1.15.3) and what the
+# kybernet package ships. argonaut names the program by path; kybernet installs it
+# there (1.7.6). If either side moves, a desktop boot skips its compositor, so the
+# consumer checks the producer's actual values rather than trusting the pin.
+fn test_desktop_agnos_init_contract() {
+    println("--- desktop defaults: aethersafha needs agnos-init (1.7.7) ---");
+    var dsk = default_services(BOOT_DESKTOP);
+    var ainit = 0;
+    var comp = 0;
+    for (var i = 0; i < vec_len(dsk); i = i + 1) {
+        var sd = vec_get(dsk, i);
+        if (streq(str_data(svc_def_name(sd)), "agnos-init") == 1) { ainit = sd; }
+        if (streq(str_data(svc_def_name(sd)), "aethersafha") == 1) { comp = sd; }
+    }
+    assert(ainit != 0, "desktop: the built-in set has agnos-init");
+    assert(comp != 0, "desktop: the built-in set has aethersafha");
+    if (ainit != 0) {
+        # The path the kybernet package installs agnos-init to, and the harness runs.
+        assert(streq(str_data(svc_def_binary(ainit)), "/usr/lib/agnos/agnos-init") == 1,
+          "desktop: agnos-init names /usr/lib/agnos/agnos-init");
+        assert(svc_def_service_type(ainit) == SVC_ONESHOT, "desktop: agnos-init is a oneshot");
+    }
+    var dep = 0;
+    if (comp != 0) {
+        var deps = svc_def_deps(comp);
+        for (var j = 0; j < vec_len(deps); j = j + 1) {
+            if (streq(str_data(vec_get(deps, j)), "agnos-init") == 1) { dep = 1; }
+        }
+    }
+    assert(dep == 1, "desktop: aethersafha depends_on agnos-init");
+    # Recovery mode, which the harness boots, has no built-in agnos-init, so the
+    # harness's own service of that name is not ignored as a collision.
+    var rec = default_services(BOOT_RECOVERY);
+    assert(vec_len(rec) == 0, "recovery: no built-in services, so no collision");
+    return 0;
+}
+
 fn test_emerg_cred_resolve() {
     println("--- emergency credential source (1.7.1) ---");
     var rec = _cat2("v1$2$19456$1$6b796265726e65742d746573742d3031$",
@@ -3590,6 +3627,7 @@ fn main() {
     test_emerg_cred_resolve();
     test_emerg_shell_needs_auth();
     test_agnos_dirs();
+    test_desktop_agnos_init_contract();
     test_cfg_read_class();
     test_edge_compare_pcrs_cstr();
     test_edge_boot_gating();

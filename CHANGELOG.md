@@ -7,6 +7,84 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.7.7] — 2026-09-23
+
+**argonaut 1.15.2 → 1.15.3: on a desktop, the compositor now waits for its
+directories.** argonaut's `default_services(BOOT_DESKTOP)` adds the `agnos-init`
+oneshot and makes aethersafha depend on it. The program has shipped in the kybernet
+package since 1.7.6, so this closes the roadmap item that replaces agnosticos's
+`agnos-init.sh` `setup_directories()`. Suite 849 → **855** assertions (844 → **850**
+on aarch64).
+
+### Changed — argonaut 1.15.3
+
+`[deps.argonaut]` `1.15.2` → `1.15.3`, commit `9bae8e2`, confirmed on the remote
+through the GitHub API. Of the twelve imported modules only `src/services.cyr`
+changed, and `cyrius.lock` moves by exactly that file's hash and the commit pin.
+
+On a `boot_mode: desktop` board, kybernet now starts `agnos-init`
+(`/usr/lib/agnos/agnos-init`, `type: oneshot`) before aethersafha. If it cannot make
+the layout it exits 1, and the compositor is skipped (as a failed prerequisite's
+dependents have been since 1.6.18) rather than started without its sockets'
+directories. The built-in wins over a config service of the same name, as for every
+built-in. No other boot mode changes, and the harnesses boot `recovery`, where there
+are no built-ins at all.
+
+### Tests
+
+`test_desktop_agnos_init_contract` (6 assertions) checks the contract between the two
+repos from kybernet's side. argonaut's built-in `agnos-init` must exist, name
+`/usr/lib/agnos/agnos-init` (the path kybernet's package installs and both harnesses
+run), and be a oneshot, and aethersafha must depend on it. Recovery mode must have no
+built-ins, so the harness's own `agnos-init` service is never ignored as a collision.
+Resolved against argonaut 1.15.2, the test fails 2 of those (no `agnos-init`, no
+dependency). A pin that slid back would therefore fail the suite.
+
+### Bench — two flags, explained as layout and accepted
+
+The regression gate flagged `hashmap(3 set+4 get/has)` (1,013 → 1,254 ns/op, +24%
+raw) and `agent_config(new+get+set)` (103 → 131, +27% raw). Neither executes anything
+this release changed. Standing rule 6 says a flag blocks the cut until explained, so:
+
+- **Code or machine?** The bench binary built against argonaut 1.15.2 and against
+  1.15.3, run alternately four times each on one idle machine: `hashmap` 997–1,100
+  against 1,192–1,230, and `agent_config` 110 against 121–129. So the change causes
+  it; the machine does not. The two binaries differ by 64 bytes, all of it in
+  `default_services`, which no benchmark calls.
+- **Layout?** The method `scripts/bench-history.sh` documents for this: inert padding
+  in `src/bench.cyr` of the 1.15.2 build, which no code reads. An unused BSS array
+  of 8 to 48 slots moved them only about 5%. An unused **string literal** of 1 to 60
+  bytes moved `hashmap` anywhere from 1,002 to 1,199. It moved `agent_config` from
+  110 to 131–134 **reproducibly per pad length**: a 3-byte pad gives 131 and 132.
+  That is the flagged +19% with no change to any code, so these two benchmarks
+  measure where the string literals landed, the same effect the gate already
+  records for `strlen(52 chars)`.
+
+This run is the baseline going forward. Both stay gated. Whether to make them
+layout-insensitive, or exempt them the way `strlen` and `is_mounted` are, is a
+roadmap item rather than something done in passing.
+
+### Verification
+
+| check | result |
+|---|---|
+| `cyrius test src/test.cyr` | **855 passed, 0 failed** |
+| `bash scripts/aarch64-exec-gate.sh` | **850** assertions, 0 failed; 5/5 syscall probes |
+| `bash qemu/boot-test.sh` (`HARNESS_STRICT=1`, KVM) | **120/120**, 0 failed, 0 skipped |
+| `bash qemu/boot-test-aarch64.sh` (TCG) | **174/174**, 0 failed |
+| the contract test against argonaut 1.15.2 | red, 851 / 2 |
+| `bash scripts/bench-history.sh` | 56 benchmarks; 2 flags, explained above as layout |
+| `rm -rf lib && cyrius deps && cyrius deps --verify` | 76 verified, 0 failed; 5 commit pins, argonaut `9bae8e2` |
+| `cyrius lint` / `fmt --check` over `src/`, `cyrius vet` | clean |
+| sibling-free reproduction | lock and all four binaries byte-identical; argonaut resolves to `9bae8e2` from the remote |
+| `bash scripts/verify-lock.sh` | fails **before commit, as designed**: HEAD's lock still pins 1.15.2. It passes once `cyrius.cyml` and `cyrius.lock` are committed together, which is what CI checks out |
+
+Binary: kybernet x86_64 715,560 → **719,720** B, aarch64 2,169,336 → **2,169,392** B;
+agnos-init x86_64 248,384 → **248,440** B, aarch64 2,034,024 → **2,034,080** B (all
+`CYRIUS_DCE=1`).
+
+---
+
 ## [1.7.6] — 2026-09-23
 
 **`agnos-init`: the AGNOS directory layout, as a oneshot the kybernet package ships.**

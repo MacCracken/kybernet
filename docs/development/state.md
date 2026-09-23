@@ -6,6 +6,15 @@
 
 ## Version
 
+**1.7.7**: argonaut 1.15.2 → 1.15.3. On a desktop, aethersafha now depends on the
+`agnos-init` oneshot (shipped in this package since 1.7.6), so its socket directories
+exist before it starts. That completes the `setup_directories()` port.
+`test_desktop_agnos_init_contract` checks both repos' halves: argonaut's built-in and
+dependency, and the install path this package uses. Suite 855 / 850. Harnesses
+unchanged (120 / 174): they boot `recovery`, which has no built-ins. The bench gate
+flagged two benchmarks, which an inert-padding experiment showed to be string-literal
+layout (roadmap).
+
 **1.7.6**: `agnos-init`. The kybernet package now ships a second, separate program at
 `/usr/lib/agnos/agnos-init`, run as a oneshot service, that makes the directories AGNOS
 services expect at boot. That covers the `/run/agnos/{agents,plugins}` sockets
@@ -124,7 +133,7 @@ gitignored: **the contract is the lock file, not the bytes on disk.**
 | sigil | 3.12.18 | `eb6b922` | THIN surface: mldsa + sha_ni + sha256 + hex + tpm + argon2. **Never the monolith.** |
 | agnostik | 1.6.3 | `3729b55` | `dist/agnostik.cyr` full bundle |
 | libro | 2.10.3 | `c95f296` | `dist/libro.cyr` full bundle |
-| argonaut | 1.15.2 | `41c8948` | **12 selective modules**, no dist bundle |
+| argonaut | 1.15.3 | `9bae8e2` | **12 selective modules**, no dist bundle |
 | patra | 1.14.3 | `b9d3cf8` | stdlib fold, and libro's pin (byte-identical); kybernet calls no `patra_*` |
 
 `cyrius deps --verify`: **76 verified, 0 failed**, 5 commit pins. Every tag was confirmed
@@ -147,13 +156,13 @@ and byte-identical, and the warning still fires.
 
 | Arch | Bytes | `e_machine` |
 |---|---|---|
-| x86_64 (`CYRIUS_DCE=1`) | 715,560 | `0x3e` |
-| aarch64 (`CYRIUS_DCE=1`) | 2,169,336 | `0xb7` |
-| agnos-init x86_64 (`CYRIUS_DCE=1`) | 248,384 | `0x3e` |
-| agnos-init aarch64 (`CYRIUS_DCE=1`) | 2,034,024 | `0xb7` |
+| x86_64 (`CYRIUS_DCE=1`) | 719,720 | `0x3e` |
+| aarch64 (`CYRIUS_DCE=1`) | 2,169,392 | `0xb7` |
+| agnos-init x86_64 (`CYRIUS_DCE=1`) | 248,440 | `0x3e` |
+| agnos-init aarch64 (`CYRIUS_DCE=1`) | 2,034,080 | `0xb7` |
 
-1.7.5's three service keys added 5,552 B on x86_64 and 1,464 B on aarch64 (1.7.4's
-edge-auth rule had added 80 and 72). The note below is
+1.7.7's argonaut 1.15.3 (one more desktop default) added 4,160 B to kybernet on x86_64
+and 56 on aarch64. 1.7.5's three service keys had added 5,552 and 1,464. The note below is
 1.7.0's, when the toolchain moved.
 
 The toolchain accounts for almost all of the change: the unchanged 1.6.20 source built
@@ -172,8 +181,8 @@ the build; that is standing rule 32.
 
 | Gate | Count | Enforcement |
 |---|---|---|
-| `cyrius test src/test.cyr` | **849** assertions | floor read from CLAUDE.md; a shrinking suite fails |
-| `bash scripts/aarch64-exec-gate.sh` | **844** assertions + 5 syscall probes | executes aarch64 under `qemu-user`; its own declared floor |
+| `cyrius test src/test.cyr` | **855** assertions | floor read from CLAUDE.md; a shrinking suite fails |
+| `bash scripts/aarch64-exec-gate.sh` | **850** assertions + 5 syscall probes | executes aarch64 under `qemu-user`; its own declared floor |
 | `bash qemu/boot-test-aarch64.sh` | **174** properties, all 5 passes, 24 services | boots `kybernet-aarch64` as PID 1 (TCG), entropy-starved; needs host `veritysetup` |
 | `bash qemu/boot-test.sh` | **120** properties, 5 passes | `HARNESS_STRICT=1` in CI makes a skip a failure |
 | `bash scripts/verify-lock.sh` | 2 halves, 5 commit pins | the committed lock (HEAD's, not the working tree's) vs a fresh resolve |
@@ -181,7 +190,7 @@ the build; that is standing rule 32.
 | `cyrius lint` | 0 warnings, **0 untracked deferrals** | HARD GATE, both halves |
 | `cyrius fmt --check` | clean | non-mutating; never `diff <(cyrius fmt …)` |
 
-⚠ **849 and 844 are both correct, and neither floor gates the other.** Six assertions are
+⚠ **855 and 850 are both correct, and neither floor gates the other.** Six assertions are
 x86-only (`BS_OPEN`/`BS_STAT`/`BS_LSTAT`/`BS_PIPE`/`BS_POLL`/`BS_NANOSLEEP`) and one is
 aarch64-only (`BS_PPOLL`). Both floors are declared in CLAUDE.md and must be bumped
 together. **Do not pad the short arch to equalise them.**
@@ -215,19 +224,17 @@ stricter bar on the next sweep.**
 
 ## In flight
 
-**v1.7.6 is ready and untagged.** It changes no dependency, lock or toolchain pin. The
-1.7.6 CHANGELOG entry has the numbers.
+**v1.7.7 is ready and untagged.** It moves one dependency pin, argonaut 1.15.2 → 1.15.3
+(commit `9bae8e2`, confirmed on the remote). The 1.7.7 CHANGELOG entry has the numbers.
 
 ## Next
 
 In the order I would take them. The full list is [roadmap.md](roadmap.md), with 13 open
 items.
 
-1. **argonaut: aethersafha depends on `agnos-init`** (the rest of the `setup_directories()`
-   port). argonaut adds the oneshot to `default_services(BOOT_DESKTOP)`, the user tags it,
-   and kybernet consumes the tag. zugot's `kybernet` recipe must install
-   `/usr/lib/agnos/agnos-init`.
-2. **Adopt `file_read_whole` and retire the 16 KiB config cap** (roadmap v1.7.x).
+1. **Adopt `file_read_whole` and retire the 16 KiB config cap** (roadmap v1.7.x).
+2. **`hashmap` / `agent_config` measure string-literal layout** (roadmap v1.7.x): make
+   them layout-insensitive, or exempt them with the experiment.
 
 ## Release order (cross-repo)
 

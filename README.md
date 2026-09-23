@@ -154,7 +154,7 @@ Resolved via `cyrius.cyml` (locked in `cyrius.lock`):
 | sigil | 3.12.18 | TPM / crypto trust surface + Argon2id (thin sub-bundles only) |
 | agnostik | 1.6.3 | Shared AGNOS types (security, agent, error) |
 | libro | 2.10.3 | Cryptographic audit chain |
-| argonaut | 1.15.2 | Service lifecycle, boot stages, health, audit, pre-exec + extra-env hooks |
+| argonaut | 1.15.3 | Service lifecycle, boot stages, health, audit, pre-exec + extra-env hooks |
 
 `patra` and `sakshi` are **not** declared as git deps — cyrius 6.5.20+ ships
 them in the stdlib snapshot, and a git pin would silently downgrade the

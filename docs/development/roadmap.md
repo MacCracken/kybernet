@@ -1,6 +1,6 @@
 # Kybernet Roadmap
 
-**Current: v1.7.6** — [CHANGELOG.md](../../CHANGELOG.md) is the record of what each
+**Current: v1.7.7** — [CHANGELOG.md](../../CHANGELOG.md) is the record of what each
 release actually did. This file carries only what is **not** done; a completed item is
 deleted from here and summarised in History below, never left ticked.
 
@@ -41,8 +41,8 @@ something outside this repo.
 `cyrius lint` reports **0 untracked deferrals and 0 warnings** across the tree, and as
 of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into fiction.
 
-**Gate counts at v1.7.6** (a next agent must not let these shrink; each is enforced):
-**849** test assertions on x86_64 and **844** on aarch64 · **120** harness properties ·
+**Gate counts at v1.7.7** (a next agent must not let these shrink; each is enforced):
+**855** test assertions on x86_64 and **850** on aarch64 · **120** harness properties ·
 **174** aarch64 boot-gate properties · 56 benchmarks (two reported-not-gated, declared) ·
 the aarch64 execution gate · the committed-lock gate.
 ⚠ **The two assertion counts differ on purpose and neither floor gates the other** — a
@@ -105,21 +105,12 @@ method, not about the code.
 
 ## v1.6.x — code that does nothing, and docs that say it does
 
-- [ ] **Make aethersafha depend on `agnos-init`.** The half of the `setup_directories()`
-      port that is left. 1.7.6 ships `agnos-init` in the kybernet package
-      (`/usr/lib/agnos/agnos-init`): it makes `/run/agnos/{agents,plugins}`,
-      `/run/user/1000` and the `/var/lib/agnos` / `/var/log/agnos` / `/etc/agnos`
-      layout, and both harnesses run it as a oneshot. What remains:
-      1. **argonaut** — `default_services(BOOT_DESKTOP)` adds an `agnos-init` oneshot
-         and aethersafha `depends_on` it. It has to be argonaut: kybernet ignores a
-         config service that collides with a built-in, so an operator cannot add the
-         edge from `config.json`.
-      2. **kybernet** consumes that argonaut tag. The binary and the dependency then
-         always ship in the same package, which is why the binary is in kybernet.
-      3. **zugot** — the `kybernet` recipe (still at 1.3.4) must install
-         `/usr/lib/agnos/agnos-init` when it moves to 1.7.6 or later. ⚠ A kybernet
-         that carries the dependency on an image without the binary skips the
-         compositor (a failed prerequisite blocks its dependents since 1.6.18).
+- [ ] **Two more benchmarks measure string-literal layout: `hashmap(3 set+4 get/has)`
+      and `agent_config(new+get+set)`.** Found at 1.7.7. An unused string literal in
+      `src/bench.cyr` moves `agent_config` from 110 to 131–134 ns/op and `hashmap` from
+      about 1,000 to 1,199, with no code changed (CHANGELOG [1.7.7] has the
+      experiment). Decide as for `strlen(52 chars)`: make them layout-insensitive, or
+      exempt them in `LAYOUT_SENSITIVE` with the experiment in the same commit.
 
 ---
 
@@ -216,6 +207,11 @@ Moved into the v1.6.1 gate line. Recording why here so the claim is not re-made:
 
 One line per release. Detail lives in [CHANGELOG.md](../../CHANGELOG.md).
 
+- **v1.7.7** — argonaut 1.15.3: on a desktop, aethersafha now depends on the `agnos-init`
+  oneshot the kybernet package has shipped since 1.7.6, so its socket directories exist
+  before it starts. That closes the `setup_directories()` port. A contract test pins
+  both halves across the two repos, and fails against argonaut 1.15.2. The bench gate's
+  two flags were shown to be string-literal layout by an inert-padding experiment.
 - **v1.7.6** — `agnos-init`, a separate oneshot program the kybernet package ships at
   `/usr/lib/agnos/agnos-init`, makes the AGNOS directory layout: the `/run/agnos`
   socket directories aethersafha binds in (which nothing created before), `/run/user/1000`,
