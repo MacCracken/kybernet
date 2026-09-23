@@ -6,40 +6,47 @@
 
 ## Version
 
-**1.7.2**: aarch64 fixture parity. The aarch64 boot gate ran with **no services** from
-1.6.19 to 1.7.1, because the x86 harness's fixtures are busybox applets. It now stages 19
-services built only from this repo's Cyrius fixtures and asserts on aarch64 what the x86
-harness asserts about services. It went from **18 → 66** properties, and every one held
-on the first run, so no kybernet defect turned up on aarch64. Suite counts are unchanged
-(787 / 782).
+**1.7.3**: the aarch64 edge, emergency-auth and quiet passes. They were the last three
+x86-only passes; the aarch64 boot gate now runs all five, **66 → 158** properties, and
+every new one held on the first run. Suite counts are unchanged (787 / 782), and so are
+the binaries: no `src/` file changed.
 
-`qemu/svc-fixture.cyr` is the new fixture, with six modes chosen by argv (`true`,
-`false`, `sleep N`, `orphan`, `status`, `relay FILE`). `status` labels its report with
-its **own cgroup's** leaf name, so the label doubles as the cgroup-placement check.
+Two stand-ins, both built from this repo, replace what the x86 images take from the
+build host:
 
-What the parity work found instead:
+- **`qemu/verity-fixture.cyr` is `/usr/sbin/veritysetup`.** Neither build host has an
+  aarch64 veritysetup. The image is formatted by the host's real veritysetup, and on every
+  run the stand-in's host build must match the real `veritysetup verify` exit code for
+  exit code on five cases, with the real tool's own answers checked too (standing rule 52).
+- **`qemu/preinit-fixture.cyr` gives the board its disks.** The pinned kernel builds
+  virtio-blk and every other `virt` disk driver as a module, which the roadmap had not
+  checked. It builds RAM disks in, so the pre-init copies the image into `/dev/ram0` and
+  the tree into `/dev/ram1`, then execs kybernet. Every boot must print `PREINIT-OK`.
 
-- **The aarch64 gate's span was measuring kernel boot.** It took the first timestamp in the
-  whole log (`Booting Linux`, 0.000000). That only looked right while the initramfs was a
-  lone ~500 KB PID 1. It now starts at kybernet's `phase 1:` kmsg (standing rule 37).
-- **The health-check and watchdog assertions were a race** between two timers on one
-  service. KVM always resolved it the same way and TCG did not. Each property now has its
-  own service, `kyb-health` (retries 10) and `kyb-wdog` (retries 1), on both harnesses
-  (standing rule 36). The x86 harness now has 20 services.
-- **PID 1 waits for entropy at phase 6**, in the stdlib's hashmap seed
-  (`getrandom(…, 0)`), not at the first audit record as the roadmap had assumed. That was
-  870 ms under TCG with no seed. The aarch64 gate now boots with `dtb-randomness=off` and
-  asserts that the boot really was starved (standing rule 51). The non-blocking fix
-  (`GRND_INSECURE`) is upstream, in cyrius.
+What the passes found:
 
-Checked by putting each defect back: an aarch64-only allowlist regression (`ppoll` removed)
-turns the aarch64 gate red, and the x86 harness structurally cannot see it. A seeded boot
-turns the entropy assertion red.
+- **No auth pass had ever run a shell**, on either arch. `/usr/bin/agnoshi` was busybox,
+  which refuses that name. `svc-fixture`, started as `agnoshi`, now reports the shell's
+  descriptors, `SigBlk`, uid and environment, on both arches (x86 84 → 104).
+- **⚠ An edge board opens the emergency shell WITHOUT authentication when a required boot
+  stage fails** (phase 7), because 1.5.7 forced authentication only for the phase-6c
+  refusal. Every edge boot that passes phase 6c shows it: argonaut's edge sequence has a
+  required daimon stage, and the fixtures have no daimon. **Not fixed in 1.7.3**, which
+  changes no `src/` file. It is the first item on the roadmap.
+- Argon2id verification as aarch64 PID 1 under TCG costs ~2.7 s at phase 6c, far inside
+  the prompt's 120 s deadline.
+
+Checked by putting nine defects back on aarch64, and one on x86. Every one turned its
+gate red, at the properties it should have.
+
+**1.7.2** brought the service fixtures to aarch64 (18 → 66). It also found the gate's
+span measuring kernel boot, a health/watchdog race, and PID 1's entropy wait at phase 6
+(standing rules 37, 36 and 51).
 
 **1.7.1** fixed a refused `emergency.cred` falling back to the config key. 1.6.18 had
 promised it would not.
 
-1.7.0, the release before this one, moved cyrius 6.6.2 → 6.6.6 and every dep to its
+1.7.0 moved cyrius 6.6.2 → 6.6.6 and every dep to its
 latest tag. Its three fixes (only ENOENT is an absent config, the Landlock fixture's
 truncate probe, and `read_signal` as a `Result`) are in the 1.7.0 CHANGELOG entry.
 Its first CI run failed on a kernel pinned by checksum to a mutable Alpine URL. That
@@ -103,8 +110,9 @@ against a reading of the call graph. agnostik 1.6.3's `_fill_random` exits 70 wh
 `getrandom` fails, and it is **dead** in PID 1. libro 2.10.3's `uuid_v4` now calls
 `getrandom(…, 0)` and is **live**, since every audit record calls it. That is better than
 2.10.0's `/dev/urandom` open, which exited 74 without the device node, a panic in init.
-But it waits for the CRNG, and no gate has exercised that on a machine with no hardware
-RNG (roadmap).
+It waits for the CRNG, but by the first audit record the CRNG is already seeded: the
+stdlib's hashmap seed waited first, at phase 6. The aarch64 gate boots with no entropy
+seed and shows it (standing rule 51).
 
 `refusing to overwrite stdlib leaf 'patra'` is structural and expected. 1.6.20 explained
 it as a stale libro pin, which was wrong: at 6.6.6 the pin and the fold are both 1.14.3
@@ -114,8 +122,12 @@ and byte-identical, and the warning still fires.
 
 | Arch | Bytes | `e_machine` |
 |---|---|---|
-| x86_64 (`CYRIUS_DCE=1`) | 704,776 | `0x3e` |
-| aarch64 | 2,166,736 | `0xb7` |
+| x86_64 (`CYRIUS_DCE=1`) | 709,928 | `0x3e` |
+| aarch64 | 2,167,800 | `0xb7` |
+
+Unchanged since 1.7.1, which added the credential-resolver code: 1.7.2 and 1.7.3 change no
+`src/` file, and the release gates rebuilt both byte-identical. The note below is 1.7.0's,
+when the toolchain moved.
 
 The toolchain accounts for almost all of the change: the unchanged 1.6.20 source built
 under 6.6.6 is +512 B on x86_64 and **+66,048 B on aarch64**, where the ladder is emitted
@@ -135,8 +147,8 @@ the build; that is standing rule 32.
 |---|---|---|
 | `cyrius test src/test.cyr` | **787** assertions | floor read from CLAUDE.md; a shrinking suite fails |
 | `bash scripts/aarch64-exec-gate.sh` | **782** assertions + 5 syscall probes | executes aarch64 under `qemu-user`; its own declared floor |
-| `bash qemu/boot-test-aarch64.sh` | **66** properties, 19 services | boots `kybernet-aarch64` as PID 1 (TCG), entropy-starved |
-| `bash qemu/boot-test.sh` | **84** properties, 5 passes | `HARNESS_STRICT=1` in CI makes a skip a failure |
+| `bash qemu/boot-test-aarch64.sh` | **158** properties, all 5 passes, 19 services | boots `kybernet-aarch64` as PID 1 (TCG), entropy-starved; needs host `veritysetup` |
+| `bash qemu/boot-test.sh` | **104** properties, 5 passes | `HARNESS_STRICT=1` in CI makes a skip a failure |
 | `bash scripts/verify-lock.sh` | 2 halves, 5 commit pins | the committed lock (HEAD's, not the working tree's) vs a fresh resolve |
 | `bash scripts/bench-history.sh` | **56** benchmarks (2 reported-not-gated) | ≥15% regression gate; `LAYOUT_SENSITIVE` names the two exempt ones |
 | `cyrius lint` | 0 warnings, **0 untracked deferrals** | HARD GATE, both halves |
@@ -147,12 +159,16 @@ x86-only (`BS_OPEN`/`BS_STAT`/`BS_LSTAT`/`BS_PIPE`/`BS_POLL`/`BS_NANOSLEEP`) and
 aarch64-only (`BS_PPOLL`). Both floors are declared in CLAUDE.md and must be bumped
 together. **Do not pad the short arch to equalise them.**
 
-20 modules in `src/lib/`. 20 `kyb-*` services in the x86 harness and 19 in the aarch64 gate. 6 `.cyr` files under `qemu/`.
+20 modules in `src/lib/`. 20 `kyb-*` services in the x86 harness and 19 in the aarch64 gate. 8 `.cyr` files under `qemu/`.
 
 ## Verification posture
 
 The technique that has repeatedly worked here, and whose absence is what let defects ship:
-**inject the defect and watch the gate go red.** At 1.7.1: restoring the 1.7.0 fallback in
+**inject the defect and watch the gate go red.** At 1.7.3, nine defects put back on
+aarch64, each in its own copy of the tree, turned the gate red: a fail-open verify, the
+1.7.0 credential fallback, the shell keeping PID 1's signal mask (`SigBlk=0000000020014003`),
+the shell's fd 0 off the console, echo left on, a rejection that reboots, quiet mode
+ignored, a stand-in hashing its salt last, and a pre-init that cannot read its image. At 1.7.1: restoring the 1.7.0 fallback in
 `emerg_resolve_cred_at` failed 7 unit assertions and failed pass 4c on a real boot (80 OK, 4 FAIL); restoring the borrowed
 buffer failed 2. At 1.7.0: restoring `load_config`'s old `n <= 0` classification failed 5
 (753 passed, 5 failed, exit 5).
@@ -172,17 +188,21 @@ stricter bar on the next sweep.**
 
 ## In flight
 
-**v1.7.2 is ready and untagged.** It changes no dependency, lock or toolchain pin, and
-no `src/` file: it is harness work, plus docs. The 1.7.2 CHANGELOG entry has the numbers.
+**v1.7.3 is ready and untagged.** It changes no dependency, lock or toolchain pin, and
+no `src/` file: it is harness work, a CI package, plus docs. The 1.7.3 CHANGELOG entry has
+the numbers.
 
 ## Next
 
 In the order I would take them. The full list is [roadmap.md](roadmap.md), with 14 open
 items.
 
-1. **aarch64: the edge, emergency-auth and quiet passes.** None of them needs busybox. The
-   dm-verity images are host-built data, and `-M virt` takes virtio drives. The auth passes
-   would be the first time aarch64 runs Argon2id as PID 1.
+1. **Edge boards: authenticate the emergency shell on every path, not only phase 6c.**
+   `drop_to_emergency()` should require authentication on an edge board whatever the
+   config says, and suppress the shell when there is no usable credential (1.6.15's
+   existing path). Put the decision in `emergency_auth.cyr` with unit tests, and make both
+   harnesses' intact-image edge boots assert that no shell opened. The fixtures already
+   reach the path: every edge boot past phase 6c fails the daimon stage.
 2. **`ready_check` / `environment` / `env_files` config keys.** These have been unblocked
    since 1.6.20 consumed argonaut 1.15.0. Check that something downstream reads each field
    before adding its key.

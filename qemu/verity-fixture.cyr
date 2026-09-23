@@ -1,0 +1,392 @@
+# qemu/verity-fixture.cyr — a libc-free stand-in for `veritysetup verify`. (1.7.3)
+#
+# WHY THIS EXISTS
+# ---------------
+# The x86 edge pass copies the build host's own veritysetup, with its whole
+# shared-library closure, into the image. There is no aarch64 veritysetup to copy:
+# the dev box and the amd64 CI runner both have only an x86 one, and a foreign-arch
+# package is a build-host capability standing rule 33 forbids assuming. Alpine's
+# aarch64 packages are no answer either. Its mirrors delete a package version when
+# the package is rebuilt, so a pinned URL would stop resolving at the next openssl
+# update, which is standing rule 50's moving-URL lesson one step worse.
+#
+# So the aarch64 edge image carries this program at /usr/sbin/veritysetup. It
+# implements `veritysetup verify <data> <hash> <root_hash>` for the dm-verity format
+# `veritysetup format` writes by default (a superblock at offset 0, hash type 1,
+# sha256), walking the tree the way cryptsetup's lib/verity/verity_hash.c does. It
+# also answers `--version`, which _eb_dmverity_supported runs first.
+#
+# ⚠ A STAND-IN IS CHECKED AGAINST THE REAL TOOL BEFORE IT IS TRUSTED. The images it
+# verifies are written by the host's real `veritysetup format`, and
+# qemu/boot-test-aarch64.sh runs this program's host build and the host's real
+# `veritysetup verify` over the same five cases (intact, corrupted data, corrupted
+# hash tree, wrong root hash, no superblock) and fails unless every exit code
+# matches. What the aarch64 edge pass then proves is kybernet's half on aarch64:
+# the edge config, the exec, the verdict kybernet draws from the exit code, the
+# refusal and the escape hatches. It does NOT prove that the real veritysetup runs
+# on aarch64. That is the distribution's job, not this repo's.
+#
+# EXIT CODES are cryptsetup's own (its translate_errno), so kybernet sees what the
+# real tool would give it:
+#   0  verified
+#   1  bad arguments, no usable superblock, an I/O error, or a root-hash mismatch
+#   2  a block does not match the digest stored for it, in the data or the tree
+#   4  a device cannot be opened
+#
+# REPORT: veritysetup's own messages, then `VFX-<key>=<value>` lines, all on stderr.
+# In the guest that is PID 1's console, so the gate can check what this program
+# was handed and why it decided what it did.
+
+# GLOBAL scope: `var X[N]` is N SLOTS, i.e. N * 8 bytes (standing rule 2).
+var _CMD[128];       # /proc/self/cmdline: 1024 bytes
+var _SB[64];         # the superblock: 512 bytes
+var _BLK[512];       # one block being hashed: 4096 bytes, the largest size accepted
+var _HB[512];        # one hash block of stored digests: 4096 bytes
+var _SALT[32];       # the salt: up to 256 bytes
+var _ROOT[4];        # the root digest named on the command line: 32 bytes
+var _DIG[4];         # a computed digest: 32 bytes
+var _CTX[18];        # one SHA-256 context: 144 bytes
+var _LVBLK[64];      # the first hash block of each tree level
+var _LVSZ[64];       # the number of hash blocks in each tree level
+var _LN[128];        # one report line: 1024 bytes
+var _NUM[4];         # fmt_int_buf scratch: 32 bytes
+
+var _cmd_len = 0;
+var _ln_len = 0;
+var _salt_len = 0;
+var _dbs = 0;        # data block size
+var _hbs = 0;        # hash block size
+var _nblocks = 0;    # data blocks covered by the tree
+var _bits = 0;       # log2 of the digests one hash block holds
+
+# The largest block this program accepts, set by _BLK and _HB above.
+var MAX_BLOCK = 4096;
+var DIGEST = 32;
+
+fn read_into(path, buf, cap) {
+    var fd = sys_open(path, O_RDONLY | O_CLOEXEC, 0);
+    if (fd < 0) { return 0 - 1; }
+    var total = 0;
+    var go = 1;
+    while (go == 1 && total < cap - 1) {
+        var n = sys_read(fd, buf + total, cap - 1 - total);
+        if (n <= 0) { go = 0; } else { total = total + n; }
+    }
+    sys_close(fd);
+    store8(buf + total, 0);
+    return total;
+}
+
+# The i-th argument, or 0 when there are fewer. /proc/self/cmdline is argv,
+# NUL-separated (`args` is not a kybernet dependency).
+fn argv_at(i) {
+    if (_cmd_len <= 0) { return 0; }
+    var p = &_CMD;
+    var end = &_CMD + _cmd_len;
+    var k = 0;
+    while (p < end) {
+        if (k == i) { return p; }
+        while (p < end && load8(p) != 0) { p = p + 1; }
+        p = p + 1;
+        k = k + 1;
+    }
+    return 0;
+}
+
+# Report lines are assembled and written with ONE write each, so one cannot be
+# interleaved with a kernel message or another writer mid-line.
+fn ln_add(s) {
+    var n = strlen(s);
+    if (_ln_len + n > 1000) { n = 1000 - _ln_len; }
+    if (n > 0) {
+        memcpy(&_LN + _ln_len, s, n);
+        _ln_len = _ln_len + n;
+    }
+    return 0;
+}
+
+fn ln_num(v) {
+    var n = fmt_int_buf(v, &_NUM);
+    store8(&_NUM + n, 0);
+    return ln_add(&_NUM);
+}
+
+fn ln_emit() {
+    store8(&_LN + _ln_len, 10);
+    sys_write(2, &_LN, _ln_len + 1);
+    _ln_len = 0;
+    return 0;
+}
+
+fn say(s) {
+    ln_add(s);
+    return ln_emit();
+}
+
+# `VFX-RESULT=<code> <why>` is the last line on every exit path, and the code is
+# the exit code, so a gate can read the verdict and its reason together.
+fn result(code, why) {
+    ln_add("VFX-RESULT=");
+    ln_num(code);
+    ln_add(" ");
+    ln_add(why);
+    ln_emit();
+    return code;
+}
+
+# Read exactly `len` bytes at byte offset `off`. 0, or -1 on any short read.
+fn read_at(fd, off, buf, len) {
+    if (sys_lseek(fd, off, 0) != off) { return 0 - 1; }
+    var got = 0;
+    while (got < len) {
+        var n = sys_read(fd, buf + got, len - got);
+        if (n <= 0) { return 0 - 1; }
+        got = got + n;
+    }
+    return 0;
+}
+
+# Hash type 1 puts the salt FIRST: digest = sha256(salt || block).
+fn digest_of(buf, len) {
+    sha256_init_into(&_CTX);
+    if (_salt_len > 0) { sha256_update(&_CTX, &_SALT, _salt_len); }
+    sha256_update(&_CTX, buf, len);
+    sha256_finalize(&_CTX, &_DIG);
+    return 0;
+}
+
+fn is_pow2_block(v) {
+    if (v < 512 || v > MAX_BLOCK) { return 0; }
+    return (v & (v - 1)) == 0;
+}
+
+fn le16(p) { return (load8(p) & 0xFF) | ((load8(p + 1) & 0xFF) << 8); }
+
+fn le32(p) {
+    var lo = le16(p);
+    var hi = le16(p + 2);
+    return lo | (hi << 16);
+}
+
+fn le64(p) { return le32(p) | (le32(p + 4) << 32); }
+
+fn not_verity(path) {
+    ln_add("Device ");
+    ln_add(path);
+    ln_add(" is not a valid VERITY device.");
+    ln_emit();
+    return 1;
+}
+
+# struct verity_sb, cryptsetup lib/verity/verity.c, 512 bytes, little-endian:
+#   +0 "verity\0\0"  +8 version  +12 hash_type  +16 uuid[16]  +32 algorithm[32]
+#   +64 data_block_size  +68 hash_block_size  +72 data_blocks  +80 salt_size
+#   +88 salt[256]
+# Anything this program does not implement is refused, never guessed at.
+fn load_superblock(hfd, hpath) {
+    if (read_at(hfd, 0, &_SB, 512) < 0) { return not_verity(hpath); }
+    if (memeq(&_SB, "verity", 6) == 0 || load8(&_SB + 6) != 0 || load8(&_SB + 7) != 0) {
+        return not_verity(hpath);
+    }
+    if (le32(&_SB + 8) != 1) { return not_verity(hpath); }
+    if (le32(&_SB + 12) != 1) {
+        say("VFX-UNSUPPORTED=hash type is not 1 (this fixture implements type 1 only)");
+        return 1;
+    }
+    if (memeq(&_SB + 32, "sha256", 7) == 0) {
+        say("VFX-UNSUPPORTED=hash algorithm is not sha256");
+        return 1;
+    }
+    _dbs = le32(&_SB + 64);
+    _hbs = le32(&_SB + 68);
+    _nblocks = le64(&_SB + 72);
+    _salt_len = le16(&_SB + 80);
+    if (is_pow2_block(_dbs) == 0 || is_pow2_block(_hbs) == 0) {
+        say("VFX-UNSUPPORTED=a block size outside 512..4096 or not a power of two");
+        return 1;
+    }
+    # A bound on the tree height, so every shift below stays under 64 bits.
+    if (_nblocks < 1 || _nblocks > 4294967296) { return not_verity(hpath); }
+    if (_salt_len > 256) { return not_verity(hpath); }
+    memcpy(&_SALT, &_SB + 88, _salt_len);
+    return 0;
+}
+
+fn mismatch(pos) {
+    ln_add("Verification failed at position ");
+    ln_num(pos);
+    ln_add(".");
+    ln_emit();
+    return 2;
+}
+
+# One tree level: hash `blocks` blocks of `rbs` bytes read from `rfd` at block
+# `rblock`, and compare each digest with the one stored for it in the hash blocks
+# starting at `wblock`. The unused tail of every hash block must be zero.
+fn verify_level(rfd, rblock, rbs, blocks, hfd, wblock) {
+    var per = 1 << _bits;
+    var nwr = (blocks + per - 1) / per;
+    var roff = rblock * rbs;
+    var woff = wblock * _hbs;
+    while (nwr > 0) {
+        if (read_at(hfd, woff, &_HB, _hbs) < 0) {
+            say("Cannot read hash device.");
+            return 1;
+        }
+        var used = 0;
+        var j = 0;
+        while (j < per && blocks > 0) {
+            blocks = blocks - 1;
+            if (read_at(rfd, roff, &_BLK, rbs) < 0) {
+                say("Cannot read data device block.");
+                return 1;
+            }
+            digest_of(&_BLK, rbs);
+            if (memeq(&_DIG, &_HB + used, DIGEST) == 0) { return mismatch(roff); }
+            roff = roff + rbs;
+            used = used + DIGEST;
+            j = j + 1;
+        }
+        var k = used;
+        while (k < _hbs) {
+            if (load8(&_HB + k) != 0) {
+                ln_add("Spare area is not zeroed at position ");
+                ln_num(woff + used);
+                ln_add(".");
+                ln_emit();
+                return 2;
+            }
+            k = k + 1;
+        }
+        woff = woff + _hbs;
+        nwr = nwr - 1;
+    }
+    return 0;
+}
+
+fn open_dev(path) {
+    var fd = sys_open(path, O_RDONLY | O_CLOEXEC, 0);
+    if (fd < 0) {
+        ln_add("Device ");
+        ln_add(path);
+        ln_add(" does not exist or access denied.");
+        ln_emit();
+    }
+    return fd;
+}
+
+fn do_verify(dpath, hpath, root_hex) {
+    ln_add("VFX-ARGV=verify ");
+    ln_add(dpath);
+    ln_add(" ");
+    ln_add(hpath);
+    ln_add(" ");
+    ln_add(root_hex);
+    ln_emit();
+
+    if (strlen(root_hex) != 64 || hex_decode_into(root_hex, 64, &_ROOT) == 0) {
+        say("Invalid root hash string specified.");
+        return result(1, "BAD-ROOT-HASH-ARGUMENT");
+    }
+    var dfd = open_dev(dpath);
+    if (dfd < 0) { return result(4, "NO-DATA-DEVICE"); }
+    var hfd = open_dev(hpath);
+    if (hfd < 0) { return result(4, "NO-HASH-DEVICE"); }
+    if (load_superblock(hfd, hpath) != 0) { return result(1, "NO-USABLE-SUPERBLOCK"); }
+
+    # hash_per_block = hash_block_size / digest size, both powers of two here.
+    _bits = 0;
+    while ((1 << _bits) < _hbs / DIGEST) { _bits = _bits + 1; }
+
+    # The same level count cryptsetup computes: the smallest n with
+    # (data_blocks - 1) >> (bits * n) == 0.
+    var levels = 0;
+    while (_bits * levels < 64 && ((_nblocks - 1) >> (_bits * levels)) != 0) {
+        levels = levels + 1;
+    }
+
+    # Levels are stored TOP first. The superblock takes 512 bytes, rounded up to one
+    # hash block, so the tree starts at hash block 1.
+    var pos = 1;
+    var i = levels - 1;
+    while (i >= 0) {
+        store64(&_LVBLK + i * 8, pos);
+        var shift = (i + 1) * _bits;
+        var s = (_nblocks + (1 << shift) - 1) >> shift;
+        store64(&_LVSZ + i * 8, s);
+        pos = pos + s;
+        i = i - 1;
+    }
+
+    ln_add("VFX-SUPERBLOCK=type 1 sha256 data_block ");
+    ln_num(_dbs);
+    ln_add(" hash_block ");
+    ln_num(_hbs);
+    ln_add(" data_blocks ");
+    ln_num(_nblocks);
+    ln_add(" salt ");
+    ln_num(_salt_len);
+    ln_add(" levels ");
+    ln_num(levels);
+    ln_emit();
+
+    var lv = 0;
+    while (lv < levels) {
+        var r = 0;
+        if (lv == 0) {
+            r = verify_level(dfd, 0, _dbs, _nblocks, hfd, load64(&_LVBLK));
+        } else {
+            r = verify_level(hfd, load64(&_LVBLK + (lv - 1) * 8), _hbs,
+              load64(&_LVSZ + (lv - 1) * 8), hfd, load64(&_LVBLK + lv * 8));
+        }
+        if (r != 0) {
+            say("Verification of data area failed.");
+            if (r == 2 && lv == 0) { return result(2, "DATA-BLOCK-MISMATCH"); }
+            if (r == 2) { return result(2, "HASH-TREE-MISMATCH"); }
+            return result(r, "READ-ERROR");
+        }
+        lv = lv + 1;
+    }
+
+    # The root digest covers the single top block, or the only data block when the
+    # data is one block and there is no tree at all.
+    if (levels > 0) {
+        if (read_at(hfd, load64(&_LVBLK + (levels - 1) * 8) * _hbs, &_HB, _hbs) < 0) {
+            return result(1, "READ-ERROR");
+        }
+        digest_of(&_HB, _hbs);
+    } else {
+        if (read_at(dfd, 0, &_BLK, _dbs) < 0) { return result(1, "READ-ERROR"); }
+        digest_of(&_BLK, _dbs);
+    }
+    if (memeq(&_DIG, &_ROOT, DIGEST) == 0) {
+        say("Verification of root hash failed.");
+        return result(1, "ROOT-HASH-MISMATCH");
+    }
+    return result(0, "VERIFIED");
+}
+
+fn main() {
+    _cmd_len = read_into("/proc/self/cmdline", &_CMD, 1024);
+    var mode = argv_at(1);
+    if (mode == 0) {
+        say("Usage: veritysetup verify <data_device> <hash_device> <root_hash>");
+        return result(1, "BAD-ARGS");
+    }
+    if (streq(mode, "--version") == 1) {
+        say("veritysetup (kybernet verity fixture, verify only)");
+        return 0;
+    }
+    if (streq(mode, "verify") == 1) {
+        var d = argv_at(2);
+        var h = argv_at(3);
+        var r = argv_at(4);
+        if (d == 0 || h == 0 || r == 0 || argv_at(5) != 0) {
+            say("Usage: veritysetup verify <data_device> <hash_device> <root_hash>");
+            return result(1, "BAD-ARGS");
+        }
+        return do_verify(d, h, r);
+    }
+    say("This fixture implements only `verify` and `--version`.");
+    return result(1, "BAD-ARGS");
+}

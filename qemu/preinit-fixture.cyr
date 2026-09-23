@@ -1,0 +1,179 @@
+# qemu/preinit-fixture.cyr — give the aarch64 edge board its disks, then exec
+# kybernet as PID 1. (1.7.3)
+#
+# WHY THIS EXISTS
+# ---------------
+# The x86 edge and auth passes attach the dm-verity image and its hash tree as
+# virtio disks, and the edge config names /dev/vda and /dev/vdb. The pinned aarch64
+# kernel builds every disk driver a QEMU `virt` board could use as a MODULE (virtio,
+# virtio-blk, virtio-pci, virtio-mmio, nvme, scsi and mtd, per the config Alpine
+# publishes beside it), and nothing in this initramfs loads modules, so those
+# devices never appear. It does build the RAM disk driver in: CONFIG_BLK_DEV_RAM=y,
+# sixteen 4 MiB /dev/ramN. /dev/ram0 is a real block device, and it passes
+# edge_device_path_ok for the same reasons /dev/vda does.
+#
+# A RAM disk starts out zeroed, so the image has to be written into it before
+# phase 6c reads it, and nothing in kybernet runs that early. This program does it.
+# The gate boots it as rdinit. It copies /kyb-board/data.img into /dev/ram0 and
+# /kyb-board/hash.img into /dev/ram1, then execs /sbin/init, which is kybernet,
+# still PID 1, as it would be if the kernel had started it directly.
+#
+# ⚠ IT MUST LEAVE NOTHING KYBERNET CAN SEE EXCEPT THE DISK CONTENTS. It reaches the
+# RAM disks through devtmpfs mounted on a PRIVATE directory, detaches that mount
+# and removes the directory before the exec. Every descriptor it opens is
+# O_CLOEXEC. kybernet gets the argv and environment the kernel gives init
+# (`/sbin/init`, HOME=/ and TERM=linux). The harness's own parameters are dotted
+# (kybernet.harness=1), so the kernel passes none of them to init either way, and
+# kybernet reads them from /proc/cmdline.
+#
+# ⚠ A BOARD THAT WAS NOT PREPARED MUST NOT READ AS A VERDICT. An empty RAM disk
+# fails verification, so a copy that failed quietly would make every
+# corrupted-image assertion pass for the wrong reason. The last line printed before
+# the exec is `PREINIT-OK`, and the gate requires it on every boot that uses this
+# program. Any failure prints `PREINIT-FAILED: <why>` instead and still execs
+# kybernet, so the log shows both what went wrong and what kybernet did about it.
+
+# GLOBAL scope: `var X[N]` is N SLOTS, i.e. N * 8 bytes (standing rule 2).
+var _BUF[8192];      # the copy buffer: 65536 bytes
+var _LN[64];         # one report line: 512 bytes
+var _NUM[4];         # fmt_int_buf scratch: 32 bytes
+var _ARGV[2];        # execve argv: "/sbin/init", NULL
+var _ENVP[3];        # execve envp: HOME=/, TERM=linux, NULL
+
+var _con = 0 - 1;
+var _ln_len = 0;
+var _failed = 0;
+
+var PRIV = "/kyb-preinit-dev";
+# Not in the stdlib. asm-generic/fcntl.h, identical on both arches (standing
+# rule 20). Without it this process, PID 1, could take the console as its
+# controlling terminal and hand that to kybernet across the exec.
+var O_NOCTTY_FLAG = 256;
+# umount2's MNT_DETACH: detach now, even while the console descriptor is still
+# open on this mount. The descriptor keeps it alive until the exec closes it.
+var MNT_DETACH_FLAG = 2;
+
+fn ln_add(s) {
+    var n = strlen(s);
+    if (_ln_len + n > 500) { n = 500 - _ln_len; }
+    if (n > 0) {
+        memcpy(&_LN + _ln_len, s, n);
+        _ln_len = _ln_len + n;
+    }
+    return 0;
+}
+
+fn ln_num(v) {
+    var n = fmt_int_buf(v, &_NUM);
+    store8(&_NUM + n, 0);
+    return ln_add(&_NUM);
+}
+
+# One write per line, so a kernel message cannot land in the middle of it.
+fn ln_emit() {
+    store8(&_LN + _ln_len, 10);
+    if (_con >= 0) { sys_write(_con, &_LN, _ln_len + 1); }
+    _ln_len = 0;
+    return 0;
+}
+
+fn fail(what, detail, rc) {
+    _failed = 1;
+    ln_add("PREINIT-FAILED: ");
+    ln_add(what);
+    ln_add(" ");
+    ln_add(detail);
+    ln_add(" (rc ");
+    ln_num(rc);
+    ln_add(")");
+    ln_emit();
+    return 0 - 1;
+}
+
+# Copy all of `src` onto the block device `dst`. Returns the byte count, or -1.
+fn copy_to(src, dst, shown) {
+    var sfd = sys_open(src, O_RDONLY | O_CLOEXEC, 0);
+    if (sfd < 0) { return fail("cannot open", src, sfd); }
+    var dfd = sys_open(dst, O_WRONLY | O_CLOEXEC, 0);
+    if (dfd < 0) {
+        sys_close(sfd);
+        return fail("cannot open", shown, dfd);
+    }
+    var total = 0;
+    var go = 1;
+    while (go == 1) {
+        var n = sys_read(sfd, &_BUF, 65536);
+        if (n < 0) {
+            go = 0;
+            total = fail("read failed on", src, n);
+        } elif (n == 0) {
+            go = 0;
+        } else {
+            var w = 0;
+            while (w < n && total >= 0) {
+                var k = sys_write(dfd, &_BUF + w, n - w);
+                if (k <= 0) {
+                    total = fail("write failed on", shown, k);
+                } else {
+                    w = w + k;
+                }
+            }
+            if (total >= 0) {
+                total = total + n;
+            } else {
+                go = 0;
+            }
+        }
+    }
+    # Every opener of the device shares one page cache, so kybernet's reader would
+    # see these bytes even without this. The fsync puts them in the RAM disk itself
+    # rather than leaving that to the cache.
+    if (total >= 0) {
+        var s = sys_fsync(dfd);
+        if (s != 0) { total = fail("fsync failed on", shown, s); }
+    }
+    sys_close(dfd);
+    sys_close(sfd);
+    if (total >= 0) {
+        ln_add("PREINIT: ");
+        ln_add(shown);
+        ln_add(" <- ");
+        ln_add(src);
+        ln_add(", ");
+        ln_num(total);
+        ln_add(" bytes");
+        ln_emit();
+    }
+    return total;
+}
+
+fn main() {
+    sys_mkdir(PRIV, 448);   # 0700
+    var m = sys_mount("devtmpfs", PRIV, "devtmpfs", 0, 0);
+    if (m == 0) {
+        _con = sys_open("/kyb-preinit-dev/console", O_WRONLY | O_CLOEXEC | O_NOCTTY_FLAG, 0);
+        copy_to("/kyb-board/data.img", "/kyb-preinit-dev/ram0", "/dev/ram0");
+        copy_to("/kyb-board/hash.img", "/kyb-preinit-dev/ram1", "/dev/ram1");
+        var u = sys_umount2(PRIV, MNT_DETACH_FLAG);
+        if (u != 0) { fail("cannot detach", PRIV, u); }
+    } else {
+        # No devtmpfs, so no console to say this on. The gate's PREINIT-OK check
+        # is what reports it.
+        _failed = 1;
+    }
+    sys_rmdir(PRIV);
+
+    if (_failed == 0) {
+        ln_add("PREINIT-OK: board prepared, exec /sbin/init");
+        ln_emit();
+    }
+
+    store64(&_ARGV, "/sbin/init");
+    store64(&_ARGV + 8, 0);
+    store64(&_ENVP, "HOME=/");
+    store64(&_ENVP + 8, "TERM=linux");
+    store64(&_ENVP + 16, 0);
+    var e = sys_execve("/sbin/init", &_ARGV, &_ENVP);
+    fail("execve returned for", "/sbin/init", e);
+    return 1;
+}

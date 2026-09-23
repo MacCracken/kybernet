@@ -21,6 +21,18 @@
 #   status           report this process's own confinement, see below
 #   relay <file>     copy a status report from a file to the console
 #
+# EMERGENCY SHELL (1.7.3) — started AS /usr/bin/agnoshi, i.e. with that argv[0], this
+# is the shell kybernet's drop_to_emergency execs after a correct password. It
+# reports what the shell was handed and exits 0, so the board powers off rather
+# than sitting at a prompt:
+#   FD0/FD1/FD2      where each descriptor points. The console, not /dev/null: the
+#                    shell got fd 0 = /dev/null from 1.5.4 to 1.5.8 and exited on EOF.
+#   SigBlk           the blocked-signal mask. Empty: PID 1 blocks SIGCHLD, SIGTERM,
+#                    SIGINT, SIGHUP and SIGPWR for its signalfd, and before 1.4.2 the
+#                    shell inherited that mask, so Ctrl-C did nothing in it.
+#   ENV-<name>       PATH, TERM, HOME, SHELL and PS1. Before 1.5.8 the shell ran with
+#                    an empty environment, so no command resolved by name.
+#
 # STATUS
 # ------
 # Every line is `ST[<leaf>]-<key>=<value>`, where <leaf> is the last component of
@@ -63,6 +75,7 @@ var _cgpath = "?";
 var _leaf = "?";
 var _sink = 0 - 1;
 var _line_len = 0;
+var _want_sigblk = 0;   # the emergency-shell report adds SigBlk to the status keys
 
 # Read up to cap - 1 bytes of `path` into `buf`, NUL-terminated. Returns the byte
 # count, or -1 if the file cannot be opened.
@@ -199,6 +212,7 @@ fn wanted(k) {
     if (streq(k, "CapAmb") == 1) { return 1; }
     if (streq(k, "NoNewPrivs") == 1) { return 1; }
     if (streq(k, "Seccomp") == 1) { return 1; }
+    if (_want_sigblk == 1 && streq(k, "SigBlk") == 1) { return 1; }
     return 0;
 }
 
@@ -308,6 +322,81 @@ fn do_sleep(secs) {
     return 0;
 }
 
+# Where descriptor `n` points, from the /proc/self/fd/<n> symlink. CLOSED when
+# there is no such descriptor.
+fn report_fd(n, key) {
+    var name = "/proc/self/fd/0";
+    if (n == 1) { name = "/proc/self/fd/1"; }
+    if (n == 2) { name = "/proc/self/fd/2"; }
+    var got = sys_readlink(name, &_VAL, 500);
+    if (got < 0) { return emit_kv(key, "CLOSED"); }
+    store8(&_VAL + got, 0);
+    return emit_kv(key, &_VAL);
+}
+
+fn is_env_wanted(k) {
+    if (streq(k, "PATH") == 1) { return 1; }
+    if (streq(k, "TERM") == 1) { return 1; }
+    if (streq(k, "HOME") == 1) { return 1; }
+    if (streq(k, "SHELL") == 1) { return 1; }
+    if (streq(k, "PS1") == 1) { return 1; }
+    return 0;
+}
+
+# /proc/self/environ is the environment execve was given, NUL-separated.
+fn report_env() {
+    var n = read_into("/proc/self/environ", &_ST, 8192);
+    if (n <= 0) { return emit_kv("ENV", "UNREADABLE"); }
+    var p = &_ST;
+    var end = &_ST + n;
+    while (p < end) {
+        var e = p;
+        while (p < end && load8(p) != 0) { p = p + 1; }
+        var eq = e;
+        while (eq < p && load8(eq) != 61) { eq = eq + 1; }
+        if (eq < p) {
+            store8(eq, 0);
+            if (is_env_wanted(e) == 1) {
+                line_add("ST[");
+                line_add(_leaf);
+                line_add("]-ENV-");
+                line_add(e);
+                line_add("=");
+                line_add(eq + 1);
+                line_emit();
+            }
+        }
+        p = p + 1;
+    }
+    return 0;
+}
+
+fn do_shell() {
+    _leaf = "emergency-shell";
+    if (open_sink() < 0) { return 3; }
+    report_fd(0, "FD0");
+    report_fd(1, "FD1");
+    report_fd(2, "FD2");
+    _want_sigblk = 1;
+    report_status();
+    report_env();
+    emit_kv("DONE", "1");
+    sys_close(_sink);
+    return 0;
+}
+
+# 1 when the last component of `path` is `name`.
+fn basename_is(path, name) {
+    if (path == 0) { return 0; }
+    var b = path;
+    var r = path;
+    while (load8(r) != 0) {
+        if (load8(r) == 47) { b = r + 1; }
+        r = r + 1;
+    }
+    return streq(b, name);
+}
+
 # The child is reparented to PID 1 when this process exits, and kybernet has to
 # reap a process it never started (the reactor's "reaped orphans: N").
 fn do_orphan() {
@@ -322,6 +411,7 @@ fn do_orphan() {
 
 fn main() {
     _cmd_len = read_into("/proc/self/cmdline", &_CMD, 512);
+    if (basename_is(argv_at(0), "agnoshi") == 1) { return do_shell(); }
     var mode = argv_at(1);
     if (mode == 0) { return 3; }
     if (streq(mode, "true") == 1) { return 0; }

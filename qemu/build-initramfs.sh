@@ -695,6 +695,26 @@ EDGECFG
         sudo chmod 666 "${AUTH_STAGE}/dev/console" "${AUTH_STAGE}/dev/null" \
             "${AUTH_STAGE}/dev/ttyS0" "${AUTH_STAGE}/dev/kmsg" 2>/dev/null || true
 
+        # ⚠ THE EMERGENCY SHELL IN THE AUTH IMAGES IS A PROBE, NOT BUSYBOX. 1.7.3.
+        #
+        # kybernet execs /usr/bin/agnoshi after a correct password. In the main tree
+        # that is a symlink to busybox, and busybox dispatches on argv[0], so it
+        # printed `agnoshi: applet not found` and exited: from 1.5.8 to 1.7.2 the
+        # auth passes proved the password was accepted and never ran a shell. So
+        # the properties 1.4.2 and 1.5.8 fixed in that shell (its descriptors, its
+        # signal mask, its environment) had no gate. qemu/svc-fixture.cyr, started
+        # as agnoshi, reports all of them and exits. The same binary is the shell in
+        # the aarch64 auth images. A failure here is fatal for the same reason as
+        # the credential below: a missing probe would skip the assertions.
+        SVC_BIN="${PROJECT_DIR}/build/svc-fixture"
+        if ! (cd "$PROJECT_DIR" && cyrius build qemu/svc-fixture.cyr "$SVC_BIN" >/dev/null); then
+            echo "  ERROR: could not build qemu/svc-fixture.cyr (compiler output above)"
+            exit 1
+        fi
+        rm -f "${AUTH_STAGE}/usr/bin/agnoshi"
+        cp "$SVC_BIN" "${AUTH_STAGE}/usr/bin/agnoshi"
+        chmod 755 "${AUTH_STAGE}/usr/bin/agnoshi"
+
         AUTH_HASH=$(printf 'hunter2' | sha256sum | awk '{print $1}')
         python3 - "$AUTH_STAGE" "$AUTH_HASH" << 'AUTHPY'
 import sys, json, pathlib

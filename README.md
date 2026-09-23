@@ -182,16 +182,18 @@ bash qemu/boot-test-aarch64.sh      # PID-1 boot harness, aarch64 (TCG, no KVM)
 ```
 
 The QEMU harness is the gate that matters: it boots kybernet as real PID 1 and
-asserts 84 properties across five passes — the boot sequence, the reactor
+asserts 104 properties across five passes — the boot sequence, the reactor
 (that it sleeps rather than spins), dm-verity verification against a real
 image pair on virtio disks, and the emergency-auth prompt with a password fed
 over the serial line. Pass 4 runs against **both** credential formats: the
 deprecated unsalted SHA-256 digest, and an Argon2id `v1` record. It also boots a
 group-readable `emergency.cred` with the right record in `config.json` as well,
 and asserts that the correct password does **not** get in: a refused credential
-file leaves no credential, and the config key is never its fallback.
+file leaves no credential, and the config key is never its fallback. After a
+correct password, the shell kybernet execs is a probe that reports its own
+descriptors, signal mask and environment, and the gate checks each one.
 
-The aarch64 harness asserts 66 properties and exists because **a cross-build
+The aarch64 harness asserts 158 properties and exists because **a cross-build
 exiting 0 is not evidence**. It boots `kybernet-aarch64` as PID 1 under TCG —
 an x86 host cannot accelerate aarch64 — against a pinned, sha256-checked kernel.
 Besides the boot sequence, cgroup controllers, a real reactor iteration and a
@@ -203,8 +205,13 @@ the health check and watchdog, orphan reaping and sd_notify. It boots with no
 entropy seed (`dtb-randomness=off`), the way a board without a hardware RNG does,
 and checks that the boot really was starved. Its budget is kybernet's own
 serial-timestamp span, never wall time, because under emulation wall time
-measures the emulator. ⚠ The edge, emergency-auth and quiet passes are still
-x86-only, and the file says so.
+measures the emulator. It also runs the x86 harness's other three passes: edge,
+emergency-auth and quiet. There is no aarch64 veritysetup to put in the image, so a
+Cyrius stand-in verifies it, and before any edge boot the stand-in must agree with the
+host's real veritysetup, exit code for exit code, on five cases. The pinned kernel has
+no virtio-blk, so a pre-init copies the image into a RAM disk before kybernet starts.
+The edge pass therefore proves kybernet's half on aarch64 (the config, the exec, the
+verdict, the refusal), not the real veritysetup on aarch64.
 
 ⚠ That Argon2id record is minted by `qemu/mkcred-fixture.cyr`, using sigil's
 Argon2id — the same implementation `emergency_auth.cyr` verifies with. It is

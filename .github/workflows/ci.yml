@@ -250,10 +250,17 @@ jobs:
         # `-M virt,dtb-randomness=off` (QEMU >= 7.2; noble ships 8.2) so the guest
         # has no entropy seed. The script names either missing piece as an
         # environment failure.
+        #
+        # Since 1.7.3 it runs the edge, emergency-auth and quiet passes too. The
+        # edge image is FORMATTED by the host's real veritysetup, and the in-guest
+        # stand-in (qemu/verity-fixture.cyr) must agree with the host's real
+        # `veritysetup verify` on five cases before any edge boot counts. Hence
+        # cryptsetup-bin. Without it the script fails with the reason; it does not
+        # skip (ALLOW_A64_EDGE_SKIP=1 is the deliberate override, and CI must not set it).
         run: |
-          # cpio is installed by the x86 harness step, which runs LATER than
-          # this one — so name it here rather than inherit it by luck.
-          sudo apt-get install -y --no-install-recommends qemu-system-arm cpio
+          # cpio and cryptsetup-bin are installed by the x86 harness JOB, which is a
+          # different runner, so name them here rather than inherit them by luck.
+          sudo apt-get install -y --no-install-recommends qemu-system-arm cpio cryptsetup-bin
           bash qemu/boot-test-aarch64.sh
 
       - name: Test

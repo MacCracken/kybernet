@@ -1520,6 +1520,40 @@ else
             echo "  OK: [$label] password did not echo (termios ECHO suppressed)"
         fi
 
+        # ⚠ THE SHELL ITSELF. 1.7.3. Until this release /usr/bin/agnoshi was busybox,
+        # which refuses to run under that name, so no auth pass had ever run the
+        # shell it authenticated for. The auth images now carry qemu/svc-fixture.cyr
+        # as agnoshi; it reports what kybernet handed it. Each property below was
+        # once wrong: fd 0 was /dev/null until 1.5.8, the blocked-signal mask was
+        # inherited until 1.4.2, and the environment was empty until 1.5.8.
+        local want
+        for want in \
+            'FD0=/dev/console' \
+            'FD1=/dev/console' \
+            'FD2=/dev/console' \
+            'SigBlk=0000000000000000' \
+            'Uid=0 0 0 0' \
+            'ENV-PATH=/usr/sbin:/usr/bin:/sbin:/bin' \
+            'ENV-TERM=linux' \
+            'ENV-PS1=kybernet-emergency#' \
+            'DONE=1'; do
+            if echo "$ok_out" | grep -aqF "ST[emergency-shell]-$want"; then
+                echo "  OK: [$label] emergency shell: $want"
+            else
+                echo "  FAIL: [$label] emergency shell: no ST[emergency-shell]-$want"
+                echo "$ok_out" | grep -aE 'ST\[emergency-shell\]|emergency shell' | head -4 || true
+                fail=1
+            fi
+        done
+        # 1.4.2 HIGH-2: when the shell exits, the refused board powers off rather
+        # than going on to boot the system that failed verification.
+        if echo "$ok_out" | grep -aqF "refusing to continue boot without edge prerequisites"; then
+            echo "  OK: [$label] when the shell exits, the edge refusal stands"
+        else
+            echo "  FAIL: [$label] the edge refusal did not stand after the shell exited"
+            fail=1
+        fi
+
         bad_out=$(_auth_boot "wrongpass" "$initrd" || true)
         _assert_no_panic "$bad_out" "$label wrong-password"
         if echo "$bad_out" | grep -aqF "AUTHENTICATION FAILED"; then

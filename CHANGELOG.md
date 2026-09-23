@@ -7,6 +7,195 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.7.3] — 2026-09-22
+
+**The aarch64 edge, emergency-auth and quiet passes.** These were the last three
+x86-only passes. The aarch64 boot gate now runs all five, **66 → 158** properties. The
+x86 harness also gains a probe for the emergency shell itself, **84 → 104**. No `src/`
+change; the kybernet binaries are byte-identical to 1.7.2's.
+
+⭐ **Every new property held on aarch64 on the first run.** That covers dm-verity
+verification of an intact image, refusal of a corrupted one, and both escape hatches.
+It covers the password prompt with echo off, both credential formats, `emergency.cred`
+winning over a decoy in `config.json`, and the 1.7.1 no-fallback rule. It also covers
+a rejection that halts, and the quiet boot. So the new passes found no aarch64 defect.
+What they found instead is below. No auth pass on either arch had ever run the shell it
+authenticated for. And once a shell could run, the logs showed an edge board that opens
+it with no password at all.
+
+### Added — `qemu/verity-fixture.cyr`, a stand-in for `veritysetup verify`
+
+The x86 edge pass copies the build host's veritysetup, with its whole shared-library
+closure, into the image. There is no aarch64 veritysetup to copy: both build hosts
+have only an x86 one, and a foreign-arch package is a host capability standing rule 33
+forbids assuming. Alpine's aarch64 package is not an option either, because its mirror
+deletes a version when the package is rebuilt, so a pinned URL would stop resolving at
+the next openssl update.
+
+The fixture implements `verify <data> <hash> <root_hash>` for the format
+`veritysetup format` writes by default (a superblock at offset 0, hash type 1,
+sha256), walking the tree the way cryptsetup's `verity_hash.c` does. It uses sigil's
+SHA-256 and exits with cryptsetup's own codes: 0 verified, 1 no usable superblock or a
+root-hash mismatch, 2 a block mismatch, 4 a device that cannot be opened. It reports
+what it was handed and why it decided, on stderr, which is PID 1's console.
+
+⚠ **A stand-in is checked against the real tool on every run.** The images are
+written by the host's real `veritysetup format`. Before any edge boot, the gate runs
+the fixture's host build and the host's `veritysetup verify` over five cases (intact,
+corrupted data, corrupted hash tree, wrong root hash, no superblock) and requires every
+exit code to match. It also requires veritysetup's own answers to be the expected ones,
+because agreement alone proves little: a fixture that fails every input agrees with
+veritysetup on every corrupted case. A one-off check before this was written went
+wider: 14 shapes (0 to 3 tree levels, 512-byte blocks, no salt), where exit codes
+*and* reported failure positions matched veritysetup 2.8.8 on every one.
+
+So the aarch64 edge pass proves kybernet's half on aarch64: the edge config, the exec
+through argonaut's `run_safe_cmd_timeout`, the verdict drawn from the exit code, the
+refusal and the escape hatches. It does not prove the real veritysetup runs on
+aarch64, and the gate's header says so.
+
+### Added — `qemu/preinit-fixture.cyr`: the board's disks
+
+The roadmap planned to attach the image pair as virtio drives, as x86 does. That plan
+was wrong. The pinned aarch64 kernel builds every disk driver a `virt` board could use
+as a **module**: virtio, virtio-blk, virtio-pci, virtio-mmio, nvme, scsi and mtd,
+according to the config Alpine publishes beside it. Nothing in the initramfs loads
+modules, so the drives never appear. It does build the RAM disk driver in (16 ×
+4 MiB `/dev/ramN`), and `/dev/ram0` passes `edge_device_path_ok` as `/dev/vda` does.
+
+The pre-init runs as `rdinit`. It mounts devtmpfs on a private directory, copies the
+image into `/dev/ram0` and the hash tree into `/dev/ram1`, detaches the mount, and
+execs `/sbin/init` with the argv and environment the kernel gives init. kybernet is
+still PID 1. Every descriptor it opens is `O_CLOEXEC`, and `O_NOCTTY` keeps the console
+from becoming a controlling terminal that kybernet would inherit.
+
+⚠ **An unprepared board must not read as a verdict.** An empty RAM disk fails
+verification, so a copy that failed quietly would make every corrupted-image assertion
+pass for the wrong reason. Every edge and auth boot must print `PREINIT-OK`. The
+corrupted-image boot must also show the verifier failing on the first data block, at
+the byte the gate overwrote, not on a missing superblock.
+
+### Added — passes 3, 4 and 5 on aarch64
+
+- **Pass 3, edge (26 properties):** the x86 pass's four boots, plus the verifier's own
+  report. The verifier must be handed exactly the configured `/dev/ram0 /dev/ram1
+  <root_hash>`, exit 0 on the intact image, and fail the corrupted one at position 0.
+- **Pass 4, emergency auth (56):** 4a the legacy SHA-256 digest, 4b an Argon2id record
+  in `emergency.cred` with a decoy in `config.json`, and 4c the same record in a 0644
+  file that must not fall back to the config key. ⚠ **Typing is driven by the prompt,
+  not a clock.** The x86 pass types after a fixed 8 s, which is safe under KVM. Here
+  the gate waits until `Password: ` is in the log and types 2 s later. kybernet
+  switches echo off after writing the prompt, and the 2 s cover that step. ⚠ **A
+  rejection's halt is asserted positively.** The x86 pass can only check that no
+  `rebooting` line appeared. Here the VM must still be running 5 s after the verdict,
+  since under `-no-reboot` a reboot or a power-off ends it.
+- **Pass 5, quiet (5):** pass 1's image with `log_to_console: false`. 6 kybernet lines
+  survive, against 64 with logging on (the x86 pass also measures 6). A line a service
+  wrote to the console proves the boot got through phase 8.
+
+**Measured:** Argon2id verification as aarch64 PID 1 under TCG adds **~2.7 s** to phase
+6c (5.15 s against 2.44 s for the same span with the legacy digest). That answers the
+roadmap's liveness question with a large margin: the prompt's own deadline is 120 s.
+It is not a measurement of ARM hardware, and that roadmap item stays open.
+
+### Found — no auth pass had ever run the shell it authenticated for (both arches)
+
+After a correct password kybernet execs `/usr/bin/agnoshi`. In the x86 image that was
+a symlink to busybox, and busybox chooses its applet by argv[0], so the log said
+`agnoshi: applet not found` and the shell exited. From 1.5.8 to 1.7.2 the auth passes
+proved the password was accepted and nothing after that. Three properties fixed
+earlier in that shell's setup had never been gated: fd 0 on the console, not
+`/dev/null` (1.5.8); an empty blocked-signal mask, where PID 1 blocks five signals for
+its signalfd (1.4.2 MEDIUM-4); and a real environment (1.5.8).
+
+`qemu/svc-fixture.cyr` gains an emergency-shell personality: started as `agnoshi`, it
+reports its descriptors, its `SigBlk`, its uid and its `PATH`/`TERM`/`HOME`/`SHELL`/`PS1`,
+then exits. The auth images on **both** arches now carry it as `/usr/bin/agnoshi`.
+Each correct-password boot asserts all nine properties and asserts that, once the shell
+exits, the edge refusal still stands and the board powers off (1.4.2 HIGH-2). On x86
+that is the 20 new properties, 10 per credential format; on aarch64 they are part of
+pass 4.
+
+### ⚠ Found, not fixed — an edge board can open an UNAUTHENTICATED emergency shell
+
+1.5.7 made an edge **refusal** at phase 6c require authentication, and suppress the
+shell when no credential exists. Its CHANGELOG scoped the fix to "an edge refusal". But
+phase 6c is one of three callers of `drop_to_emergency()`. The other two are a
+**required boot stage failing at phase 7** and **every service failing** in the service
+wave. Those two follow `emergency_require_auth` as configured, and it defaults to
+false. So on an edge board without that key, a failed required stage opens a root shell
+on the console with no password.
+
+Every edge boot in both harnesses that gets past phase 6c (the intact image, and both
+escape hatches) has been taking that path. argonaut's edge boot sequence includes a
+required stage, `Start daimon (agent-runtime) in edge mode on port 8090`, and the
+fixture images contain no daimon. So on the intact, **verified** image the log reads
+`FATAL: required boot stage failed`, `=== ENTERING EMERGENCY MODE ===`,
+`emergency shell started`, with no authentication step. A shell never actually opened,
+only because there was none to run: busybox refused the `agnoshi` name, and the
+aarch64 edge images carry no shell. On a real AGNOS board `/usr/bin/agnoshi` is the
+shell.
+
+1.5.7's reasoning applies unchanged: on a device whose purpose is verified boot, anyone
+who can make a required stage fail gets root, and a daimon that cannot start is enough.
+The recommended fix: `drop_to_emergency()` requires authentication on an
+edge board whatever the config says, and with no usable credential it suppresses the
+shell and returns, which is 1.6.15's existing path. Phase 7 then continues the boot,
+which is its deliberate availability choice. The decision belongs in
+`emergency_auth.cyr`, where the unit suite can test it (standing rule 34, and 1.7.1's
+"test the decision"), and both harnesses' intact-image boots can then assert it.
+
+This release changes no `src/` file, and this is a change to what PID 1 does when a
+stage fails. So it is on the roadmap as the next item rather than folded in.
+
+### Changed
+
+- **CI:** the aarch64 boot step installs `cryptsetup-bin` alongside `qemu-system-arm`
+  and `cpio`. The gate fails with the reason if veritysetup is missing;
+  `ALLOW_A64_EDGE_SKIP=1` is the deliberate override, and CI does not set it. The step's
+  comment also said `cpio` came from "a later step". It comes from the x86 harness
+  **job**, which is a different runner.
+- **The documented aarch64 build now matches the shipped one.** CLAUDE.md's release
+  gates, its build section and CONTRIBUTING.md cross-built aarch64 without
+  `CYRIUS_DCE=1`, while `ci.yml` and `release.yml` build with it. On aarch64 DCE
+  NOP-fills dead code rather than removing it, so the two builds are the same size
+  (2,167,800 B) with different bytes, and a local gate run could grade a binary nothing
+  ships. Found when this release's rebuild failed to `cmp` equal to 1.7.2's; the DCE
+  build is byte-identical to it. The gate script's rebuild hints say `CYRIUS_DCE=1` too.
+- **The aarch64 gate's header** said the busybox `kyb-seccomp` shape was "on the
+  roadmap", and it was not. It is omitted on purpose: the `kyb-seccomp-on`/`-off` pair
+  already asserts the filter loads, on the binary shape AGNOS services have (standing
+  rule 48). The header now says that.
+
+### Verification
+
+| check | result |
+|---|---|
+| `bash qemu/boot-test-aarch64.sh` | **158/158**, 0 failed, in 1 min 26 s |
+| `bash qemu/boot-test.sh` (`HARNESS_STRICT=1`, KVM) | **104/104**, 0 failed, 0 skipped |
+| aarch64, inject: kybernet treats verify exit 2 as verified | red, 11 FAIL: every corrupted-image refusal, and "the refusal stands" in pass 4 |
+| aarch64, inject: the 1.7.0 fallback in `emerg_resolve_cred_at` | red, 4 FAIL, all in pass 4c: the same four x86 showed at 1.7.1 |
+| aarch64, inject: no `reset_child_signal_mask()` for the shell | red: `SigBlk=0000000020014003`, i.e. HUP, INT, TERM, CHLD and PWR, PID 1's own mask |
+| aarch64, inject: no console `dup2` for the shell | red: the shell's fd 0 is not the console |
+| aarch64, inject: echo left on at the prompt | red, 4 FAIL: both passwords reach the log, in both formats |
+| aarch64, inject: a wrong password reboots instead of halting | red, 4 FAIL: the VM did not stay up, and `reboot: Restarting system` |
+| aarch64, inject: `klog` ignores `log_to_console` | red: 12 kybernet lines against a ceiling of 10 |
+| aarch64, inject: the stand-in hashes the salt last | red at the stand-in check (intact: 2 vs veritysetup's 0), and passes 3 and 4 refuse to run |
+| aarch64, inject: the pre-init cannot read the hash image | red, 13 FAIL: no `PREINIT-OK`, and the verifier reports no superblock instead of position 0 |
+| x86, inject: no `reset_child_signal_mask()` for the shell | red, 102 OK / 2 FAIL: `SigBlk` in both credential formats, the same two aarch64 shows |
+| `cyrius test` / `aarch64-exec-gate.sh` | 787 / 782, unchanged (no `src/` change) |
+| new and changed fixtures, `cyrius lint` and `fmt --check` | clean (CI lints only `src/`; held to the same bar anyway) |
+| `bash scripts/verify-lock.sh` | OK; no dependency, lock or toolchain change |
+| `rm -rf lib && cyrius deps && cyrius deps --verify` | 76 verified, 0 failed; lock unchanged |
+| both binaries, rebuilt with `CYRIUS_DCE=1` | byte-identical to 1.7.2's: x86_64 709,928 B, aarch64 2,167,800 B |
+| sibling-free reproduction | lock and both binaries byte-identical |
+| every `scripts/*.sh` and `qemu/*.sh` under `bash -n` | parse |
+
+The bench gate was not run: the kybernet binaries are byte-identical to 1.7.2's and
+`src/bench.cyr` is unchanged, so there is no codegen delta to measure.
+
+---
+
 ## [1.7.2] — 2026-09-22
 
 **aarch64 fixture parity.** From 1.6.19 to 1.7.1 the aarch64 boot gate booted

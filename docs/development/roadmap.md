@@ -1,6 +1,6 @@
 # Kybernet Roadmap
 
-**Current: v1.7.2** — [CHANGELOG.md](../../CHANGELOG.md) is the record of what each
+**Current: v1.7.3** — [CHANGELOG.md](../../CHANGELOG.md) is the record of what each
 release actually did. This file carries only what is **not** done; a completed item is
 deleted from here and summarised in History below, never left ticked.
 
@@ -33,16 +33,17 @@ something rather than by reading, it says so — and where it was verified by *i
 the defect and watching the gate go red*, it says that too, because this project has
 repeatedly found that a gate nobody has seen fail is a gate nobody should trust.
 
-**Pins:** `v1.7.x` is what the cyrius 6.6.6 bump found. `v1.6.x` is scoped work with a clear finish line. `v1.x.x` is real but needs
+**Pins:** `v1.7.x` is what the 1.7 releases found: the cyrius 6.6.6 bump, and then the
+aarch64 passes. `v1.6.x` is scoped work with a clear finish line. `v1.x.x` is real but needs
 a design decision or is too large to date. The last two sections are blocked on
 something outside this repo.
 
 `cyrius lint` reports **0 untracked deferrals and 0 warnings** across the tree, and as
 of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into fiction.
 
-**Gate counts at v1.7.2** (a next agent must not let these shrink; each is enforced):
-**787** test assertions on x86_64 and **782** on aarch64 · **84** harness properties ·
-**66** aarch64 boot-gate properties · 56 benchmarks (two reported-not-gated, declared) ·
+**Gate counts at v1.7.3** (a next agent must not let these shrink; each is enforced):
+**787** test assertions on x86_64 and **782** on aarch64 · **104** harness properties ·
+**158** aarch64 boot-gate properties · 56 benchmarks (two reported-not-gated, declared) ·
 the aarch64 execution gate · the committed-lock gate.
 ⚠ **The two assertion counts differ on purpose and neither floor gates the other** — a
 seccomp allowlist is arch-specific, so six assertions are x86-only and one aarch64-only.
@@ -52,7 +53,28 @@ what it says. See [state.md](state.md) for the full current-state handoff.
 
 ---
 
-## v1.7.x — found by the cyrius 6.6.6 bump
+## v1.7.x — found by the cyrius 6.6.6 bump and the aarch64 passes
+
+- [ ] **⚠ An edge board opens an UNAUTHENTICATED emergency shell when a required boot
+      stage fails.** Found at 1.7.3, and the next thing to fix. 1.5.7 made the phase-6c
+      edge **refusal** require authentication (and suppress the shell with no
+      credential), and scoped its fix to exactly that. `drop_to_emergency()` has two more
+      callers in `src/main.cyr`: a required boot stage failing at phase 7, and every
+      service failing in the service wave. Both follow `emergency_require_auth` as
+      configured, which defaults to false. Every edge boot in both harnesses that gets
+      past phase 6c (the intact image, and both escape hatches) takes the phase-7 path,
+      because argonaut's edge sequence has a required `Start daimon (agent-runtime) in
+      edge mode on port 8090` stage and the fixtures have no daimon.
+      On the intact, VERIFIED image the log reads `FATAL: required boot stage failed`,
+      `=== ENTERING EMERGENCY MODE ===`, `emergency shell started`, with no
+      authentication step. No shell opened only because none could run: busybox refuses
+      the `agnoshi` name, and the aarch64 edge images carry no shell. On a board,
+      `/usr/bin/agnoshi` is the shell. **Fix:** on an edge board `drop_to_emergency()`
+      requires authentication whatever the config says, and with no usable credential it
+      suppresses the shell and returns (1.6.15's existing path), so phase 7 continues the
+      boot as it deliberately does. Put the decision in `emergency_auth.cyr` so the unit
+      suite tests it (rule 34), and make both harnesses' intact-image edge boots assert
+      that no shell opened.
 
 - [ ] **Upstream (cyrius, filed by the user, not from here): the hashmap seed blocks PID 1
       at phase 6 on a board with no entropy.** `lib/hashseed.cyr` draws the per-process
@@ -63,15 +85,6 @@ what it says. See [state.md](state.md) for the full current-state handoff.
       time-mix fallback kept for the pre-5.6 EINVAL. The kernel bounds the wait on 5.4+,
       so this is a boot delay rather than a hang, and the aarch64 gate now asserts both
       that the boot was starved and that the span budget held.
-- [ ] **aarch64: the edge, emergency-auth and quiet passes are still x86-only.** 1.7.2
-      brought the service fixtures across. What remains needs a different kind of
-      staging: the dm-verity image pair is built by `veritysetup` on the host (the images
-      themselves are architecture-independent data, and `-M virt` takes `if=virtio`
-      drives), the auth passes feed a password over the serial line, and the quiet pass
-      needs a second config. None needs busybox. ⚠ The auth passes are where aarch64
-      would first run Argon2id as PID 1, so the KDF's timing under TCG is a *liveness*
-      question here, not a measurement (see "Argon2 cost measured on real ARM").
-
 - [ ] **Adopt `file_read_whole` (cyrius 6.6.6) and retire the 16 KiB config cap.**
       `_load_config_inner` reads into a fixed 16,385-byte buffer and refuses anything
       larger (`CFG_READ_TOO_BIG`). That refusal is *correct*, and replacing it is a
@@ -211,7 +224,8 @@ argonaut. Checked, not assumed:
       nothing, and timing is the whole point of the 1.5.9 work cap. ⚠ Correctness on
       aarch64 is a different question and is **not** blocked — `qemu/boot-test-aarch64.sh`
       boots the binary as PID 1 under TCG, so what remains genuinely unmeasurable here
-      is the KDF's WALL TIME, nothing else.
+      is the KDF's WALL TIME, nothing else. Under TCG it added ~2.7 s at phase 6c at
+      1.7.3, which settles liveness (the prompt's deadline is 120 s), not cost.
 
 ### Reclassified — harness work, not hardware
 
@@ -256,6 +270,18 @@ Moved into the v1.6.1 gate line. Recording why here so the claim is not re-made:
 
 One line per release. Detail lives in [CHANGELOG.md](../../CHANGELOG.md).
 
+- **v1.7.3** — The aarch64 edge, emergency-auth and quiet passes: the aarch64 gate now runs
+  all five passes, 66 → 158 properties. There is no aarch64 veritysetup to stage, so
+  `qemu/verity-fixture.cyr` stands in for `veritysetup verify`, and it must match the
+  host's real veritysetup on five cases before any edge boot counts. The pinned kernel
+  has no virtio-blk, so `qemu/preinit-fixture.cyr` loads the image into `/dev/ram0` and
+  execs kybernet. Every property held on the first run. The auth passes also found that
+  no auth pass on either arch had ever run a shell: `/usr/bin/agnoshi` was busybox,
+  which refuses that name. `svc-fixture` now stands in for it on both arches and reports
+  the shell's descriptors, signal mask and environment (x86 84 → 104). With a shell able to run,
+  the logs showed an edge board opening the emergency shell **without authentication**
+  when a required boot stage fails. That is open above, not fixed here. Nine defects
+  put back on aarch64 each turned the gate red.
 - **v1.7.2** — aarch64 fixture parity. The aarch64 boot gate ran with **no services** from
   1.6.19 to 1.7.1. It now stages 19, built only from the repo's Cyrius fixtures (the new
   `qemu/svc-fixture.cyr` stands in for the busybox one-liners), and asserts on aarch64 what

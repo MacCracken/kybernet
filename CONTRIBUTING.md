@@ -12,7 +12,7 @@ Before submitting:
 
 ```sh
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet
-cyrius build --aarch64 src/main.cyr build/kybernet-aarch64
+CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr build/kybernet-aarch64   # DCE: what CI ships
 cyrius test src/test.cyr
 cyrius fmt <changed-file> --check          # NOT `cyrius fmt <f>` — that rewrites in place
 cyrius vet src/main.cyr
