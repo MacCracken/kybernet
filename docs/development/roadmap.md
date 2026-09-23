@@ -305,7 +305,10 @@ One line per release. Detail lives in [CHANGELOG.md](../../CHANGELOG.md).
   `_reap_empty_vec` was renamed out of argonaut's namespace. Every dep change was checked
   against the DCE list: agnostik's exit-70 `_fill_random` is dead in PID 1, and libro's
   `getrandom` `uuid_v4` is live. 747 → 758 assertions (742 → 753 on aarch64); binaries and
-  lock byte-identical in a sibling-free reproduction.
+  lock byte-identical in a sibling-free reproduction. ⚠ The first CI run failed the aarch64
+  boot gate: the kernel was pinned by checksum to Alpine's unversioned `netboot/` URL,
+  which 3.21.8 overwrote, and a warm `qemu/.cache/` hid that locally. It now uses a
+  versioned URL with the same checksum and refuses an unversioned one.
 - **v1.6.20** — cyrius 6.5.36 → 6.6.2, the value-form flip: 65 call sites migrated, with
   every `return r` propagation re-wrapped as `return Err(rv)`. Consumed libro 2.10.0 and
   argonaut 1.15.0, **closing MEDIUM-10**. 6.6.2's same-name different-arity refusal

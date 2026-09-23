@@ -51,8 +51,26 @@ KERNEL="${CACHE}/vmlinuz-aarch64"
 # amd64 runner has no arm64 kernel package, so this is a declared dependency
 # with a sha256, not "whatever the mirror serves today". A changed checksum is a
 # failure, not a silent re-download.
-KERNEL_URL="https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/aarch64/netboot/vmlinuz-lts"
+#
+# ⚠ THE URL MUST NAME A POINT RELEASE, AND THE CHECK BELOW ENFORCES IT. 1.7.0.
+# This pinned the checksum of `.../v3.21/releases/aarch64/netboot/vmlinuz-lts`,
+# and Alpine OVERWRITES the unversioned `netboot/` directory on every 3.21.x point
+# release. When 3.21.8 landed (2026-09-17) the download changed under an unchanged
+# pin, and CI failed with a checksum mismatch, which was correct. Every local run
+# stayed green only because `.cache/` still held the 3.21.7 bytes, so the gate
+# could not see the drift from a warm dev box (standing rule 39). A checksum on a
+# moving URL is a tripwire, not a pin. `netboot-3.21.7/` is immutable, and it
+# serves the exact bytes this gate has always booted (verified: same sha256).
+# Moving to a newer kernel is a deliberate change of BOTH lines below.
+KERNEL_URL="https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/aarch64/netboot-3.21.7/vmlinuz-lts"
 KERNEL_SHA256="330dd0a88d18930dac4e425fad50f2947901a1c2bf782e72f58fef25ada4902a"
+case "$KERNEL_URL" in
+    */netboot/*)
+        echo "ERROR: KERNEL_URL points at Alpine's UNVERSIONED netboot/ directory,"
+        echo "       which every point release overwrites. Pin a netboot-X.Y.Z/ path."
+        exit 1
+        ;;
+esac
 
 # Wall-clock liveness ceiling only — NOT the performance budget. See KYB_BUDGET_MS.
 TIMEOUT_S="${A64_TIMEOUT_S:-240}"

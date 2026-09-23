@@ -17,6 +17,10 @@ path that 1.6.20 shipped without explaining. Suite 747 → **758** assertions
 (742 → **753** on aarch64). The x86_64 harness passed **79/79** under
 `HARNESS_STRICT=1` and the aarch64 boot gate **18/18**.
 
+⚠ **The first CI run of this release FAILED the aarch64 boot gate**, on a kernel
+checksum mismatch that had nothing to do with the code. It is fixed in place below,
+under the same version, because a release whose CI is red did not ship.
+
 ### Changed — toolchain pin 6.6.2 → **6.6.6**
 
 `cyrius.cyml`'s pin, re-resolved from an empty `lib/`. `cyrius.lock` grows from 73
@@ -239,6 +243,44 @@ file also returns 0. Not fixed in this release, because the fix changes
 authentication behaviour and needs its own harness fixture (standing rule 27).
 It is the first item on the roadmap.
 
+### Fixed — the first CI run failed the aarch64 boot gate: a pin on a moving URL
+
+```
+ERROR: kernel checksum mismatch.
+       expected 330dd0a88d18930dac4e425fad50f2947901a1c2bf782e72f58fef25ada4902a
+       got      412539fbb64fad73c32b3d11c80f7e6fc28828421ea156212ce03d26470aada5
+```
+
+`qemu/boot-test-aarch64.sh` pinned the sha256 of
+`dl-cdn.alpinelinux.org/alpine/v3.21/releases/aarch64/netboot/vmlinuz-lts`, and
+Alpine **overwrites the unversioned `netboot/` directory on every point release**.
+3.21.8 landed on 2026-09-17, a week after 1.6.20's last green run. So every commit
+since then would have failed this gate on CI, whatever it changed. The gate did
+exactly what it was written to do. Refusing a kernel that changed under the pin is
+its purpose, and a silent re-download would have been worse. The defect was the pin.
+A checksum on a mutable URL is a tripwire, not a pin.
+
+⚠ **Why every local run was green: the cache.** `qemu/.cache/vmlinuz-aarch64` still
+held the 3.21.7 bytes, fetched 2026-08-28, and the script only downloads when the
+cached copy fails its checksum. A warm dev box therefore cannot see upstream drift at
+all. That is standing rule 39's dev-box-only green, arriving through a cache instead
+of an installed package. This release's gate run passed for the same reason, and
+that pass did not show CI would pass.
+
+Fixed by pointing at the versioned, immutable
+`netboot-3.21.7/vmlinuz-lts`. It serves the **exact bytes** the gate has always
+booted: its sha256 is the pinned `330dd0a8…`, and `cmp` against the cached kernel is
+clean. `KERNEL_SHA256` is unchanged, so the gate still tests the same kernel, which
+was the point of pinning it. `netboot/vmlinuz-lts` now hashes to CI's `412539fb…`,
+which confirms the diagnosis. A `case` guard now **refuses** any `KERNEL_URL` under an
+unversioned `netboot/` path, so a comment is not the only thing keeping it out.
+Verified by injection: substituting the old URL into a copy of the script exits 1
+with that message. Moving to a newer kernel is a deliberate edit of both lines.
+
+Verified the way CI runs it, with the cached kernel **moved aside**. The script
+fetched from the versioned URL, the checksum matched, and the gate passed **18/18**
+(kybernet span 1007 ms, 22 reactor wakeups).
+
 ### Verification
 
 | gate | result |
@@ -249,7 +291,7 @@ It is the first item on the roadmap.
 | `cyrius test src/test.cyr` | **758 passed, 0 failed** |
 | `bash scripts/aarch64-exec-gate.sh` | **753** assertions, 0 failed; 5/5 syscall probes; declared-broken `[]` |
 | `bash qemu/boot-test.sh` (`HARNESS_STRICT=1`, KVM) | **79/79**; kybernet span 333 ms (budget 1200); reactor 24 wakeups |
-| `bash qemu/boot-test-aarch64.sh` (TCG) | **18/18**; kybernet span 1037 ms (budget 4000); reactor 23 wakeups |
+| `bash qemu/boot-test-aarch64.sh` (TCG) | **18/18** warm cache, and **18/18 with the cached kernel removed** (fetched from the versioned URL, as CI does) |
 | `bash scripts/bench-history.sh` | 56 benchmarks, **0 regressions ≥15%**, 7 improvements |
 | fmt `--check` / lint / vet over CI's globs | clean; 0 warnings, 0 untracked deferrals |
 | CI security scan, replayed verbatim | clean |

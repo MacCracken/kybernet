@@ -164,8 +164,13 @@ stricter bar on the next sweep.**
 
 ## In flight
 
-**v1.7.0 is ready and untagged.** Every dep tag it pins already exists on the remote, so
-nothing upstream has to be released first. `git show HEAD:cyrius.lock` is still 1.6.20's,
+**v1.7.0 is ready and untagged.** ⚠ Its first CI run **failed the aarch64 boot gate**:
+the kernel's sha256 was pinned on Alpine's unversioned `netboot/` URL, which 3.21.8
+overwrote on 2026-09-17, and local runs stayed green only because `qemu/.cache/` held
+the old bytes. It is fixed in place under 1.7.0 (a versioned `netboot-3.21.7/` URL with
+the same checksum, and a guard against unversioned ones), and verified with the cached
+kernel removed: 18/18. Every dep tag it pins already exists on the remote, so nothing
+upstream has to be released first. `git show HEAD:cyrius.lock` is still 1.6.20's,
 so `verify-lock.sh` will fail half 1 **until the new lock is committed**. That is correct:
 it checks what CI checks out. It passes against a committed snapshot of this tree.
 
