@@ -1,6 +1,6 @@
 # Kybernet Roadmap
 
-**Current: v1.7.4** — [CHANGELOG.md](../../CHANGELOG.md) is the record of what each
+**Current: v1.7.5** — [CHANGELOG.md](../../CHANGELOG.md) is the record of what each
 release actually did. This file carries only what is **not** done; a completed item is
 deleted from here and summarised in History below, never left ticked.
 
@@ -41,9 +41,9 @@ something outside this repo.
 `cyrius lint` reports **0 untracked deferrals and 0 warnings** across the tree, and as
 of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into fiction.
 
-**Gate counts at v1.7.4** (a next agent must not let these shrink; each is enforced):
-**793** test assertions on x86_64 and **788** on aarch64 · **108** harness properties ·
-**162** aarch64 boot-gate properties · 56 benchmarks (two reported-not-gated, declared) ·
+**Gate counts at v1.7.5** (a next agent must not let these shrink; each is enforced):
+**831** test assertions on x86_64 and **826** on aarch64 · **113** harness properties ·
+**167** aarch64 boot-gate properties · 56 benchmarks (two reported-not-gated, declared) ·
 the aarch64 execution gate · the committed-lock gate.
 ⚠ **The two assertion counts differ on purpose and neither floor gates the other** — a
 seccomp allowlist is arch-specific, so six assertions are x86-only and one aarch64-only.
@@ -169,24 +169,15 @@ method, not about the code.
       shipped: a bound that depends on free RAM at boot makes a credential valid on one
       board and invalid on another. Revisit if a board under 512 MB appears.
 
-- [ ] **Seven `ServiceDefinition` fields have no config key at all** — now five.
-      `restart_config` landed at 1.6.19 (`max_restarts` / `base_delay_ms` /
-      `max_delay_ms`, validated at load and **refused rather than clamped**, per
-      standing rule 25). `ready_check` needs argonaut's
-      `svc_def_set_ready_check`, added in 1.15.0 and **consumed since 1.6.20**, so
-      this is unblocked and simply not done.
-      ⚠ **`environment` and `env_files` were implemented at 1.6.19 and then
-      WITHHELD**, which is the part worth remembering: both parsed correctly and
-      would have done **nothing**. `fork_exec_service` builds the child envp from
-      `build_default_envp()` and never reads `svc_def_env`, and
-      `svc_def_env_files` is read by nothing at all — so shipping them would have
-      given operators two config keys that silently have no effect, which is
-      worse than not shipping them. The missing seam (`_append_service_env`) shipped in
-      argonaut **1.15.0, consumed since 1.6.20**, so both keys are unblocked and
-      need only the kybernet side, not more argonaut work. Before adding a
-      config key, **check that something downstream reads the field**.
-      The remainder still needs a decision about how much of argonaut's model
-      kybernet intends to expose.
+- [ ] **Three `ServiceDefinition` fields have no config key: `socket_activation`,
+      `log_config` and `required_for_modes`.** Seven had none at 1.6.18.
+      `restart_config` landed at 1.6.19, and `environment`, `env_files` and
+      `ready_check` at 1.7.5, each once something downstream was confirmed to read the
+      field. (`env_files` is still read by nothing in argonaut, so kybernet reads those
+      files itself at load.) What remains needs a decision about how much of argonaut's
+      model kybernet exposes: socket activation is a listening-socket protocol, not a
+      scalar, and argonaut's defaults for the other two fit every shape kybernet ships.
+      `resource_limits` stays unexposed on purpose (standing rule 14).
 
 ---
 
@@ -249,6 +240,13 @@ Moved into the v1.6.1 gate line. Recording why here so the claim is not re-made:
 
 One line per release. Detail lives in [CHANGELOG.md](../../CHANGELOG.md).
 
+- **v1.7.5** — Three service keys: `environment` and `ready_check`, whose fields argonaut
+  1.15.0 reads, and `env_files`, whose field argonaut still ignores, so kybernet reads
+  the files itself at load. A file overrides `environment`, as in systemd. The ready
+  check blocks PID 1 (at phase 8 and on every restart in the reactor), so its bounds are
+  refusals: timeout 100 to 60,000 ms. Both harnesses assert, from inside a child,
+  that a config value, a file value and the override arrived, and that one ready
+  check passes and one fails.
 - **v1.7.4** — An edge board no longer opens an unauthenticated emergency shell when a
   required boot stage fails. 1.5.7 had required authentication only for the phase-6c
   refusal; phase 7 and the service wave followed `emergency_require_auth`, default false.

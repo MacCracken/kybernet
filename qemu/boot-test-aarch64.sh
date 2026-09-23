@@ -306,10 +306,27 @@ cat > "$ROOT/etc/kybernet/config.json" << 'CFGEOF'
       "type": "oneshot", "restart": "never",
       "security": { "seccomp": "basic", "no_new_privs": true } },
     { "name": "kyb-seccomp-off", "binary": "/usr/bin/kyb-seccomp-fixture",
-      "type": "oneshot", "restart": "never" }
+      "type": "oneshot", "restart": "never" },
+    { "name": "kyb-env", "binary": "/usr/bin/kyb-svc-fixture", "args": ["status"],
+      "type": "oneshot", "restart": "never",
+      "environment": { "KYB_FROM_CONFIG": "config value", "KYB_OVERRIDDEN": "from config" },
+      "env_files": ["/etc/kybernet/kyb-env.env"] },
+    { "name": "kyb-ready-ok", "binary": "/usr/bin/kyb-svc-fixture", "args": ["sleep", "30"],
+      "type": "simple", "restart": "never",
+      "ready_check": { "type": "process-alive", "timeout_ms": 2000, "retries": 3, "retry_delay_ms": 100 } },
+    { "name": "kyb-ready-fail", "binary": "/usr/bin/kyb-svc-fixture", "args": ["sleep", "30"],
+      "type": "simple", "restart": "never",
+      "ready_check": { "type": "tcp", "target": "127.0.0.1", "port": 9,
+                       "timeout_ms": 500, "retries": 2, "retry_delay_ms": 50 } }
   ]
 }
 CFGEOF
+# kyb-env's env_files entry (1.7.5), the same file the x86 image stages.
+cat > "$ROOT/etc/kybernet/kyb-env.env" << 'ENVEOF'
+# kyb-env's environment file
+KYB_FROM_FILE="file value"
+KYB_OVERRIDDEN=from file
+ENVEOF
 # ⚠ DO NOT DISCARD cpio's STDERR, AND DO NOT ASSUME cpio EXISTS. The first
 # version was `cpio ... 2> /dev/null`, which turns a missing or failing archiver
 # into an empty initramfs — QEMU then boots a kernel with no `/init`, every
@@ -743,14 +760,14 @@ fi
 # Each assertion mirrors the x86 harness's assertion of the same name. The reasoning
 # behind each one lives there; what is new here is that it RUNS on aarch64, where
 # the syscall numbers, the seccomp allowlist and the struct layouts differ.
-_prop "config: services parsed: 19" \
-    'kybernet: config: services parsed: 19([^0-9]|$)' "$OUT1"
+_prop "config: services parsed: 22" \
+    'kybernet: config: services parsed: 22([^0-9]|$)' "$OUT1"
 _prop "completed (oneshot): kyb-dep" 'completed \(oneshot\): kyb-dep' "$OUT1"
 _prop "completed (oneshot): kyb-svc, after its dependency" 'completed \(oneshot\): kyb-svc' "$OUT1"
 _prop "started: kyb-live" 'started: kyb-live' "$OUT1"
-# 18, not 19: kyb-prereq-dep is skipped, so no cgroup is ever made for it.
-_prop "removed service cgroups: 18 (every started service, torn down)" \
-    'kybernet: removed service cgroups: 18([^0-9]|$)' "$OUT1" 'removed service cgroups'
+# 21, not 22: kyb-prereq-dep is skipped, so no cgroup is ever made for it.
+_prop "removed service cgroups: 21 (every started service, torn down)" \
+    'kybernet: removed service cgroups: 21([^0-9]|$)' "$OUT1" 'removed service cgroups'
 
 # ⚠ THE LABEL IS THE PLACEMENT CHECK. svc-fixture labels its report with the leaf
 # of its OWN cgroup path, so a service whose child-side join failed (standing rule
@@ -792,6 +809,17 @@ else
     fail=1
 fi
 
+# environment, env_files and ready_check (1.7.5): the same services and assertions
+# as the x86 harness. kyb-env's report comes from inside the child; KYB_OVERRIDDEN
+# is in both its `environment` block and its env file, and the file must win.
+_prop "environment reached the child (KYB_FROM_CONFIG)" \
+    'ST\[kyb-env\]-ENV-KYB_FROM_CONFIG=config value' "$OUT1" 'ST\[kyb-env\]'
+_prop "env_files reached the child, quotes stripped (KYB_FROM_FILE)" \
+    'ST\[kyb-env\]-ENV-KYB_FROM_FILE=file value' "$OUT1" 'ST\[kyb-env\]'
+_prop "an env file overrides environment (KYB_OVERRIDDEN)" \
+    'ST\[kyb-env\]-ENV-KYB_OVERRIDDEN=from file' "$OUT1" 'ST\[kyb-env\]'
+_prop "a service whose ready_check passes is started" 'started: kyb-ready-ok' "$OUT1" 'kyb-ready'
+_prop "a service whose ready_check cannot pass is failed" 'FAILED to start: kyb-ready-fail' "$OUT1" 'kyb-ready'
 _prop "a oneshot whose binary is missing fails to start" 'FAILED to start: kyb-prereq-fail' "$OUT1"
 _prop "its dependent is SKIPPED, with the blocker named" \
     'SKIPPED \(prerequisite failed\): kyb-prereq-dep' "$OUT1" 'prereq'

@@ -28,7 +28,11 @@
 #       "enabled":      true,
 #       "pid_file":     "/run/daimon.pid",
 #       "health_check": { "type": "tcp", "target": "127.0.0.1", "port": 8090,
-#                         "interval_ms": 5000, "timeout_ms": 2000, "retries": 3 }
+#                         "interval_ms": 5000, "timeout_ms": 2000, "retries": 3 },
+#       "ready_check":  { "type": "tcp", "target": "127.0.0.1", "port": 8090,
+#                         "timeout_ms": 10000, "retries": 10, "retry_delay_ms": 500 },
+#       "environment":  { "RUST_LOG": "info" },
+#       "env_files":    ["/etc/daimon/daimon.env"]
 #     }
 #   ]
 #
@@ -238,6 +242,184 @@ fn _cfg_restart_config_into(obj, sd) {
     return 1;
 }
 
+# Log a refused service field on console and dmesg, and return 0 for the caller to
+# pass on. 1.7.5.
+fn _cfg_refuse(sd, why) {
+    klog2(why, str_data(svc_def_name(sd)));
+    kmsg("kybernet: config: a service was refused, see the console for the reason");
+    return 0;
+}
+
+# A variable name the child's environment can carry unambiguously:
+# [A-Za-z_][A-Za-z0-9_]*. A name holding '=' would split into a different variable
+# in the child, and one holding a NUL would be cut short by execve. 1.7.5.
+fn _cfg_env_name_ok(p, n) {
+    if (n <= 0 || n > 255) { return 0; }
+    for (var i = 0; i < n; i = i + 1) {
+        var c = load8(p + i) & 0xFF;
+        var ok = 0;
+        if (c == 95) { ok = 1; }
+        if (c >= 65 && c <= 90) { ok = 1; }
+        if (c >= 97 && c <= 122) { ok = 1; }
+        if (i > 0 && c >= 48 && c <= 57) { ok = 1; }
+        if (ok == 0) { return 0; }
+    }
+    return 1;
+}
+
+fn _cfg_has_nul(p, n) {
+    for (var i = 0; i < n; i = i + 1) {
+        if (load8(p + i) == 0) { return 1; }
+    }
+    return 0;
+}
+
+# `"environment": {"KEY": "value", ...}` into the service's own map, which argonaut
+# (1.15.0, `_append_service_env`) appends to the child's envp after PATH, so an
+# entry may deliberately override PATH. Returns 1 on success or no block, 0 to
+# refuse the service. 1.7.5.
+fn _cfg_environment_into(obj, sd) {
+    var e = json_v_obj_get(obj, "environment");
+    if (e == 0) { return 1; }
+    if (json_v_is_obj(e) == 0) { return _cfg_refuse(sd, "config: environment is not an object - service REFUSED: "); }
+    var env = svc_def_env(sd);
+    var n = json_v_obj_len(e);
+    for (var i = 0; i < n; i = i + 1) {
+        var k = json_v_obj_key(e, i);
+        var v = json_v_obj_val(e, i);
+        if (k == 0 || _cfg_env_name_ok(str_data(k), str_len(k)) == 0) {
+            return _cfg_refuse(sd, "config: environment has an invalid variable name - service REFUSED: ");
+        }
+        if (v == 0 || json_v_is_str(v) == 0) {
+            return _cfg_refuse(sd, "config: environment values must be strings - service REFUSED: ");
+        }
+        var s = json_v_str(v);
+        if (_cfg_has_nul(str_data(s), str_len(s)) == 1) {
+            return _cfg_refuse(sd, "config: an environment value holds a NUL - service REFUSED: ");
+        }
+        # The map keys are cstrs that must outlive every spawn; a JSON key is a
+        # boxed Str whose bytes need not be NUL-terminated, so keep a copy.
+        var kc = str_clone(k);
+        if (kc == 0) { return _cfg_refuse(sd, "config: out of memory reading environment - service REFUSED: "); }
+        map_set(env, str_data(kc), s);
+    }
+    return 1;
+}
+
+# `"env_files": ["/etc/foo.env", ...]`, in argonaut's `load_env_file` format:
+# KEY=VALUE lines, `#` comments, optional quotes, 8 KiB at most per file.
+#
+# ⚠ READ BY KYBERNET, AT CONFIG LOAD. argonaut's own `env_files` field is read by
+# nothing on the spawn path, so a key that only set it would do nothing. The files
+# are merged into the same map as `environment`, AFTER it: a file overrides an
+# `environment` entry of the same name, and a later file an earlier one, which is
+# systemd's EnvironmentFile= order. They are read once, when the config loads, so
+# an edit takes effect at the next boot like every other service field. A file
+# that is missing, unreadable, too large or holds a bad name refuses the service:
+# one started without part of its configured environment is one nobody configured.
+# An empty file is an empty environment, not an error. 1.7.5.
+fn _cfg_env_files_into(obj, sd) {
+    var a = json_v_obj_get(obj, "env_files");
+    if (a == 0) { return 1; }
+    if (json_v_is_arr(a) == 0) { return _cfg_refuse(sd, "config: env_files is not an array - service REFUSED: "); }
+    var env = svc_def_env(sd);
+    var n = json_v_arr_len(a);
+    for (var i = 0; i < n; i = i + 1) {
+        var pv = json_v_arr_get(a, i);
+        if (pv == 0 || json_v_is_str(pv) == 0) {
+            return _cfg_refuse(sd, "config: env_files entries must be strings - service REFUSED: ");
+        }
+        var ps = json_v_str(pv);
+        if (str_len(ps) < 2 || load8(str_data(ps)) != 47) {
+            return _cfg_refuse(sd, "config: env_files paths must be absolute - service REFUSED: ");
+        }
+        var pc = str_clone(ps);
+        if (pc == 0) { return _cfg_refuse(sd, "config: out of memory reading env_files - service REFUSED: "); }
+        var st[STAT_BUFSZ];
+        if (sys_stat(str_data(pc), &st) != 0) {
+            return _cfg_refuse(sd, "config: an env_files file is missing or unreadable - service REFUSED: ");
+        }
+        var size = load64(&st + STAT_SIZE);
+        if (size > 0) {
+            var tmp = map_new();
+            var rc = load_env_file(pc, tmp);
+            if (rc == 0 - 2) {
+                return _cfg_refuse(sd, "config: an env_files file is over 8 KiB - service REFUSED: ");
+            }
+            if (rc != 0) {
+                return _cfg_refuse(sd, "config: an env_files file could not be read - service REFUSED: ");
+            }
+            var keys = map_keys(tmp);
+            for (var j = 0; j < vec_len(keys); j = j + 1) {
+                var k = vec_get(keys, j);
+                var v = map_get(tmp, k);
+                if (_cfg_env_name_ok(k, strlen(k)) == 0) {
+                    return _cfg_refuse(sd, "config: an env_files file has a bad variable name - service REFUSED: ");
+                }
+                if (_cfg_has_nul(str_data(v), str_len(v)) == 1) {
+                    return _cfg_refuse(sd, "config: an env_files value holds a NUL - service REFUSED: ");
+                }
+                map_set(env, k, v);
+            }
+        }
+    }
+    return 1;
+}
+
+# `"ready_check": {"type": "tcp", "target": "127.0.0.1", "port": 8080,
+#   "timeout_ms": 10000, "retries": 10, "retry_delay_ms": 500}`, with the types
+# health_check takes. Returns the ReadyCheck, 0 when absent, 0-1 to refuse.
+#
+# ⚠ IT BLOCKS PID 1. argonaut runs the check synchronously inside
+# init_start_service: at phase 8, before the reactor exists, and inside the reactor
+# on every restart, where nothing else is serviced until it returns. The loop stops
+# once `timeout_ms` has passed, so the stall is timeout_ms plus at most one
+# retry_delay_ms, and the ceilings below bound it. A service that needs longer to
+# come up belongs in `type: notify`, which waits for READY without blocking (and
+# for which argonaut uses this timeout_ms as the READY deadline). A failed check
+# kills the service and reports it as failing to start. Refused, never clamped
+# (standing rule 25). 1.7.5.
+fn _cfg_ready_check(svc_obj, sd) {
+    var rc = json_v_obj_get(svc_obj, "ready_check");
+    if (rc == 0) { return 0; }
+    if (json_v_is_obj(rc) == 0) {
+        _cfg_refuse(sd, "config: ready_check is not an object - service REFUSED: ");
+        return 0 - 1;
+    }
+    var type_s = _cfg_str(rc, "type", 0);
+    if (type_s == 0) {
+        _cfg_refuse(sd, "config: ready_check has no type - service REFUSED: ");
+        return 0 - 1;
+    }
+    var trt, trv = health_check_type_parse(type_s);
+    if (is_err_result(trt) == 1) {
+        _cfg_refuse(sd, "config: ready_check.type is not http/tcp/command/process-alive - service REFUSED: ");
+        return 0 - 1;
+    }
+    var target = _cfg_str(rc, "target", str_from(""));
+    var port = _cfg_int(rc, "port", 0);
+    var tmo = _cfg_int(rc, "timeout_ms", 10000);
+    var rty = _cfg_int(rc, "retries", 10);
+    var dly = _cfg_int(rc, "retry_delay_ms", 500);
+    if (tmo < 100 || tmo > 60000) {
+        _cfg_refuse(sd, "config: ready_check.timeout_ms outside 100..60000 - service REFUSED: ");
+        return 0 - 1;
+    }
+    if (rty < 0 || rty > 1000) {
+        _cfg_refuse(sd, "config: ready_check.retries outside 0..1000 - service REFUSED: ");
+        return 0 - 1;
+    }
+    if (dly < 10 || dly > tmo) {
+        _cfg_refuse(sd, "config: ready_check.retry_delay_ms must be 10..timeout_ms - service REFUSED: ");
+        return 0 - 1;
+    }
+    if (port < 0 || port > 65535) {
+        _cfg_refuse(sd, "config: ready_check.port outside 0..65535 - service REFUSED: ");
+        return 0 - 1;
+    }
+    return ready_check_new(result_unwrap(trt, trv), target, port, tmo, rty, dly);
+}
+
 # Build one ServiceDefinition from a JSON object.
 # Returns 0 when the entry is unusable — the caller logs and skips it.
 fn svc_def_from_json(obj) {
@@ -285,8 +467,10 @@ fn svc_def_from_json(obj) {
     #     The field exists and is inert.
     #   - `ready_check` -> IS live (`init.cyr:467,875`) but argonaut ships no
     #     `svc_def_set_ready_check`, so there is no way to set it from here.
-    # All three land in argonaut 1.16.0; the keys follow in the kybernet release
-    # that consumes it.
+    # 1.7.5 exposes all three. argonaut 1.15.0 merged `environment` into the
+    # child's envp and added `svc_def_set_ready_check`. `env_files` is still read
+    # by nothing in argonaut, so kybernet reads those files itself, at load, into
+    # the same map (see `_cfg_env_files_into`).
     #
     # Deliberately NOT exposed at all, with reasons rather than silence:
     #   - `resource_limits` — ⚠ NEVER. `struct ResourceLimits` is defined TWICE
@@ -299,6 +483,12 @@ fn svc_def_from_json(obj) {
     #   - `log_config` / `required_for_modes` — argonaut's defaults are correct for
     #     every shape kybernet ships, and an unused key is a maintenance surface.
     if (_cfg_restart_config_into(obj, sd) == 0) { return 0; }
+    # Files after `environment`, so a file overrides it (systemd's order).
+    if (_cfg_environment_into(obj, sd) == 0) { return 0; }
+    if (_cfg_env_files_into(obj, sd) == 0) { return 0; }
+    var rck = _cfg_ready_check(obj, sd);
+    if (rck == 0 - 1) { return 0; }
+    if (rck != 0) { svc_def_set_ready_check(sd, rck); }
 
     # Enum fields: reject an unrecognised value rather than defaulting.
     var type_s = _cfg_str(obj, "type", 0);

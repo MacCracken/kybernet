@@ -421,6 +421,129 @@ fn test_svc_config_cpu_max() {
     return 0;
 }
 
+# 1.7.5 — `environment`, `env_files` and `ready_check`. Each reaches the child or
+# PID 1's start path, so each is checked for what it SETS, not only that it parses.
+fn _svc_one(doc) {
+    var defs = svc_defs_from_json(json_v_parse(doc));
+    if (vec_len(defs) != 1) { return 0; }
+    return vec_get(defs, 0);
+}
+
+fn _env_is(sd, key, want) {
+    var v = map_get(svc_def_env(sd), key);
+    if (v == 0) { return 0; }
+    return str_eq_cstr(v, want);
+}
+
+fn test_svc_config_environment() {
+    println("--- service environment (1.7.5) ---");
+    var sd = _svc_one(_doc2("{\"services\":[{\"name\":\"e\",\"binary\":\"/bin/e\",",
+        "\"environment\":{\"KYB_A\":\"one\",\"_KYB_2\":\"two words\"}}]}"));
+    assert(sd != 0, "env: a valid block parses");
+    assert(_env_is(sd, "KYB_A", "one") == 1, "env: KYB_A reaches the service's map");
+    assert(_env_is(sd, "_KYB_2", "two words") == 1, "env: a leading underscore and a space in the value");
+    # Each of these would reach the child as something other than what was written.
+    assert(_svc_one(_doc2("{\"services\":[{\"name\":\"e\",\"binary\":\"/bin/e\",",
+          "\"environment\":{\"1KYB\":\"x\"}}]}")) == 0, "env: a name starting with a digit is refused");
+    assert(_svc_one(_doc2("{\"services\":[{\"name\":\"e\",\"binary\":\"/bin/e\",",
+          "\"environment\":{\"A=B\":\"x\"}}]}")) == 0, "env: a name holding '=' is refused");
+    assert(_svc_one(_doc2("{\"services\":[{\"name\":\"e\",\"binary\":\"/bin/e\",",
+          "\"environment\":{\"\":\"x\"}}]}")) == 0, "env: an empty name is refused");
+    assert(_svc_one(_doc2("{\"services\":[{\"name\":\"e\",\"binary\":\"/bin/e\",",
+          "\"environment\":{\"KYB_N\":5}}]}")) == 0, "env: a non-string value is refused");
+    assert(_svc_one(_doc2("{\"services\":[{\"name\":\"e\",\"binary\":\"/bin/e\",",
+          "\"environment\":[\"KYB=1\"]}]}")) == 0, "env: an array instead of an object is refused");
+    return 0;
+}
+
+fn test_svc_config_env_files() {
+    println("--- service env_files (1.7.5) ---");
+    _write_file("/tmp/kyb-envf-a.env", "# a comment\nKYB_F=\"file value\"\nKYB_O=from file a\n", 420);
+    _write_file("/tmp/kyb-envf-b.env", "KYB_O=from file b\n", 420);
+    _write_file("/tmp/kyb-envf-empty.env", "", 420);
+    _write_file("/tmp/kyb-envf-bad.env", "BAD NAME=x\n", 420);
+
+    var sd = _svc_one(_doc3("{\"services\":[{\"name\":\"f\",\"binary\":\"/bin/f\",",
+        "\"environment\":{\"KYB_O\":\"from config\",\"KYB_C\":\"config\"},",
+        "\"env_files\":[\"/tmp/kyb-envf-a.env\",\"/tmp/kyb-envf-b.env\"]}]}"));
+    assert(sd != 0, "envf: two files and an environment block parse");
+    assert(_env_is(sd, "KYB_F", "file value") == 1, "envf: a file's variable arrives, quotes stripped");
+    assert(_env_is(sd, "KYB_C", "config") == 1, "envf: environment entries the files do not name survive");
+    assert(_env_is(sd, "KYB_O", "from file b") == 1,
+      "envf: a file overrides environment, and a later file an earlier one");
+
+    assert(_svc_one(_doc2("{\"services\":[{\"name\":\"f\",\"binary\":\"/bin/f\",",
+          "\"env_files\":[\"/tmp/kyb-envf-empty.env\"]}]}")) != 0, "envf: an empty file is an empty environment");
+    assert(_svc_one(_doc2("{\"services\":[{\"name\":\"f\",\"binary\":\"/bin/f\",",
+          "\"env_files\":[\"/tmp/kyb-envf-missing.env\"]}]}")) == 0, "envf: a missing file refuses the service");
+    assert(_svc_one(_doc2("{\"services\":[{\"name\":\"f\",\"binary\":\"/bin/f\",",
+          "\"env_files\":[\"kyb-envf-a.env\"]}]}")) == 0, "envf: a relative path is refused");
+    assert(_svc_one(_doc2("{\"services\":[{\"name\":\"f\",\"binary\":\"/bin/f\",",
+          "\"env_files\":[\"/tmp/kyb-envf-bad.env\"]}]}")) == 0, "envf: a bad variable name in a file is refused");
+    assert(_svc_one(_doc2("{\"services\":[{\"name\":\"f\",\"binary\":\"/bin/f\",",
+          "\"env_files\":\"/tmp/kyb-envf-a.env\"}]}")) == 0, "envf: a string instead of an array is refused");
+
+    # argonaut's loader caps a file at 8 KiB rather than truncate it.
+    var big = alloc(9001);
+    memset(big, 65, 9000);
+    memcpy(big, "KYB_BIG=", 8);
+    store8(big + 9000, 0);
+    _write_file("/tmp/kyb-envf-big.env", big, 420);
+    assert(_svc_one(_doc2("{\"services\":[{\"name\":\"f\",\"binary\":\"/bin/f\",",
+          "\"env_files\":[\"/tmp/kyb-envf-big.env\"]}]}")) == 0, "envf: a file over 8 KiB is refused");
+
+    sys_unlink("/tmp/kyb-envf-a.env");
+    sys_unlink("/tmp/kyb-envf-b.env");
+    sys_unlink("/tmp/kyb-envf-empty.env");
+    sys_unlink("/tmp/kyb-envf-bad.env");
+    sys_unlink("/tmp/kyb-envf-big.env");
+    return 0;
+}
+
+fn _rc_doc(fields) {
+    return _doc3("{\"services\":[{\"name\":\"r\",\"binary\":\"/bin/r\",\"ready_check\":{",
+      fields, "}}]}");
+}
+
+fn test_svc_config_ready_check() {
+    println("--- service ready_check (1.7.5) ---");
+    var sd = _svc_one(_rc_doc(
+        _cat2("\"type\":\"tcp\",\"target\":\"127.0.0.1\",\"port\":8080,",
+          "\"timeout_ms\":5000,\"retries\":7,\"retry_delay_ms\":250")));
+    assert(sd != 0, "ready: a valid block parses");
+    var rc = svc_def_ready_check(sd);
+    assert(rc != 0, "ready: it reaches the ServiceDefinition");
+    # struct ReadyCheck {check_type, target, port, timeout_ms, retries, retry_delay_ms}.
+    # Read only when present: a regression must fail these, not crash the suite.
+    if (rc != 0) {
+        assert_eq(load64(rc), HC_TCP_CONNECT, "ready: type");
+        assert_eq(load64(rc + 16), 8080, "ready: port");
+        assert_eq(load64(rc + 24), 5000, "ready: timeout_ms");
+        assert_eq(load64(rc + 32), 7, "ready: retries");
+        assert_eq(load64(rc + 40), 250, "ready: retry_delay_ms");
+    }
+    var none = _svc_one(_doc2("{\"services\":[{\"name\":\"r\",\"binary\":\"/bin/r\"", "}]}"));
+    assert(none != 0 && svc_def_ready_check(none) == 0, "ready: absent means no check");
+    assert(_svc_one(_rc_doc("\"type\":\"process-alive\",\"timeout_ms\":100,\"retry_delay_ms\":100")) != 0,
+      "ready: the floors (100 ms, delay = timeout) are accepted");
+    assert(_svc_one(_rc_doc("\"type\":\"tcp\",\"timeout_ms\":60000")) != 0, "ready: the 60 s ceiling is accepted");
+
+    # The check blocks PID 1 for up to timeout_ms, so every bound is a refusal.
+    assert(_svc_one(_rc_doc("\"type\":\"tcp\",\"timeout_ms\":60001")) == 0, "ready: over 60 s is refused");
+    assert(_svc_one(_rc_doc("\"type\":\"tcp\",\"timeout_ms\":99")) == 0, "ready: under 100 ms is refused");
+    assert(_svc_one(_rc_doc("\"type\":\"tcp\",\"retries\":-1")) == 0, "ready: negative retries are refused");
+    assert(_svc_one(_rc_doc("\"type\":\"tcp\",\"retries\":1001")) == 0, "ready: over 1000 retries are refused");
+    assert(_svc_one(_rc_doc("\"type\":\"tcp\",\"retry_delay_ms\":9")) == 0, "ready: a delay under 10 ms is refused");
+    assert(_svc_one(_rc_doc("\"type\":\"tcp\",\"timeout_ms\":1000,\"retry_delay_ms\":1001")) == 0,
+      "ready: a delay longer than the timeout is refused");
+    assert(_svc_one(_rc_doc("\"type\":\"tcp\",\"port\":65536")) == 0, "ready: port over 65535 is refused");
+    assert(_svc_one(_rc_doc("\"type\":\"ping\"")) == 0, "ready: an unknown type is refused");
+    assert(_svc_one(_rc_doc("\"port\":80")) == 0, "ready: no type is refused");
+    assert(_svc_one(_doc2("{\"services\":[{\"name\":\"r\",\"binary\":\"/bin/r\",",
+          "\"ready_check\":5}]}")) == 0, "ready: a number instead of an object is refused");
+    return 0;
+}
+
 fn test_svc_config_limits_rejects() {
     println("--- svc config limits rejection (1.5.5) ---");
 
@@ -3324,6 +3447,9 @@ fn main() {
     test_svc_config_limits();
     test_svc_config_limits_rejects();
     test_svc_config_cpu_max();
+    test_svc_config_environment();
+    test_svc_config_env_files();
+    test_svc_config_ready_check();
     test_svc_config_health_check();
     test_config_services_reach_argonaut();
     test_boot_stage_results();

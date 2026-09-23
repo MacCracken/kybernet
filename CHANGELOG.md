@@ -7,6 +7,115 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.7.5] — 2026-09-23
+
+**Three service keys: `environment`, `env_files` and `ready_check`.** Each sets a
+`ServiceDefinition` field that something downstream actually reads, which is the
+condition 1.6.19 withheld them on. Suite 793 → **831** assertions (788 → **826** on
+aarch64). Harness 108 → **113** properties, aarch64 boot gate 162 → **167**.
+
+### Added — `environment`
+
+```json
+"environment": { "RUST_LOG": "info", "DAIMON_PORT": "8090" }
+```
+
+Merged into the service's own environment map, which argonaut 1.15.0's
+`fork_exec_service` appends to the child's envp after the default `PATH`, so an entry
+may deliberately override `PATH`. Names must match `[A-Za-z_][A-Za-z0-9_]*` and
+values must be strings with no NUL. Anything else **refuses the service**, because a
+name holding `=` would reach the child as a different variable and a NUL would be cut
+short at `execve`.
+
+### Added — `env_files`
+
+```json
+"env_files": ["/etc/daimon/daimon.env"]
+```
+
+`KEY=VALUE` files in argonaut's `load_env_file` format: `#` comments, optional
+quotes, 8 KiB at most per file.
+
+⚠ **kybernet reads these files itself.** argonaut's `env_files` field is read by
+nothing on the spawn path, still, so a key that only set it would have done nothing.
+That is the reason 1.6.19 withheld it, and the roadmap's claim that only "the kybernet
+side" remained was half right. The files are read at config load and merged into
+the same map as `environment`, **after** it. A file overrides an `environment` entry
+of the same name, and a later file overrides an earlier one: systemd's
+`EnvironmentFile=` order.
+
+- **Read once, at boot.** Service definitions already need a reboot to change, and so
+  does an edited env file.
+- **Refused, not skipped:** a missing, unreadable or oversized file, a relative path,
+  a bad variable name or a NUL in a value. A service started without part of its
+  configured environment is one nobody configured. An empty file is an empty
+  environment, not an error. `load_env_file` itself reports an empty file as
+  unreadable, so kybernet checks the size first.
+
+### Added — `ready_check`
+
+```json
+"ready_check": { "type": "tcp", "target": "127.0.0.1", "port": 8090,
+                 "timeout_ms": 10000, "retries": 10, "retry_delay_ms": 500 }
+```
+
+The types `health_check` takes: `http`, `tcp`, `command`, `process-alive`. argonaut
+runs the check right after the fork. If it does not pass, the service is killed and
+reported as failing to start, and its dependents are skipped. For a `type: notify`
+service, argonaut also uses `timeout_ms` as the deadline for READY.
+
+⚠ **The check blocks PID 1**, so its bounds are refusals, not clamps (standing rule
+25). argonaut runs it synchronously inside `init_start_service`: at phase 8, before
+the reactor exists, and inside the reactor on every restart, where nothing else is
+serviced until it returns. It stops once `timeout_ms` has passed, so the stall is
+`timeout_ms` plus at most one `retry_delay_ms`. The bounds:
+
+| field | accepted | default |
+|---|---|---|
+| `timeout_ms` | 100 to 60,000 | 10,000 |
+| `retries` | 0 to 1,000 | 10 |
+| `retry_delay_ms` | 10 to `timeout_ms` | 500 |
+| `port` | 0 to 65,535 | 0 |
+
+A service that needs longer than a minute to come up belongs in `type: notify`,
+which waits for READY without blocking.
+
+### Tests
+
+- **Unit, 38 assertions.** `test_svc_config_environment`, `test_svc_config_env_files`
+  and `test_svc_config_ready_check` check what each key **sets**: the values in the
+  service's map, the file-over-environment order across two files, the quote
+  stripping, every ReadyCheck field, and every refusal including the 8 KiB file.
+- **Both harnesses, 5 properties each, from three new services.** `kyb-env` runs
+  `svc-fixture status`, which now reports every `KYB_*` variable from **inside** the
+  child (standing rule 27). It carries both an `environment` block and an env file,
+  so the gate sees a config value, a file value with its quotes stripped, and the
+  file winning over `environment`. `kyb-ready-ok` and `kyb-ready-fail` run the same
+  sleep: the first has a `process-alive` check and must start, the second a `tcp`
+  check against a port nothing listens on and must be failed. The first is the
+  control, so the second's failure can only be its check. The x86 image now runs
+  `svc-fixture` for `kyb-env`, the same binary the aarch64 gate uses. Service counts:
+  x86 20 → 23 (22 cgroups torn down), aarch64 19 → 22 (21).
+
+### Verification
+
+| check | result |
+|---|---|
+| `cyrius test src/test.cyr` | **831 passed, 0 failed** |
+| `bash scripts/aarch64-exec-gate.sh` | **826** assertions, 0 failed; 5/5 syscall probes |
+| `bash qemu/boot-test.sh` (`HARNESS_STRICT=1`, KVM) | **113/113**, 0 failed, 0 skipped; kybernet span 437 ms (budget 1200) |
+| `bash qemu/boot-test-aarch64.sh` (TCG) | **167/167**, 0 failed; kybernet span 1612 ms (budget 4000) |
+| inject into the unit suite: files merged before `environment`; the ready check never attached; the 60 s ceiling removed | each red on the assertion for it (830 / 1 each; the second 825 / 1, since its field reads are guarded) |
+| inject into both harnesses: `env_files` never read, and the ready check never attached | red on both arches, exactly the three properties they break (x86 110 OK / 3 FAIL, aarch64 164 / 3): the file's value and the override are missing, and `kyb-ready-fail` starts |
+| `cyrius lint` / `fmt --check` over `src/`, `cyrius vet` | clean |
+| `bash scripts/verify-lock.sh`, `cyrius deps --verify` | OK; 76 verified, 0 failed; no dependency or lock change |
+| `bash scripts/bench-history.sh` | 56 benchmarks, no regression ≥15% (`strlen(52 chars)` +24% is layout-sensitive and declared ungated) |
+
+Binary: x86_64 710,008 → **715,560** B; aarch64 2,167,872 → **2,169,336** B (both `CYRIUS_DCE=1`).
+The sibling-free reproduction gave a byte-identical lock and binaries.
+
+---
+
 ## [1.7.4] — 2026-09-23
 
 **An edge board no longer opens an unauthenticated emergency shell when a boot stage

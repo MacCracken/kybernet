@@ -310,6 +310,18 @@ cp "$SC_FIX_BIN" "${INITRAMFS_DIR}/usr/bin/kyb-seccomp-fixture"
 chmod +x "${INITRAMFS_DIR}/usr/bin/kyb-seccomp-fixture"
 echo "  staged kyb-seccomp-fixture (seccomp basic probe)"
 
+# qemu/svc-fixture.cyr (1.7.5 in this image): `kyb-env` runs its `status` mode, which
+# reports every KYB_* variable in its environment. The same binary is the aarch64
+# gate's service fixture and the auth images' emergency shell (below).
+SVC_BIN="${PROJECT_DIR}/build/svc-fixture"
+if ! (cd "$PROJECT_DIR" && cyrius build qemu/svc-fixture.cyr "$SVC_BIN" >/dev/null); then
+    echo "  ERROR: could not build qemu/svc-fixture.cyr (compiler output above)"
+    exit 1
+fi
+cp "$SVC_BIN" "${INITRAMFS_DIR}/usr/bin/kyb-svc-fixture"
+chmod +x "${INITRAMFS_DIR}/usr/bin/kyb-svc-fixture"
+echo "  staged kyb-svc-fixture (status / environment probe)"
+
 # The truncate probe's victim: outside the fixture's Landlock rule set, with
 # 16 known bytes. If the sandbox governs TRUNCATE this file is untouched; if
 # it does not, the fixture zeroes it and says so. Staged as its own file so a
@@ -320,6 +332,13 @@ chmod +x "${INITRAMFS_DIR}/usr/bin/kyb-notify-fixture"
 echo "  staged kyb-notify-fixture (sd_notify client)"
 
 mkdir -p "${INITRAMFS_DIR}/etc/kybernet"
+# kyb-env's env_files entry (1.7.5). KYB_OVERRIDDEN is also set by its
+# `environment` block, and the file must win: systemd's EnvironmentFile= order.
+cat > "${INITRAMFS_DIR}/etc/kybernet/kyb-env.env" << 'ENVEOF'
+# kyb-env's environment file
+KYB_FROM_FILE="file value"
+KYB_OVERRIDDEN=from file
+ENVEOF
 cat > "${INITRAMFS_DIR}/etc/kybernet/config.json" << 'CFGEOF'
 {
   "boot_mode": "recovery",
@@ -535,6 +554,35 @@ cat > "${INITRAMFS_DIR}/etc/kybernet/config.json" << 'CFGEOF'
       "binary": "/usr/bin/kyb-seccomp-fixture",
       "type": "oneshot",
       "restart": "never"
+    },
+    {
+      "name": "kyb-env",
+      "description": "reports what environment and env_files delivered (1.7.5)",
+      "binary": "/usr/bin/kyb-svc-fixture",
+      "args": ["status"],
+      "type": "oneshot",
+      "restart": "never",
+      "environment": { "KYB_FROM_CONFIG": "config value", "KYB_OVERRIDDEN": "from config" },
+      "env_files": ["/etc/kybernet/kyb-env.env"]
+    },
+    {
+      "name": "kyb-ready-ok",
+      "description": "a ready_check that passes, the control for kyb-ready-fail (1.7.5)",
+      "binary": "/bin/sleep",
+      "args": ["30"],
+      "type": "simple",
+      "restart": "never",
+      "ready_check": { "type": "process-alive", "timeout_ms": 2000, "retries": 3, "retry_delay_ms": 100 }
+    },
+    {
+      "name": "kyb-ready-fail",
+      "description": "a ready_check that cannot pass: nothing listens on port 9 (1.7.5)",
+      "binary": "/bin/sleep",
+      "args": ["30"],
+      "type": "simple",
+      "restart": "never",
+      "ready_check": { "type": "tcp", "target": "127.0.0.1", "port": 9,
+                       "timeout_ms": 500, "retries": 2, "retry_delay_ms": 50 }
     }
   ]
 }
@@ -706,11 +754,7 @@ EDGECFG
         # as agnoshi, reports all of them and exits. The same binary is the shell in
         # the aarch64 auth images. A failure here is fatal for the same reason as
         # the credential below: a missing probe would skip the assertions.
-        SVC_BIN="${PROJECT_DIR}/build/svc-fixture"
-        if ! (cd "$PROJECT_DIR" && cyrius build qemu/svc-fixture.cyr "$SVC_BIN" >/dev/null); then
-            echo "  ERROR: could not build qemu/svc-fixture.cyr (compiler output above)"
-            exit 1
-        fi
+        # $SVC_BIN was built with the main tree's fixtures above.
         rm -f "${AUTH_STAGE}/usr/bin/agnoshi"
         cp "$SVC_BIN" "${AUTH_STAGE}/usr/bin/agnoshi"
         chmod 755 "${AUTH_STAGE}/usr/bin/agnoshi"

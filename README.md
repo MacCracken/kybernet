@@ -175,14 +175,14 @@ boot. With the working lane moved onto the caller's arena it costs +25 KB.
 ## Testing
 
 ```sh
-cyrius test src/test.cyr            # 793 assertions (788 on aarch64)
+cyrius test src/test.cyr            # 831 assertions (826 on aarch64)
 bash scripts/bench-history.sh       # 56 benchmarks, load-tolerant regression gate
 bash qemu/boot-test.sh              # PID-1 boot harness, x86_64 (needs KVM)
 bash qemu/boot-test-aarch64.sh      # PID-1 boot harness, aarch64 (TCG, no KVM)
 ```
 
 The QEMU harness is the gate that matters: it boots kybernet as real PID 1 and
-asserts 108 properties across five passes — the boot sequence, the reactor
+asserts 113 properties across five passes — the boot sequence, the reactor
 (that it sleeps rather than spins), dm-verity verification against a real
 image pair on virtio disks, and the emergency-auth prompt with a password fed
 over the serial line. Pass 4 runs against **both** credential formats: the
@@ -193,11 +193,11 @@ file leaves no credential, and the config key is never its fallback. After a
 correct password, the shell kybernet execs is a probe that reports its own
 descriptors, signal mask and environment, and the gate checks each one.
 
-The aarch64 harness asserts 162 properties and exists because **a cross-build
+The aarch64 harness asserts 167 properties and exists because **a cross-build
 exiting 0 is not evidence**. It boots `kybernet-aarch64` as PID 1 under TCG —
 an x86 host cannot accelerate aarch64 — against a pinned, sha256-checked kernel.
 Besides the boot sequence, cgroup controllers, a real reactor iteration and a
-clean power down, it runs 19 services built only from this repo's Cyrius fixtures,
+clean power down, it runs 22 services built only from this repo's Cyrius fixtures,
 and asserts on aarch64 what the x86 harness asserts about services: cgroup
 placement and limits, dropped and kept capabilities, the uid drop, seccomp
 `basic` with its control arm, Landlock, prerequisite blocking, restart backoff,

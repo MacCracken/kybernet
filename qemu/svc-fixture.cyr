@@ -46,6 +46,9 @@
 # depends on it copies the file to the console: the x86 kyb-nonroot /
 # kyb-nonroot-read pair, from one binary.
 #
+# Since 1.7.5 a report also carries `ENV-<name>=<value>` for PATH and for every KYB_*
+# variable, which is how the gate sees what `environment` and `env_files` delivered.
+#
 # ⚠ A FIXTURE THAT CANNOT REPORT EXITS NON-ZERO (standing rule 48). The last line of
 # a report is `ST[<leaf>]-DONE=1`, so a report that stopped half way is visible too.
 
@@ -298,6 +301,7 @@ fn do_status() {
     report_knob("pids.max");
     report_knob("cpu.weight");
     report_knob("cpu.max");
+    report_env();
     emit_kv("DONE", "1");
     sys_close(_sink);
     return 0;
@@ -334,7 +338,10 @@ fn report_fd(n, key) {
     return emit_kv(key, &_VAL);
 }
 
+# The shell's five, and any KYB_* variable a service fixture was configured with
+# through `environment` or `env_files` (1.7.5).
 fn is_env_wanted(k) {
+    if (memeq(k, "KYB_", 4) == 1) { return 1; }
     if (streq(k, "PATH") == 1) { return 1; }
     if (streq(k, "TERM") == 1) { return 1; }
     if (streq(k, "HOME") == 1) { return 1; }

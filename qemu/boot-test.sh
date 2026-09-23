@@ -24,7 +24,7 @@
 #   "started: kyb-live"              — a LIVE service, so a cgroup is really
 #                                      created and the pid moved into it
 #                                      (a completed oneshot correctly gets none)
-#   "removed service cgroups: 19"    — the shutdown sweep killed and rmdir'd them
+#   "removed service cgroups: 22"    — the shutdown sweep killed and rmdir'd them
 #
 #     ⚠ NINE of NINE. This said EIGHT from 1.5.3 to 1.6.1, with a comment
 #     arguing the shortfall was correct: kyb-orphan backgrounds a child, this
@@ -364,12 +364,12 @@ for marker in \
     "kybernet: services started" \
     "kybernet: harness done" \
     "kybernet: shutdown" \
-    "kybernet: config: services parsed: 20" \
+    "kybernet: config: services parsed: 23" \
     "kybernet:   completed (oneshot): kyb-dep" \
     "kybernet:   completed (oneshot): kyb-svc" \
     "kybernet: boot: skipped (not applicable): Start udev device manager" \
     "kybernet:   started: kyb-live" \
-    "kybernet: removed service cgroups: 19"; do
+    "kybernet: removed service cgroups: 22"; do
     if echo "$RUNTIME_OUT" | grep -aqF "$marker"; then
         echo "  OK: $marker"
     else
@@ -380,6 +380,38 @@ done
 
 if grep -aqE "Attempted to kill init|Kernel panic" "$LOG"; then
     echo "  FAIL: kernel panicked — kybernet returned from main while PID 1"
+    fail=1
+fi
+
+# --- environment, env_files and ready_check (1.7.5) --------------------------
+# kyb-env's report is written from INSIDE the child by svc-fixture, so it shows
+# what the service actually received (standing rule 27). KYB_OVERRIDDEN is set by
+# both its `environment` block and its env file, and the file must win.
+for want in \
+    'ST[kyb-env]-ENV-KYB_FROM_CONFIG=config value' \
+    'ST[kyb-env]-ENV-KYB_FROM_FILE=file value' \
+    'ST[kyb-env]-ENV-KYB_OVERRIDDEN=from file'; do
+    if echo "$RUNTIME_OUT" | grep -aqF "$want"; then
+        echo "  OK: $want"
+    else
+        echo "  FAIL: kyb-env did not report $want"
+        echo "$RUNTIME_OUT" | grep -aF 'ST[kyb-env]' | head -6 || true
+        fail=1
+    fi
+done
+# The two ready_check services run the same /bin/sleep; only the check differs, so
+# kyb-ready-ok is the control that kyb-ready-fail's failure is the check's.
+if echo "$RUNTIME_OUT" | grep -aqF "started: kyb-ready-ok"; then
+    echo "  OK: a service whose ready_check passes is started"
+else
+    echo "  FAIL: kyb-ready-ok did not start (its process-alive ready_check should pass)"
+    fail=1
+fi
+if echo "$RUNTIME_OUT" | grep -aqF "FAILED to start: kyb-ready-fail"; then
+    echo "  OK: a service whose ready_check cannot pass is reported as failing to start"
+else
+    echo "  FAIL: kyb-ready-fail was not failed by its ready_check"
+    echo "$RUNTIME_OUT" | grep -aF 'kyb-ready' | head -4 || true
     fail=1
 fi
 
