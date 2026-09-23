@@ -1,18 +1,22 @@
 # kybernet/read_whole.cyr — read a whole file into a buffer the caller keeps, up to a
 # ceiling. (1.7.8)
 #
-# WHY NOT THE STDLIB'S file_read_whole
-# ------------------------------------
-# cyrius 6.6.6 added `file_read_whole`, which grows its buffer until the file ends. Two
-# measured properties rule it out in PID 1:
+# A STOPGAP FOR THE STDLIB'S file_read_whole
+# ------------------------------------------
+# The stdlib's `file_read_whole` (cyrius 6.6.6) grows its buffer until the file ends.
+# Two measured properties keep it out of PID 1 as it stands, and both are filed with
+# cyrius, in docs/development/issues/ of the cyrius repo:
+#   2026-09-23-kybernet-file-read-whole-no-ceiling-unchecked-growth-alloc.md
+# When cyrius fixes them, both call sites move onto `file_read_whole` and this module goes.
 #
 # - It allocates a new buffer on every call, 65,544 bytes even for a 2-byte file, and
 #   PID 1's arena is never reset (standing rule 8). On the SIGHUP path that is a 64 KiB
 #   leak per reload, four times the one 1.6.14 HIGH-5 removed.
-# - It has no ceiling. Pointed at /dev/zero under a 2 GB address-space limit, it
-#   doubled its buffer to 512 MiB, could not map the next 1 GiB, and alloc() returned
-#   0. The growth copy then wrote through NULL: SIGSEGV. In PID 1 that is a kernel
-#   panic. A fixed buffer refused the same file with a readable error.
+# - It has no ceiling, and its growth alloc() is unchecked. Pointed at /dev/zero under
+#   a 2 GB address-space limit, it doubled its buffer to 512 MiB, could not map the next
+#   1 GiB, and alloc() returned 0. The growth copy then wrote through NULL: SIGSEGV. In
+#   PID 1 that is a kernel panic. A fixed buffer refused the same file with a readable
+#   error.
 #
 # So each caller keeps ONE buffer for the life of the process, in a two-slot global
 # { ptr, cap }. It starts at `first_cap` bytes and doubles when a file fills it, never

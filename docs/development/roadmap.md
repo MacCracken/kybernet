@@ -4,7 +4,7 @@
 release actually did. This file carries only what is **not** done; a completed item is
 deleted from here and summarised in History below, never left ticked.
 
-**Open: 13.** The 1.5.9 sweep opened **38** items (counted at the `1.6.0` tag); the
+**Open: 14.** The 1.5.9 sweep opened **38** items (counted at the `1.6.0` tag); the
 2026-08-26 P(-1) audit is fully closed (its last item, MEDIUM-10, closed when 1.6.20
 consumed libro 2.10.0 / argonaut 1.15.0). Every number is `grep -c '^- \[ \]'` against this file at
 the relevant tag, not an estimate.
@@ -192,13 +192,18 @@ Moved into the v1.6.1 gate line. Recording why here so the claim is not re-made:
       poll — `2026-08-24-sys-ioctl-wrapper-missing.md`, behind `src/lib/termios.cyr` and
       `_read_line_fd`'s `sleep_ms` poll loop. And `fl_alloc`'s unchecked `_fl_mmap`
       return in two places (`freelist.cyr:404-406`, `:231-241`), which is why sigil's
-      own `if (mem == 0)` guards are dead code. And `file_read_whole` (io.cyr) copies into
-      its growth `alloc()` unchecked, so at exhaustion it writes through NULL (traced at
-      1.7.8, standing rule 53).
+      own `if (mem == 0)` guards are dead code.
       (The socket-wrapper filing is **closed and the follow-through has SHIPPED** —
       `sys_socket`/`sys_bind`/`sys_recvfrom` landed upstream and `notify.cyr`'s
       hand-rolled per-arch `enum SockSysNr` was deleted at **v1.6.3**, not v1.6.2 as
       this line used to predict. `notify.cyr:8` records the retirement.)
+- [ ] **Adopt `file_read_whole` once cyrius fixes it.** Filed 2026-09-23 as cyrius
+      `docs/development/issues/2026-09-23-kybernet-file-read-whole-no-ceiling-unchecked-growth-alloc.md`:
+      it has no size ceiling, its growth `alloc()` is unchecked (`/dev/zero` ends in a
+      write through NULL, traced), and it allocates a new 64 KiB buffer on every call. 1.7.8
+      retired the 16 KiB config cap with kybernet's own `read_whole_into` as the stopgap.
+      When the fix lands, config.json and the mount table move onto `file_read_whole`, and
+      `src/lib/read_whole.cyr` goes.
 - [ ] **Control socket for agnoshi runtime commands** — a separate transport surface,
       pinned until an agnoshi consumer drives the protocol shape.
 - [ ] **Binary signing on release** — pinned until libro signing/timestamping is
@@ -211,10 +216,11 @@ Moved into the v1.6.1 gate line. Recording why here so the claim is not re-made:
 One line per release. Detail lives in [CHANGELOG.md](../../CHANGELOG.md).
 
 - **v1.7.8** — config.json may be up to 256 KiB; over 16 KiB it was refused. The roadmap
-  named the stdlib's `file_read_whole` for this, and measuring it ruled it out for PID 1:
-  65,544 bytes allocated per call in an arena that is never reset, and on `/dev/zero` a
-  doubling that ends in a write through NULL. `read_whole_into` keeps one buffer per call
-  site and grows it to a ceiling, and a larger file is still refused. The mount-table read
+  named the stdlib's `file_read_whole` for this, and measuring it found two defects that
+  matter in PID 1, now filed with cyrius: 65,544 bytes allocated per call in an arena
+  that is never reset, and on `/dev/zero` a doubling that ends in a write through NULL.
+  Until they are fixed, `read_whole_into` keeps one buffer per call site and grows it to
+  a ceiling, and a larger file is still refused. The mount-table read
   moves onto it too, 8 KiB → 1 MiB, where a longer table had been cut short without a
   word. Both harness configs are now over 16 KiB, and both gates go red with the old limit
   put back.

@@ -7,11 +7,12 @@
 ## Version
 
 **1.7.8**: config.json may be up to 256 KiB; over 16 KiB it was refused. The roadmap
-named the stdlib's `file_read_whole` for this, and measuring it ruled it out for PID 1
-(standing rule 53): it allocates 65,544 bytes per call in an arena that is never reset,
-and on `/dev/zero` it doubles until `alloc()` fails and then writes through NULL. The new
-`src/lib/read_whole.cyr` keeps one buffer per call site and grows it to a ceiling; a
-larger file is still refused. The mount-table read moved onto it as well (8 KiB → 1 MiB),
+named the stdlib's `file_read_whole` for this, and measuring it found two defects that
+matter in PID 1: it allocates 65,544 bytes per call in an arena that is never reset, and
+on `/dev/zero` it doubles until `alloc()` fails and then writes through NULL. Both are
+filed with cyrius (`2026-09-23-kybernet-file-read-whole-no-ceiling-unchecked-growth-alloc.md`).
+Until they are fixed, `src/lib/read_whole.cyr` keeps one buffer per call site and grows
+it to a ceiling; a larger file is still refused. The mount-table read moved onto it as well (8 KiB → 1 MiB),
 since a longer table had been cut short without a word. Suite 876 / 871. Harness 121,
 aarch64 boot gate 175: both harness configs are now over 16 KiB (22,200 and 18,290
 bytes), and both gates go red with the old limit put back.
@@ -242,7 +243,7 @@ The 1.7.8 CHANGELOG entry has the numbers.
 
 ## Next
 
-In the order I would take them. The full list is [roadmap.md](roadmap.md), with 13 open
+In the order I would take them. The full list is [roadmap.md](roadmap.md), with 14 open
 items.
 
 1. **Every config load, SIGHUP included, costs ~4 bytes of arena per config byte**

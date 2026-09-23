@@ -10,9 +10,10 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [1.7.8] — 2026-09-23
 
 **config.json may be up to 256 KiB. Over 16 KiB it was refused.** The roadmap named
-the stdlib's `file_read_whole` for this. Measured, it is unsafe in PID 1, so kybernet
-reads through a bounded reader of its own, `src/lib/read_whole.cyr`. The mount-table
-read moves onto the same reader, 8 KiB → 1 MiB. Suite 855 → **876** assertions
+the stdlib's `file_read_whole` for this. Measured, it has two defects that matter in
+PID 1, now filed with cyrius. Until cyrius fixes them, kybernet reads through a bounded
+reader of its own, `src/lib/read_whole.cyr`. The mount-table read moves onto the same
+reader, 8 KiB → 1 MiB. Suite 855 → **876** assertions
 (850 → **871** on aarch64); harness 120 → **121**, aarch64 boot gate 174 → **175**.
 
 ### Changed — the config limit is 256 KiB
@@ -38,7 +39,7 @@ take the defaults path, as if there were no file. It now reads as `-ENOMEM`, whi
 classifies as UNREADABLE: boot takes the defaults loudly, as for any unusable file,
 and a SIGHUP keeps the running config rather than applying default timeouts to it.
 
-### Why not `file_read_whole` (standing rule 53)
+### Why not `file_read_whole` yet — filed with cyrius
 
 - **It allocates a new buffer on every call**: 65,544 bytes, measured, even for a
   2-byte file. The arena is never reset, so on the SIGHUP path that is a 64 KiB leak
@@ -49,6 +50,12 @@ and a SIGHUP keeps the running config rather than applying default timeouts to i
   `qemu-x86_64 -strace`. In PID 1 that is a kernel panic, from a config.json that is a
   symlink to `/dev/zero` or any runaway file. The old fixed buffer refused the same file
   with a readable error.
+
+Both are filed with cyrius as
+`docs/development/issues/2026-09-23-kybernet-file-read-whole-no-ceiling-unchecked-growth-alloc.md`,
+with the reproduction, the trace, and a proposed fix: check both allocations, and give
+callers a ceiling. When that lands, both call sites move onto `file_read_whole` and
+`read_whole.cyr` goes (roadmap).
 
 `read_whole_into` keeps one buffer per call site, as a two-slot global `{ ptr, cap }`.
 It opens before it allocates, so a missing file costs nothing, and it checks every
@@ -109,8 +116,7 @@ in a release that adds string literals.
 
 - Every config load costs the value tree, on SIGHUP too (roadmap v1.6.x, with the
   fix: parse into an arena of its own).
-- `file_read_whole`'s unchecked growth `alloc()` is added to the upstream stdlib
-  filings on the roadmap.
+- `file_read_whole`: filed with cyrius (above). Adopting it once fixed is on the roadmap.
 
 ### Verification
 
