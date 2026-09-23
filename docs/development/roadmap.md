@@ -1,10 +1,10 @@
 # Kybernet Roadmap
 
-**Current: v1.7.3** — [CHANGELOG.md](../../CHANGELOG.md) is the record of what each
+**Current: v1.7.4** — [CHANGELOG.md](../../CHANGELOG.md) is the record of what each
 release actually did. This file carries only what is **not** done; a completed item is
 deleted from here and summarised in History below, never left ticked.
 
-**Open: 14.** The 1.5.9 sweep opened **38** items (counted at the `1.6.0` tag); the
+**Open: 13.** The 1.5.9 sweep opened **38** items (counted at the `1.6.0` tag); the
 2026-08-26 P(-1) audit is fully closed (its last item, MEDIUM-10, closed when 1.6.20
 consumed libro 2.10.0 / argonaut 1.15.0). Every number is `grep -c '^- \[ \]'` against this file at
 the relevant tag, not an estimate.
@@ -41,9 +41,9 @@ something outside this repo.
 `cyrius lint` reports **0 untracked deferrals and 0 warnings** across the tree, and as
 of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into fiction.
 
-**Gate counts at v1.7.3** (a next agent must not let these shrink; each is enforced):
-**787** test assertions on x86_64 and **782** on aarch64 · **104** harness properties ·
-**158** aarch64 boot-gate properties · 56 benchmarks (two reported-not-gated, declared) ·
+**Gate counts at v1.7.4** (a next agent must not let these shrink; each is enforced):
+**793** test assertions on x86_64 and **788** on aarch64 · **108** harness properties ·
+**162** aarch64 boot-gate properties · 56 benchmarks (two reported-not-gated, declared) ·
 the aarch64 execution gate · the committed-lock gate.
 ⚠ **The two assertion counts differ on purpose and neither floor gates the other** — a
 seccomp allowlist is arch-specific, so six assertions are x86-only and one aarch64-only.
@@ -54,27 +54,6 @@ what it says. See [state.md](state.md) for the full current-state handoff.
 ---
 
 ## v1.7.x — found by the cyrius 6.6.6 bump and the aarch64 passes
-
-- [ ] **⚠ An edge board opens an UNAUTHENTICATED emergency shell when a required boot
-      stage fails.** Found at 1.7.3, and the next thing to fix. 1.5.7 made the phase-6c
-      edge **refusal** require authentication (and suppress the shell with no
-      credential), and scoped its fix to exactly that. `drop_to_emergency()` has two more
-      callers in `src/main.cyr`: a required boot stage failing at phase 7, and every
-      service failing in the service wave. Both follow `emergency_require_auth` as
-      configured, which defaults to false. Every edge boot in both harnesses that gets
-      past phase 6c (the intact image, and both escape hatches) takes the phase-7 path,
-      because argonaut's edge sequence has a required `Start daimon (agent-runtime) in
-      edge mode on port 8090` stage and the fixtures have no daimon.
-      On the intact, VERIFIED image the log reads `FATAL: required boot stage failed`,
-      `=== ENTERING EMERGENCY MODE ===`, `emergency shell started`, with no
-      authentication step. No shell opened only because none could run: busybox refuses
-      the `agnoshi` name, and the aarch64 edge images carry no shell. On a board,
-      `/usr/bin/agnoshi` is the shell. **Fix:** on an edge board `drop_to_emergency()`
-      requires authentication whatever the config says, and with no usable credential it
-      suppresses the shell and returns (1.6.15's existing path), so phase 7 continues the
-      boot as it deliberately does. Put the decision in `emergency_auth.cyr` so the unit
-      suite tests it (rule 34), and make both harnesses' intact-image edge boots assert
-      that no shell opened.
 
 - [ ] **Upstream (cyrius, filed by the user, not from here): the hashmap seed blocks PID 1
       at phase 6 on a board with no entropy.** `lib/hashseed.cyr` draws the per-process
@@ -270,6 +249,13 @@ Moved into the v1.6.1 gate line. Recording why here so the claim is not re-made:
 
 One line per release. Detail lives in [CHANGELOG.md](../../CHANGELOG.md).
 
+- **v1.7.4** — An edge board no longer opens an unauthenticated emergency shell when a
+  required boot stage fails. 1.5.7 had required authentication only for the phase-6c
+  refusal; phase 7 and the service wave followed `emergency_require_auth`, default false.
+  `drop_to_emergency()` now requires it on every edge-board path, deciding through
+  `emerg_shell_needs_auth()`, which the unit suite covers, and with no credential it
+  suppresses the shell. Both harnesses assert it on the intact-image edge boot, which
+  reaches that path through the fixture's missing daimon.
 - **v1.7.3** — The aarch64 edge, emergency-auth and quiet passes: the aarch64 gate now runs
   all five passes, 66 → 158 properties. There is no aarch64 veritysetup to stage, so
   `qemu/verity-fixture.cyr` stands in for `veritysetup verify`, and it must match the

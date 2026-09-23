@@ -679,7 +679,18 @@ fn drop_to_emergency() {
     # without this the gate could never engage no matter what config.json
     # said. Rust read the same two fields off EmergencyShellConfig.
     # 1.5.4 — closes the last rust-old port gap.
-    store64(esc + 24, g_emerg_require_auth);
+    #
+    # ⚠ On an EDGE board authentication is required whatever the config says,
+    # for every caller, not only the phase-6c refusal (1.7.4; see
+    # emerg_shell_needs_auth). g_config is set before any caller can run, and
+    # the guard keeps a future early caller from dereferencing 0 in PID 1.
+    var is_edge = 0;
+    if (g_config != 0 && config_boot_mode(g_config) == BOOT_EDGE) { is_edge = 1; }
+    var need_auth = emerg_shell_needs_auth(g_emerg_require_auth, is_edge);
+    if (need_auth == 1 && g_emerg_require_auth == 0) {
+        klog("emergency shell: edge board - authentication required regardless of config");
+    }
+    store64(esc + 24, need_auth);
     store64(esc + 32, g_emerg_hash);
 
     # A REAL console, not fd 0. fd 0 is /dev/null by design (see
@@ -688,7 +699,7 @@ fn drop_to_emergency() {
     # why an edge board with a hash configured reboot-looped. 1.5.8.
     var con = console_open_rw();
 
-    if (g_emerg_require_auth == 1) {
+    if (need_auth == 1) {
         klog("emergency shell: authentication required");
         # ⚠ REQUIRE_AUTH WITH NO USABLE CREDENTIAL IS A DEAD BOARD. 1.6.15
         # MEDIUM-7.

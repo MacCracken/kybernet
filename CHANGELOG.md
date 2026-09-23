@@ -7,6 +7,69 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.7.4] — 2026-09-23
+
+**An edge board no longer opens an unauthenticated emergency shell when a boot stage
+fails.** Found by 1.7.3's harness work and fixed here. Suite 787 → **793** assertions
+(782 → **788** on aarch64). Harness 104 → **108** properties, aarch64 boot gate
+158 → **162**.
+
+### Fixed — the phase-7 and service-wave paths skipped authentication on edge boards
+
+1.5.7 required authentication for the phase-6c edge **refusal**, by setting the flag at
+that one call site, and suppressed the shell there when no credential existed.
+`drop_to_emergency()` has two other callers: a **required boot stage failing at phase
+7**, and **every service failing** in the service wave. Both followed
+`emergency_require_auth` as configured, which defaults to false. So on an edge board a
+failed required stage opened a root shell on the console with no password. On a device
+whose purpose is verified boot, that is 1.5.7's own defect by another route: anyone
+who can make a required stage fail gets root, and a daimon that cannot start is enough.
+
+The rule now lives in `drop_to_emergency()`, which every caller passes through: **on
+an edge board (`boot_mode: edge`) authentication is required whatever the config says.**
+With no usable credential, the existing 1.6.15 arm suppresses the shell and returns.
+Phase 7 then continues the boot, which is its deliberate availability choice, and the
+phase-6c refusal still powers off as before. The decision is
+`emerg_shell_needs_auth()` in `emergency_auth.cyr`, where the unit suite can reach it
+(standing rule 34). The boot log says when the edge rule applied:
+`emergency shell: edge board - authentication required regardless of config`.
+
+⚠ **Behaviour change, deliberate.** An edge board with no emergency credential that
+fails a required boot stage no longer gets a shell at all. It logs the suppression and
+continues. To have a recovery shell on an edge board, provision a credential
+(`/etc/kybernet/emergency.cred`, see `scripts/mkcred.sh`). Boards not in edge mode are
+unaffected.
+
+### Tests
+
+- `test_emerg_shell_needs_auth` (6 assertions). The edge input is built from a real
+  config's boot mode, the way `drop_to_emergency()` builds it (standing rule 46), and
+  the defect's case is the edge board with the key unset.
+- Both harnesses' intact-image edge boots, 4 properties each. Every one of those boots
+  fails the edge sequence's required daimon stage, because the fixture has no daimon, so
+  it reaches phase 7's emergency path with no credential configured. The gate first
+  asserts the path was entered, so a boot that never got there cannot pass. Then it
+  asserts that the edge rule applied, that the shell was suppressed, and that no shell
+  started.
+
+### Verification
+
+| check | result |
+|---|---|
+| `cyrius test src/test.cyr` | **793 passed, 0 failed** |
+| `bash scripts/aarch64-exec-gate.sh` | **788** assertions, 0 failed; 5/5 syscall probes |
+| `bash qemu/boot-test.sh` (`HARNESS_STRICT=1`, KVM) | **108/108**, 0 failed, 0 skipped |
+| `bash qemu/boot-test-aarch64.sh` (TCG) | **162/162**, 0 failed |
+| inject: the 1.7.3 policy (no edge clause), unit suite | red, 792 passed / 1 failed: the edge board with the key unset |
+| the same, both harnesses | red on both arches, the three outcome assertions each (x86 105 OK / 3 FAIL, aarch64 159 / 3). The log shows `emergency shell started` with no authentication, the defect reproduced |
+| `bash scripts/verify-lock.sh`, `cyrius deps --verify` | OK; 76 verified, 0 failed; no dependency or lock change |
+| `bash scripts/bench-history.sh` | 56 benchmarks, no regression ≥15% |
+
+Binary: x86_64 709,928 → **710,008** B; aarch64 2,167,800 → **2,167,872** B (both `CYRIUS_DCE=1`).
+The sibling-free reproduction gave a byte-identical lock and binaries.
+
+---
+
 ## [1.7.3] — 2026-09-22
 
 **The aarch64 edge, emergency-auth and quiet passes.** These were the last three

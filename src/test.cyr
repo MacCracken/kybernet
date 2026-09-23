@@ -2633,6 +2633,28 @@ fn _cfg_hash_from_json(rec) {
     return _cfg_str(json_v_parse_buf(doc, strlen(doc)), "emergency_password_hash", 0);
 }
 
+# 1.7.4: an edge board never opens an unauthenticated emergency shell, whichever
+# caller drops to it. The edge input is built the way drop_to_emergency builds it,
+# from a real config's boot mode (standing rule 46), not written as a bare 1.
+fn test_emerg_shell_needs_auth() {
+    println("--- emergency shell auth policy (1.7.4) ---");
+    var edge_cfg = config_set_boot_mode(argonaut_config_default(), BOOT_EDGE);
+    var rec_cfg = config_set_boot_mode(argonaut_config_default(), BOOT_RECOVERY);
+    var edge = 0;
+    if (config_boot_mode(edge_cfg) == BOOT_EDGE) { edge = 1; }
+    var not_edge = 0;
+    if (config_boot_mode(rec_cfg) == BOOT_EDGE) { not_edge = 1; }
+    assert(edge == 1, "shell auth: an edge config reads as an edge board");
+    assert(not_edge == 0, "shell auth: a recovery config does not");
+    # The defect: an edge board with emergency_require_auth absent (0).
+    assert(emerg_shell_needs_auth(0, edge) == 1, "shell auth: edge board requires auth with the key unset");
+    assert(emerg_shell_needs_auth(1, edge) == 1, "shell auth: edge board with the key set");
+    # Off the edge, the operator's key still decides, both ways.
+    assert(emerg_shell_needs_auth(1, not_edge) == 1, "shell auth: the key still applies off the edge");
+    assert(emerg_shell_needs_auth(0, not_edge) == 0, "shell auth: no key, no edge, no prompt (unchanged)");
+    return 0;
+}
+
 fn test_emerg_cred_resolve() {
     println("--- emergency credential source (1.7.1) ---");
     var rec = _cat2("v1$2$19456$1$6b796265726e65742d746573742d3031$",
@@ -3341,6 +3363,7 @@ fn main() {
     test_edge_validators();
     test_emerg_cred_file();
     test_emerg_cred_resolve();
+    test_emerg_shell_needs_auth();
     test_cfg_read_class();
     test_edge_compare_pcrs_cstr();
     test_edge_boot_gating();

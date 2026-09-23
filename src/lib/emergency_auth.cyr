@@ -685,3 +685,23 @@ fn emerg_resolve_cred_at(path, cfg_cred) {
 }
 
 fn emerg_resolve_cred(cfg_cred) { return emerg_resolve_cred_at(emerg_cred_path_default(), cfg_cred); }
+
+# ⚠ AN EDGE BOARD NEVER OPENS AN UNAUTHENTICATED EMERGENCY SHELL. 1.7.4.
+#
+# 1.5.7 required authentication for the phase-6c edge REFUSAL only, by setting
+# the flag at that one call site. drop_to_emergency() has two other callers: a
+# required boot stage failing at phase 7, and every service failing in the
+# service wave. Both followed `emergency_require_auth` as configured, which
+# defaults to false, so on an edge board a stage failure opened a root shell on
+# the console with no password. The harness's edge boots took that path on
+# every intact image (argonaut's edge sequence requires a daimon stage the
+# fixtures do not have), and no shell opened only because none could run.
+#
+# The rule is decided here, where the unit suite can reach it (standing rule
+# 34), and drop_to_emergency applies it to every caller. With no usable
+# credential, drop_to_emergency's existing 1.6.15 arm suppresses the shell.
+fn emerg_shell_needs_auth(require_auth_cfg, is_edge_board) {
+    if (require_auth_cfg == 1) { return 1; }
+    if (is_edge_board == 1) { return 1; }
+    return 0;
+}

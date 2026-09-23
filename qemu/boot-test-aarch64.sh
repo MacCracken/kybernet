@@ -967,6 +967,17 @@ else
     _prop_absent "[intact] a verified board is not refused" 'refusing to continue boot' "$OUT3_GOOD"
     _prop "[intact] the verified board booted on and powered down under its own control" \
         'reboot: Power down' "$OUT3_GOOD"
+    # 1.7.4: a failed boot stage on an edge board must not open an unauthenticated
+    # shell. No credential is configured, and the edge sequence's required daimon
+    # stage fails here, so phase 7 takes the emergency path on every intact boot.
+    # Entering it is asserted first, so a boot that never got there cannot pass.
+    _prop "[intact] the failed daimon stage reached the emergency path" \
+        '=== ENTERING EMERGENCY MODE ===' "$OUT3_GOOD" 'daimon|boot stage|EMERGENCY'
+    _prop "[intact] the edge board required authentication with emergency_require_auth unset" \
+        'edge board - authentication required regardless of config' "$OUT3_GOOD" 'emergency shell'
+    _prop "[intact] with no credential, the shell was suppressed" \
+        'NO credential configured - shell suppressed' "$OUT3_GOOD" 'emergency shell'
+    _prop_absent "[intact] no unauthenticated shell was started" 'emergency shell started' "$OUT3_GOOD"
 
     # 2. The corrupted image is refused. The verifier's own line is the positive
     #    evidence that it failed on the corruption, at the byte the gate wrote, and

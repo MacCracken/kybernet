@@ -1363,6 +1363,38 @@ else
         echo "  (remaining edge assertions skipped)"
     else
 
+    # 1b. 1.7.4: a failed boot stage on an edge board must not open an
+    #     unauthenticated shell. This image configures no credential, and
+    #     argonaut's edge sequence requires a daimon stage the fixture lacks, so
+    #     phase 7 drops to the emergency path on every intact boot. Until 1.7.4
+    #     that path skipped authentication; it was invisible only because busybox
+    #     refuses to run as agnoshi. Entering the path is asserted first, so a
+    #     boot that never reached it cannot pass the rest by saying nothing.
+    if echo "$GOOD_OUT" | grep -aqF "=== ENTERING EMERGENCY MODE ==="; then
+        echo "  OK: [intact] the failed daimon stage reached the emergency path"
+    else
+        echo "  FAIL: [intact] phase 7 never reached the emergency path, so the checks below prove nothing"
+        fail=1
+    fi
+    if echo "$GOOD_OUT" | grep -aqF "edge board - authentication required regardless of config"; then
+        echo "  OK: [intact] the edge board required authentication with emergency_require_auth unset"
+    else
+        echo "  FAIL: [intact] the edge board did not require authentication"
+        fail=1
+    fi
+    if echo "$GOOD_OUT" | grep -aqF "NO credential configured - shell suppressed"; then
+        echo "  OK: [intact] with no credential, the shell was suppressed"
+    else
+        echo "  FAIL: [intact] the shell was not suppressed"
+        fail=1
+    fi
+    if echo "$GOOD_OUT" | grep -aqF "emergency shell started"; then
+        echo "  FAIL: [intact] an emergency shell was started with no authentication"
+        fail=1
+    else
+        echo "  OK: [intact] no unauthenticated shell was started"
+    fi
+
     # 2. CORRUPTED image must be REFUSED. This is the assertion that
     #    matters: a verified-boot path that cannot say no is decoration.
     cp "${EDGE_DIR}/data.img" "$CORRUPT_IMG"

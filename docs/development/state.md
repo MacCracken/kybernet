@@ -6,6 +6,13 @@
 
 ## Version
 
+**1.7.4**: an edge board no longer opens an unauthenticated emergency shell when a
+required boot stage fails. 1.5.7 required authentication only at the phase-6c refusal;
+`drop_to_emergency()` now requires it on every path when `boot_mode` is `edge`, through
+`emerg_shell_needs_auth()`, and with no credential it suppresses the shell. Suite
+793 / 788. Harness 108, aarch64 boot gate 162: both intact-image edge boots assert the
+path was entered, the rule applied, and no shell started.
+
 **1.7.3**: the aarch64 edge, emergency-auth and quiet passes. They were the last three
 x86-only passes; the aarch64 boot gate now runs all five, **66 → 158** properties, and
 every new one held on the first run. Suite counts are unchanged (787 / 782), and so are
@@ -122,12 +129,11 @@ and byte-identical, and the warning still fires.
 
 | Arch | Bytes | `e_machine` |
 |---|---|---|
-| x86_64 (`CYRIUS_DCE=1`) | 709,928 | `0x3e` |
-| aarch64 | 2,167,800 | `0xb7` |
+| x86_64 (`CYRIUS_DCE=1`) | 710,008 | `0x3e` |
+| aarch64 (`CYRIUS_DCE=1`) | 2,167,872 | `0xb7` |
 
-Unchanged since 1.7.1, which added the credential-resolver code: 1.7.2 and 1.7.3 change no
-`src/` file, and the release gates rebuilt both byte-identical. The note below is 1.7.0's,
-when the toolchain moved.
+1.7.4's edge-auth rule added 80 B on x86_64 and 72 B on aarch64. The note below is
+1.7.0's, when the toolchain moved.
 
 The toolchain accounts for almost all of the change: the unchanged 1.6.20 source built
 under 6.6.6 is +512 B on x86_64 and **+66,048 B on aarch64**, where the ladder is emitted
@@ -145,16 +151,16 @@ the build; that is standing rule 32.
 
 | Gate | Count | Enforcement |
 |---|---|---|
-| `cyrius test src/test.cyr` | **787** assertions | floor read from CLAUDE.md; a shrinking suite fails |
-| `bash scripts/aarch64-exec-gate.sh` | **782** assertions + 5 syscall probes | executes aarch64 under `qemu-user`; its own declared floor |
-| `bash qemu/boot-test-aarch64.sh` | **158** properties, all 5 passes, 19 services | boots `kybernet-aarch64` as PID 1 (TCG), entropy-starved; needs host `veritysetup` |
-| `bash qemu/boot-test.sh` | **104** properties, 5 passes | `HARNESS_STRICT=1` in CI makes a skip a failure |
+| `cyrius test src/test.cyr` | **793** assertions | floor read from CLAUDE.md; a shrinking suite fails |
+| `bash scripts/aarch64-exec-gate.sh` | **788** assertions + 5 syscall probes | executes aarch64 under `qemu-user`; its own declared floor |
+| `bash qemu/boot-test-aarch64.sh` | **162** properties, all 5 passes, 19 services | boots `kybernet-aarch64` as PID 1 (TCG), entropy-starved; needs host `veritysetup` |
+| `bash qemu/boot-test.sh` | **108** properties, 5 passes | `HARNESS_STRICT=1` in CI makes a skip a failure |
 | `bash scripts/verify-lock.sh` | 2 halves, 5 commit pins | the committed lock (HEAD's, not the working tree's) vs a fresh resolve |
 | `bash scripts/bench-history.sh` | **56** benchmarks (2 reported-not-gated) | ≥15% regression gate; `LAYOUT_SENSITIVE` names the two exempt ones |
 | `cyrius lint` | 0 warnings, **0 untracked deferrals** | HARD GATE, both halves |
 | `cyrius fmt --check` | clean | non-mutating; never `diff <(cyrius fmt …)` |
 
-⚠ **787 and 782 are both correct, and neither floor gates the other.** Six assertions are
+⚠ **793 and 788 are both correct, and neither floor gates the other.** Six assertions are
 x86-only (`BS_OPEN`/`BS_STAT`/`BS_LSTAT`/`BS_PIPE`/`BS_POLL`/`BS_NANOSLEEP`) and one is
 aarch64-only (`BS_PPOLL`). Both floors are declared in CLAUDE.md and must be bumped
 together. **Do not pad the short arch to equalise them.**
@@ -188,25 +194,18 @@ stricter bar on the next sweep.**
 
 ## In flight
 
-**v1.7.3 is ready and untagged.** It changes no dependency, lock or toolchain pin, and
-no `src/` file: it is harness work, a CI package, plus docs. The 1.7.3 CHANGELOG entry has
-the numbers.
+**v1.7.4 is ready and untagged.** It changes no dependency, lock or toolchain pin. The
+1.7.4 CHANGELOG entry has the numbers.
 
 ## Next
 
-In the order I would take them. The full list is [roadmap.md](roadmap.md), with 14 open
+In the order I would take them. The full list is [roadmap.md](roadmap.md), with 13 open
 items.
 
-1. **Edge boards: authenticate the emergency shell on every path, not only phase 6c.**
-   `drop_to_emergency()` should require authentication on an edge board whatever the
-   config says, and suppress the shell when there is no usable credential (1.6.15's
-   existing path). Put the decision in `emergency_auth.cyr` with unit tests, and make both
-   harnesses' intact-image edge boots assert that no shell opened. The fixtures already
-   reach the path: every edge boot past phase 6c fails the daimon stage.
-2. **`ready_check` / `environment` / `env_files` config keys.** These have been unblocked
+1. **`ready_check` / `environment` / `env_files` config keys.** These have been unblocked
    since 1.6.20 consumed argonaut 1.15.0. Check that something downstream reads each field
    before adding its key.
-3. **Port `agnos-init.sh`'s `setup_directories()` to a oneshot.** ⚠ Ship the binary before
+2. **Port `agnos-init.sh`'s `setup_directories()` to a oneshot.** ⚠ Ship the binary before
    adding the dependency, or a working desktop boot becomes a non-booting one.
 
 ## Release order (cross-repo)
