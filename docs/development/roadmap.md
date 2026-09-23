@@ -1,6 +1,6 @@
 # Kybernet Roadmap
 
-**Current: v1.7.1** — [CHANGELOG.md](../../CHANGELOG.md) is the record of what each
+**Current: v1.7.2** — [CHANGELOG.md](../../CHANGELOG.md) is the record of what each
 release actually did. This file carries only what is **not** done; a completed item is
 deleted from here and summarised in History below, never left ticked.
 
@@ -40,9 +40,9 @@ something outside this repo.
 `cyrius lint` reports **0 untracked deferrals and 0 warnings** across the tree, and as
 of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into fiction.
 
-**Gate counts at v1.7.1** (a next agent must not let these shrink; each is enforced):
+**Gate counts at v1.7.2** (a next agent must not let these shrink; each is enforced):
 **787** test assertions on x86_64 and **782** on aarch64 · **84** harness properties ·
-**18** aarch64 boot-gate properties · 56 benchmarks (two reported-not-gated, declared) ·
+**66** aarch64 boot-gate properties · 56 benchmarks (two reported-not-gated, declared) ·
 the aarch64 execution gate · the committed-lock gate.
 ⚠ **The two assertion counts differ on purpose and neither floor gates the other** — a
 seccomp allowlist is arch-specific, so six assertions are x86-only and one aarch64-only.
@@ -54,16 +54,24 @@ what it says. See [state.md](state.md) for the full current-state handoff.
 
 ## v1.7.x — found by the cyrius 6.6.6 bump
 
-- [ ] **An entropy-starved first audit record has never been exercised.** libro 2.10.3's
-      `uuid_v4` draws from `random_bytes`, i.e. `getrandom(…, 0)`, and it is **live** in
-      PID 1: argonaut writes an audit record on every service start/stop/readiness change
-      (checked with `CYRIUS_DCE_VERBOSE=1`). `getrandom(…, 0)` waits for the CRNG, which
-      is why `emergency_auth.cyr` refuses to draw entropy at phase 6c. The x86_64 harness
-      guest has RDRAND (`-cpu host`), and the aarch64 boot runs no services, so neither
-      gate has ever written a first audit record on a machine with no hardware RNG.
-      **This closes for free with aarch64 fixture parity below**: TCG `cortex-a57` on
-      `-M virt` without `virtio-rng` is exactly that machine. Assert the span budget still
-      holds when it does.
+- [ ] **Upstream (cyrius, filed by the user, not from here): the hashmap seed blocks PID 1
+      at phase 6 on a board with no entropy.** `lib/hashseed.cyr` draws the per-process
+      seed with `getrandom(buf, 8, 0)` on the first map operation, which in PID 1 is
+      `argonaut_init_new`. Flags 0 waits for the kernel CRNG, and under TCG with the
+      device-tree seed disabled that was **870 ms** before the reactor exists (standing
+      rule 51). A hash seed is the documented use of `GRND_INSECURE`, with the existing
+      time-mix fallback kept for the pre-5.6 EINVAL. The kernel bounds the wait on 5.4+,
+      so this is a boot delay rather than a hang, and the aarch64 gate now asserts both
+      that the boot was starved and that the span budget held.
+- [ ] **aarch64: the edge, emergency-auth and quiet passes are still x86-only.** 1.7.2
+      brought the service fixtures across. What remains needs a different kind of
+      staging: the dm-verity image pair is built by `veritysetup` on the host (the images
+      themselves are architecture-independent data, and `-M virt` takes `if=virtio`
+      drives), the auth passes feed a password over the serial line, and the quiet pass
+      needs a second config. None needs busybox. ⚠ The auth passes are where aarch64
+      would first run Argon2id as PID 1, so the KDF's timing under TCG is a *liveness*
+      question here, not a measurement (see "Argon2 cost measured on real ARM").
+
 - [ ] **Adopt `file_read_whole` (cyrius 6.6.6) and retire the 16 KiB config cap.**
       `_load_config_inner` reads into a fixed 16,385-byte buffer and refuses anything
       larger (`CFG_READ_TOO_BIG`). That refusal is *correct*, and replacing it is a
@@ -144,27 +152,6 @@ method, not about the code.
       The remaining blocker: **`aethersafha`'s `depends_on` is hardcoded** in
       argonaut's `default_services(BOOT_DESKTOP)`, so the dependency needs either
       an argonaut change or a config that replaces the default set.
-
-- [ ] **aarch64 fixture parity — the honest remainder of the boot gate.** The
-      aarch64 boot runs with **no services**, so everything the x86 harness
-      proves ABOUT SERVICES is still x86-only: cgroup placement and limits, the
-      per-service sandbox (`kyb_pre_exec`), seccomp, Landlock, capabilities,
-      uid/gid drop, health checks, the watchdog, restart backoff, sd_notify,
-      and prerequisite blocking. That is most of standing rule 27's surface.
-      ⚠ **The blocker is honest and specific**: most x86 fixtures exec busybox
-      applets, and an aarch64 busybox is a build-host capability rule 33 forbids
-      assuming. The path forward is the one the notify/Landlock/seccomp fixtures
-      already took — they are **Cyrius binaries and cross-build to aarch64
-      today** — so a services-bearing aarch64 config can be built from the
-      cyrius fixtures alone, with the busybox-dependent services omitted rather
-      than faked. ⚠ Note this changes the `services parsed: N` and `removed
-      service cgroups: N` markers for the aarch64 config independently of x86.
-      ⚠ **Do not close this by adding services that do not assert anything** —
-      the point is the confinement effects, asserted from inside the child.
-      ⚠ **1.7.0: two more things only this can test.** The Landlock fixture's
-      truncate probe had been issuing `recvfrom` on aarch64 since cyrius 6.6.5
-      (fixed, but never yet *run* there), and the first audit record under TCG is
-      the entropy-starved `getrandom` case in the v1.7.x section.
 
 ---
 
@@ -269,6 +256,18 @@ Moved into the v1.6.1 gate line. Recording why here so the claim is not re-made:
 
 One line per release. Detail lives in [CHANGELOG.md](../../CHANGELOG.md).
 
+- **v1.7.2** — aarch64 fixture parity. The aarch64 boot gate ran with **no services** from
+  1.6.19 to 1.7.1. It now stages 19, built only from the repo's Cyrius fixtures (the new
+  `qemu/svc-fixture.cyr` stands in for the busybox one-liners), and asserts on aarch64 what
+  the x86 harness asserts about services: 18 → 66 properties. Every property held on the
+  first run, so no kybernet defect turned up on aarch64. Three things did: the gate's span
+  had been measuring kernel boot plus kybernet since it was written (rule 37); the
+  health-check and watchdog assertions were a race between two timers, fixed on both
+  harnesses by giving each its own service (rule 36); and PID 1 waits for entropy at
+  phase 6, in the stdlib's hashmap seed, not at the first audit record as this file had
+  assumed (rule 51). The gate now boots entropy-starved and proves it. Checked by putting
+  each defect back: an aarch64-only allowlist regression (no `ppoll`) turns it red, and so
+  does a seeded boot.
 - **v1.7.1** — A refused `emergency.cred` no longer falls back to the config key. 1.6.18
   promised that, but the loader returned 0 for both "absent" and "refused", and
   `load_config` fell back on any 0. So a 0644 file was logged REFUSED while

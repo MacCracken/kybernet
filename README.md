@@ -191,14 +191,20 @@ group-readable `emergency.cred` with the right record in `config.json` as well,
 and asserts that the correct password does **not** get in: a refused credential
 file leaves no credential, and the config key is never its fallback.
 
-The aarch64 harness asserts 18 properties and exists because **a cross-build
+The aarch64 harness asserts 66 properties and exists because **a cross-build
 exiting 0 is not evidence**. It boots `kybernet-aarch64` as PID 1 under TCG —
-an x86 host cannot accelerate aarch64 — against a pinned, sha256-checked kernel,
-and asserts the boot sequence, cgroup controllers, a real reactor iteration and
-a clean power down. Its budget is kybernet's own serial-timestamp span, never
-wall time, because under emulation wall time measures the emulator. ⚠ Its scope
-is narrower than the x86 harness and stated in the file: it boots with **no
-services**, so everything proven *about services* is still x86-only.
+an x86 host cannot accelerate aarch64 — against a pinned, sha256-checked kernel.
+Besides the boot sequence, cgroup controllers, a real reactor iteration and a
+clean power down, it runs 19 services built only from this repo's Cyrius fixtures,
+and asserts on aarch64 what the x86 harness asserts about services: cgroup
+placement and limits, dropped and kept capabilities, the uid drop, seccomp
+`basic` with its control arm, Landlock, prerequisite blocking, restart backoff,
+the health check and watchdog, orphan reaping and sd_notify. It boots with no
+entropy seed (`dtb-randomness=off`), the way a board without a hardware RNG does,
+and checks that the boot really was starved. Its budget is kybernet's own
+serial-timestamp span, never wall time, because under emulation wall time
+measures the emulator. ⚠ The edge, emergency-auth and quiet passes are still
+x86-only, and the file says so.
 
 ⚠ That Argon2id record is minted by `qemu/mkcred-fixture.cyr`, using sigil's
 Argon2id — the same implementation `emergency_auth.cyr` verifies with. It is

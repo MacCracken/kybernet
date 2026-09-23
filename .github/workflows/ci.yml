@@ -244,6 +244,12 @@ jobs:
         # the right move is to never create the device rather than to ship a ROM
         # for a NIC nothing uses. Rule 39's "prefer the input that cannot be
         # absent" — a gate needing no ROM cannot fail for a missing ROM.
+        #
+        # Since 1.7.2 it also cross-builds the four Cyrius service fixtures with
+        # the toolchain installed at the top of this job, and boots with
+        # `-M virt,dtb-randomness=off` (QEMU >= 7.2; noble ships 8.2) so the guest
+        # has no entropy seed. The script names either missing piece as an
+        # environment failure.
         run: |
           # cpio is installed by the x86 harness step, which runs LATER than
           # this one — so name it here rather than inherit it by luck.

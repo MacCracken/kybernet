@@ -7,6 +7,127 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.7.2] — 2026-09-22
+
+**aarch64 fixture parity.** From 1.6.19 to 1.7.1 the aarch64 boot gate booted
+`kybernet-aarch64` as PID 1 with **no services**, because the x86 harness's fixtures
+are busybox applets and an aarch64 busybox is a build-host capability standing rule
+33 forbids assuming. It now stages 19 services built only from this repo's Cyrius
+fixtures and asserts on aarch64 what the x86 harness asserts about services: **18 →
+66** properties. No `src/` change; the kybernet binaries are byte-identical to
+1.7.1's.
+
+⭐ **Every property held on the first aarch64 run.** That includes cgroup placement
+and all five limits, `CapEff`/`CapBnd` dropped to zero, `no_new_privs`, the uid drop,
+`CAP_NET_BIND_SERVICE` kept across a uid drop as an ambient capability (`0x400`), and
+seccomp `basic` denying `mkdirat` with EPERM while its control arm succeeds. The
+aarch64 allowlist is its own list (standing rule 47) and had never been exercised by a
+real service. Also: Landlock inside/outside/truncate, prerequisite blocking, deferred
+restart, orphan reaping, the health probe, the watchdog kill, and all eight sd_notify
+properties (SO_PASSCRED, the cmsg parse, pid attribution, both refused MAINPIDs, the
+sanitised status). So the parity work found no kybernet defect on aarch64. It found
+three things elsewhere, below.
+
+### Added — `qemu/svc-fixture.cyr`, and 19 services on aarch64
+
+The busybox one-liners the x86 harness uses, in Cyrius: `true`, `false`,
+`sleep N`, `orphan` (forks a child that outlives it, for PID 1 to reap), `status` and
+`relay FILE`. The mode comes from `/proc/self/cmdline`, because `args` is not a
+kybernet dependency.
+
+⚠ **`status` labels its report with the leaf of its OWN cgroup path**, read from
+`/proc/self/cgroup`, not with an argument. kybernet moves a service into its cgroup
+from inside the child (standing rule 16), so a service whose join failed reports under
+the wrong name and every assertion keyed on it fails. The label *is* the placement
+check. A report ends with `ST[<leaf>]-DONE=1`, so a report that stopped half way is
+visible. A uid-dropped service cannot open `/dev/console` (root 0600), so it writes
+to `/dev/shm` and a root `relay` service surfaces it: the x86 `kyb-nonroot` /
+`kyb-nonroot-read` pair in one binary. Like the other fixtures it exits non-zero if it
+cannot report (standing rule 48).
+
+`qemu/boot-test-aarch64.sh` cross-builds the four Cyrius fixtures on every run. It
+checks each one's `e_machine`, because an x86 fixture in an aarch64 image would fail
+`execve` and read as a kybernet defect. The 19 services mirror the x86 fixtures of the
+same names. One deliberate difference: `kyb-limited`'s control case is
+`kyb-confined`'s own unlimited `memory.max`, rather than a read of another service's
+cgroup. Pass 1 gains 35 assertions and the reactor pass 13.
+
+Two observations worth keeping from the uid-dropped reports: their cgroup files read
+`ABSENT`, because kybernet creates `kybernet.slice` as 0700, so an unprivileged service
+cannot see its own limits (which is right); and `kyb-capuid`'s `CapPrm` and `CapEff` are
+both `0x400` on aarch64, which is what an ambient capability should produce.
+
+### Fixed — the aarch64 gate's "kybernet span" was measuring kernel boot
+
+It took the first kernel timestamp in the whole log, which is `Booting Linux` at
+0.000000, so since 1.6.19 the gate had measured kernel boot plus kybernet. The file's
+own header said it measured kybernet's span, which is standing rule 37's whole point.
+It read ~1 s only because a lone ~500 KB PID 1 unpacked quickly. With the fixtures the
+initramfs is ~9 MB, the kernel spent 3 s unpacking it under TCG, and the first run of
+this release failed the budget at **4559 ms**. kybernet's own share of that run was
+~1.15 s. The span now starts at kybernet's `phase 1:` kmsg, its first kernel-stamped
+line (klog lines carry no stamp).
+
+### Fixed — the health-probe and watchdog-kill assertions were a race (both harnesses)
+
+One service, `kyb-health` (`interval_ms: 1000`, `retries: 1`), carried both
+properties. argonaut's runtime watchdog deadline is `interval * retries + timeout` =
+**1.2 s**, the loop-mode watchdog tick is 1 s and the health tick 2 s, so the first
+probe and the kill both land near the 2 s mark, and whichever timerfd epoll reports
+first decides the outcome. If the watchdog fired first, the service was dead before any
+probe ran and `health check failed` never appeared. KVM always ordered the two the same
+way; TCG did not, and one aarch64 run went red on exactly that. Standing rule 36: a gate
+must not assert the outcome of a race. Each property now has its own service:
+`kyb-health` (`retries: 10`, a deadline outside the 5 s window, so its probe is always
+what acts) and `kyb-wdog` (`retries: 1`, so its kill is always observed). The x86
+harness goes to 20 services and 19 torn-down cgroups; the aarch64 gate has 19 and 18.
+Four consecutive aarch64 runs since have been green.
+
+### Found — PID 1 waits for entropy at phase 6, in the stdlib (standing rule 51)
+
+The roadmap said adding services to the aarch64 gate would exercise an entropy-starved
+first audit record "for free". Both halves of that were wrong, and finding out how is
+the most useful result of this release.
+
+- **QEMU's `virt` machine seeds the guest RNG through the device tree**, so the kernel
+  logged `random: crng init done` at 0.000000 and nothing ever waited.
+- **With the seed off (`-M virt,dtb-randomness=off`), PID 1 does wait, but at phase 6,
+  not at the first audit record.** argonaut's `init_new` span took **870 ms**, and the
+  kernel's `crng init done` landed inside it. The call is the stdlib's per-process
+  hashmap seed, `lib/hashseed.cyr`, which is `getrandom(buf, 8, 0)` on the first map
+  operation. That has been in kybernet's link since cyrius 6.5.39, i.e. since 1.6.20.
+  Flags 0 blocks until the CRNG is seeded, and PID 1's first map operation is in
+  `argonaut_init_new`, before the reactor exists. By the time libro's `uuid_v4` draws
+  for the first audit record, the CRNG is already seeded.
+
+On 5.4+ kernels the kernel's jitter entropy bounds the wait (here, 870 ms under TCG),
+and kybernet needs 5.13 for Landlock, so it is a delay rather than a hang. The aarch64
+gate now boots **every** run with `dtb-randomness=off`, the way a board without a
+hardware RNG does. It asserts that the CRNG really was seeded **after** kybernet's
+phase 1, because an entropy test that cannot tell a seeded boot from a starved one
+tests nothing, and it asserts that the span budget still held (~1.4 s). The
+non-blocking fix belongs in cyrius: a hash seed is the documented use of
+`GRND_INSECURE`, with the existing time-mix fallback kept for pre-5.6 kernels. That is
+on the roadmap for the user to file; the cyrius repo is off-limits from here.
+
+### Verification
+
+| check | result |
+|---|---|
+| `bash qemu/boot-test-aarch64.sh` | **66/66**, four consecutive runs; span 1408–1427 ms (budget 4000) |
+| `bash qemu/boot-test.sh` (`HARNESS_STRICT=1`) | **84/84**, 0 skipped; 20 services parsed, 19 cgroups removed |
+| inject: drop `ppoll` from the **aarch64** `basic` allowlist | aarch64 gate red: `SC[2]-SLEEP_MS=3` against the control arm's 51 ms. The x86 harness cannot see this; the allow sits under `#ifdef CYRIUS_ARCH_AARCH64` |
+| inject: boot with the device-tree seed back on | red: "the boot was not entropy-starved (crng init at 0.000000)", and the span fell from ~1.4 s to 548 ms, showing how much of it was the wait |
+| inject: `cyrius` off `PATH` | refused as an environment failure, before any boot |
+| `cyrius test` / `aarch64-exec-gate.sh` | 787 / 782, unchanged (no `src/` change) |
+| `qemu/svc-fixture.cyr` under `cyrius lint` and `fmt --check` | clean (CI lints only `src/`; held to the same bar anyway) |
+| `bash scripts/verify-lock.sh` | OK; no dependency, lock or toolchain change |
+
+The bench gate was not run: the kybernet binaries are byte-identical to 1.7.1's and
+`src/bench.cyr` is unchanged, so there is no codegen delta to measure.
+
+---
+
 ## [1.7.1] — 2026-09-22
 
 **A refused `emergency.cred` no longer falls back to the config key.** 1.6.18

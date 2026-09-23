@@ -1,0 +1,342 @@
+# qemu/svc-fixture.cyr — busybox-free stand-ins for the harness's shell one-liners. (1.7.2)
+#
+# WHY THIS EXISTS
+# ---------------
+# The x86 harness drives most of its service fixtures through busybox applets:
+# `/bin/true`, `/bin/false`, `/bin/sleep`, and `/bin/sh -c "grep ... /proc/self/status"`.
+# An aarch64 busybox is a build-host capability standing rule 33 forbids assuming, so
+# the aarch64 boot gate ran with NO services from 1.6.19 to 1.7.1, and everything the
+# x86 harness proves about services was x86-only: cgroup placement and limits,
+# capabilities, the uid drop, restart backoff, the health check and watchdog, orphan
+# reaping and prerequisite blocking. This binary is those one-liners in Cyrius, so the
+# aarch64 gate can assert the same properties. Like the notify, Landlock and seccomp
+# fixtures it links no libc and needs no loader, so what it does is a property of this
+# repo rather than of the machine that built the image (standing rules 39 and 48).
+#
+# MODES — argv[1], read from /proc/self/cmdline (`args` is not a kybernet dependency)
+#   true             exit 0
+#   false            exit 1
+#   sleep <seconds>  stay alive for that long
+#   orphan           fork a child that outlives this process, then exit 0
+#   status           report this process's own confinement, see below
+#   relay <file>     copy a status report from a file to the console
+#
+# STATUS
+# ------
+# Every line is `ST[<leaf>]-<key>=<value>`, where <leaf> is the last component of
+# this process's OWN cgroup path. ⚠ THE LABEL IS A MEASUREMENT, NOT AN ARGUMENT:
+# kybernet moves a service into its cgroup from inside the child, before exec
+# (standing rule 16), so a service whose join failed reports under the wrong label
+# and every assertion keyed on its name fails. That is the placement check.
+#
+# A service that runs with a uid cannot open /dev/console (root, 0600), so its
+# report goes to /dev/shm/kyb-st-<leaf>.txt, and a root `relay` service that
+# depends on it copies the file to the console: the x86 kyb-nonroot /
+# kyb-nonroot-read pair, from one binary.
+#
+# ⚠ A FIXTURE THAT CANNOT REPORT EXITS NON-ZERO (standing rule 48). The last line of
+# a report is `ST[<leaf>]-DONE=1`, so a report that stopped half way is visible too.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fs.cyr"
+include "lib/process.cyr"
+include "lib/chrono.cyr"
+
+var CONSOLE = "/dev/console";
+
+# GLOBAL scope: `var X[N]` is N SLOTS, i.e. N * 8 bytes (standing rule 2).
+var _CMD[64];        # /proc/self/cmdline: 512 bytes
+var _CG[64];         # /proc/self/cgroup: 512 bytes
+var _ST[1024];       # /proc/self/status, or a report being relayed: 8192 bytes
+var _VAL[64];        # one value: 512 bytes
+var _LINE[128];      # one output line: 1024 bytes
+var _PATH[64];       # one path: 512 bytes
+
+var _cmd_len = 0;
+var _cgpath = "?";
+var _leaf = "?";
+var _sink = 0 - 1;
+var _line_len = 0;
+
+# Read up to cap - 1 bytes of `path` into `buf`, NUL-terminated. Returns the byte
+# count, or -1 if the file cannot be opened.
+fn read_into(path, buf, cap) {
+    var fd = sys_open(path, O_RDONLY | O_CLOEXEC, 0);
+    if (fd < 0) { return 0 - 1; }
+    var total = 0;
+    var go = 1;
+    while (go == 1 && total < cap - 1) {
+        var n = sys_read(fd, buf + total, cap - 1 - total);
+        if (n <= 0) { go = 0; } else { total = total + n; }
+    }
+    sys_close(fd);
+    store8(buf + total, 0);
+    return total;
+}
+
+# The i-th argument, or 0 when there are fewer. /proc/self/cmdline is argv,
+# NUL-separated.
+fn argv_at(i) {
+    if (_cmd_len <= 0) { return 0; }
+    var p = &_CMD;
+    var end = &_CMD + _cmd_len;
+    var k = 0;
+    while (p < end) {
+        if (k == i) { return p; }
+        while (p < end && load8(p) != 0) { p = p + 1; }
+        p = p + 1;
+        k = k + 1;
+    }
+    return 0;
+}
+
+fn parse_uint(s) {
+    if (s == 0) { return 0 - 1; }
+    var v = 0;
+    var got = 0;
+    while ((load8(s) & 0xFF) >= 48 && (load8(s) & 0xFF) <= 57) {
+        v = v * 10 + ((load8(s) & 0xFF) - 48);
+        if (v > 100000) { return 0 - 1; }
+        got = 1;
+        s = s + 1;
+    }
+    if (got == 0) { return 0 - 1; }
+    return v;
+}
+
+# Lines are assembled and written with ONE write each, so a line cannot be
+# interleaved with another service writing to the console at the same moment.
+fn line_add(s) {
+    var n = strlen(s);
+    if (_line_len + n > 1000) { n = 1000 - _line_len; }
+    if (n > 0) {
+        memcpy(&_LINE + _line_len, s, n);
+        _line_len = _line_len + n;
+    }
+    return 0;
+}
+
+fn line_emit() {
+    store8(&_LINE + _line_len, 10);
+    if (_sink >= 0) { sys_write(_sink, &_LINE, _line_len + 1); }
+    _line_len = 0;
+    return 0;
+}
+
+fn emit_kv(key, val) {
+    line_add("ST[");
+    line_add(_leaf);
+    line_add("]-");
+    line_add(key);
+    line_add("=");
+    line_add(val);
+    return line_emit();
+}
+
+# cgroup v2 has one line, "0::<path>". The leaf is the service's name when the
+# child joined its own cgroup, and anything else when it did not.
+fn load_cgroup() {
+    if (read_into("/proc/self/cgroup", &_CG, 512) <= 0) { return 0 - 1; }
+    var at = strstr(&_CG, "::");
+    if (at < 0) { return 0 - 1; }
+    var path = &_CG + at + 2;
+    var q = path;
+    while (load8(q) != 0 && load8(q) != 10) { q = q + 1; }
+    store8(q, 0);
+    _cgpath = path;
+    _leaf = path;
+    var r = path;
+    while (load8(r) != 0) {
+        if (load8(r) == 47) { _leaf = r + 1; }
+        r = r + 1;
+    }
+    return 0;
+}
+
+fn path_join3(a, b, c) {
+    var n = 0;
+    var parts = 0;
+    while (parts < 3) {
+        var s = a;
+        if (parts == 1) { s = b; }
+        if (parts == 2) { s = c; }
+        var k = strlen(s);
+        if (n + k > 500) { return 0 - 1; }
+        memcpy(&_PATH + n, s, k);
+        n = n + k;
+        parts = parts + 1;
+    }
+    store8(&_PATH + n, 0);
+    return 0;
+}
+
+# The console if this process may open it, else a file for a relay to surface.
+fn open_sink() {
+    var fd = sys_open(CONSOLE, O_WRONLY | O_CLOEXEC, 0);
+    if (fd >= 0) {
+        _sink = fd;
+        return 0;
+    }
+    if (path_join3("/dev/shm/kyb-st-", _leaf, ".txt") < 0) { return 0 - 1; }
+    fd = sys_open(&_PATH, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 420);   # 0644
+    if (fd < 0) { return 0 - 1; }
+    _sink = fd;
+    return 0;
+}
+
+fn wanted(k) {
+    if (streq(k, "Uid") == 1) { return 1; }
+    if (streq(k, "Gid") == 1) { return 1; }
+    if (streq(k, "CapEff") == 1) { return 1; }
+    if (streq(k, "CapPrm") == 1) { return 1; }
+    if (streq(k, "CapBnd") == 1) { return 1; }
+    if (streq(k, "CapAmb") == 1) { return 1; }
+    if (streq(k, "NoNewPrivs") == 1) { return 1; }
+    if (streq(k, "Seccomp") == 1) { return 1; }
+    return 0;
+}
+
+# Copy `src` into _VAL with leading blanks dropped and each run of blanks
+# collapsed to one space, so the gate can match "65534 65534 65534 65534".
+fn collapse_into_val(src) {
+    var s = src;
+    while (load8(s) == 32 || load8(s) == 9) { s = s + 1; }
+    var n = 0;
+    var gap = 0;
+    while (load8(s) != 0 && n < 500) {
+        var ch = load8(s) & 0xFF;
+        if (ch == 32 || ch == 9) {
+            gap = 1;
+        } else {
+            if (gap == 1) {
+                store8(&_VAL + n, 32);
+                n = n + 1;
+            }
+            gap = 0;
+            store8(&_VAL + n, ch);
+            n = n + 1;
+        }
+        s = s + 1;
+    }
+    store8(&_VAL + n, 0);
+    return n;
+}
+
+fn report_status() {
+    if (read_into("/proc/self/status", &_ST, 8192) <= 0) {
+        emit_kv("status", "UNREADABLE");
+        return 0 - 1;
+    }
+    var p = &_ST;
+    while (load8(p) != 0) {
+        var ls = p;
+        while (load8(p) != 0 && load8(p) != 10) { p = p + 1; }
+        var le = p;
+        if (load8(p) == 10) {
+            store8(p, 0);
+            p = p + 1;
+        }
+        var c = ls;
+        while (c < le && load8(c) != 58) { c = c + 1; }
+        if (c < le) {
+            store8(c, 0);
+            if (wanted(ls) == 1) {
+                collapse_into_val(c + 1);
+                emit_kv(ls, &_VAL);
+            }
+        }
+    }
+    return 0;
+}
+
+# One cgroup control file of this process's own cgroup. ABSENT means the file does
+# not exist, which is what a limit looks like when its controller is not enabled
+# in the parent (standing rule 15).
+fn report_knob(name) {
+    if (path_join3("/sys/fs/cgroup", _cgpath, "/") < 0) { return 0 - 1; }
+    var n = strlen(&_PATH);
+    var k = strlen(name);
+    if (n + k > 500) { return 0 - 1; }
+    memcpy(&_PATH + n, name, k);
+    store8(&_PATH + n + k, 0);
+    var got = read_into(&_PATH, &_VAL, 512);
+    if (got < 0) { return emit_kv(name, "ABSENT"); }
+    while (got > 0 && (load8(&_VAL + got - 1) == 10 || load8(&_VAL + got - 1) == 32)) {
+        got = got - 1;
+    }
+    store8(&_VAL + got, 0);
+    return emit_kv(name, &_VAL);
+}
+
+fn do_status() {
+    load_cgroup();
+    if (open_sink() < 0) { return 3; }
+    emit_kv("CGROUP", _cgpath);
+    report_status();
+    report_knob("memory.max");
+    report_knob("memory.high");
+    report_knob("pids.max");
+    report_knob("cpu.weight");
+    report_knob("cpu.max");
+    emit_kv("DONE", "1");
+    sys_close(_sink);
+    return 0;
+}
+
+fn relay(path) {
+    var n = read_into(path, &_ST, 8192);
+    if (n <= 0) { return 3; }
+    var fd = sys_open(CONSOLE, O_WRONLY | O_CLOEXEC, 0);
+    if (fd < 0) { return 3; }
+    sys_write(fd, &_ST, n);
+    sys_close(fd);
+    return 0;
+}
+
+fn do_sleep(secs) {
+    var i = 0;
+    while (i < secs) {
+        sleep_ms(1000);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# The child is reparented to PID 1 when this process exits, and kybernet has to
+# reap a process it never started (the reactor's "reaped orphans: N").
+fn do_orphan() {
+    var pid = sys_fork();
+    if (pid == 0) {
+        sleep_ms(500);
+        sys_exit(0);
+    }
+    if (pid < 0) { return 3; }
+    return 0;
+}
+
+fn main() {
+    _cmd_len = read_into("/proc/self/cmdline", &_CMD, 512);
+    var mode = argv_at(1);
+    if (mode == 0) { return 3; }
+    if (streq(mode, "true") == 1) { return 0; }
+    if (streq(mode, "false") == 1) { return 1; }
+    if (streq(mode, "sleep") == 1) {
+        var secs = parse_uint(argv_at(2));
+        if (secs < 0) { return 3; }
+        return do_sleep(secs);
+    }
+    if (streq(mode, "orphan") == 1) { return do_orphan(); }
+    if (streq(mode, "status") == 1) { return do_status(); }
+    if (streq(mode, "relay") == 1) {
+        var f = argv_at(2);
+        if (f == 0) { return 3; }
+        return relay(f);
+    }
+    return 3;
+}

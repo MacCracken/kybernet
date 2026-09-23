@@ -6,33 +6,38 @@
 
 ## Version
 
-**1.7.1**: a refused `emergency.cred` no longer falls back to the config key. 1.6.18
-promised that and did not deliver it. Suite 758 → **787** assertions
-(753 → **782** on aarch64). Harness 79 → **84** properties, all passing under
-`HARNESS_STRICT=1`. The toolchain and every dependency pin are unchanged from 1.7.0.
+**1.7.2**: aarch64 fixture parity. The aarch64 boot gate ran with **no services** from
+1.6.19 to 1.7.1, because the x86 harness's fixtures are busybox applets. It now stages 19
+services built only from this repo's Cyrius fixtures and asserts on aarch64 what the x86
+harness asserts about services. It went from **18 → 66** properties, and every one held
+on the first run, so no kybernet defect turned up on aarch64. Suite counts are unchanged
+(787 / 782).
 
-⚠ **The defect.** `emerg_load_cred_file_at` returned 0 for "absent" and 0 for
-"refused", and `load_config` fell back to `emergency_password_hash` on any 0. So a
-0644 file was logged `REFUSED, chmod 600 it`, and then the world-readable config key's
-record answered the prompt. The loader's own test asserted the 0 that caused it,
-and the decision sat in `main.cyr`, where no unit test can reach (standing rule 34).
-It is now `emerg_resolve_cred_at` in `emergency_auth.cyr`. It uses the file when the
-file loaded and the key when the file is absent. Anything else yields **no
-credential**, and that is also its default for any state added later.
+`qemu/svc-fixture.cyr` is the new fixture, with six modes chosen by argv (`true`,
+`false`, `sleep N`, `orphan`, `status`, `relay FILE`). `status` labels its report with
+its **own cgroup's** leaf name, so the label doubles as the cgroup-placement check.
 
-⚠ **Behaviour change.** A board with an unusable `emergency.cred` **and** a key in
-`config.json` now has no credential, so an edge refusal suppresses the shell. The
-boot log names the file, the reason, and that the key was not used. `chmod 600` is
-the fix. A board with no file at all is unaffected.
+What the parity work found instead:
 
-**A second defect in the same loader:** it returned `str_new` views of one static
-buffer. `str_new` borrows, so a same-length rotation over SIGHUP compared equal to
-itself and was never announced. It now returns an owned copy.
+- **The aarch64 gate's span was measuring kernel boot.** It took the first timestamp in the
+  whole log (`Booting Linux`, 0.000000). That only looked right while the initramfs was a
+  lone ~500 KB PID 1. It now starts at kybernet's `phase 1:` kmsg (standing rule 37).
+- **The health-check and watchdog assertions were a race** between two timers on one
+  service. KVM always resolved it the same way and TCG did not. Each property now has its
+  own service, `kyb-health` (retries 10) and `kyb-wdog` (retries 1), on both harnesses
+  (standing rule 36). The x86 harness now has 20 services.
+- **PID 1 waits for entropy at phase 6**, in the stdlib's hashmap seed
+  (`getrandom(…, 0)`), not at the first audit record as the roadmap had assumed. That was
+  870 ms under TCG with no seed. The aarch64 gate now boots with `dtb-randomness=off` and
+  asserts that the boot really was starved (standing rule 51). The non-blocking fix
+  (`GRND_INSECURE`) is upstream, in cyrius.
 
-**Harness pass 4c** boots the same real record in a 0644 `emergency.cred` and in
-`config.json`, types the right password, and asserts that it does not get in. It
-also asserts positive evidence that phase 6c ran, because "did not authenticate"
-alone would also pass on a boot that died early.
+Checked by putting each defect back: an aarch64-only allowlist regression (`ppoll` removed)
+turns the aarch64 gate red, and the x86 harness structurally cannot see it. A seeded boot
+turns the entropy assertion red.
+
+**1.7.1** fixed a refused `emergency.cred` falling back to the config key. 1.6.18 had
+promised it would not.
 
 1.7.0, the release before this one, moved cyrius 6.6.2 → 6.6.6 and every dep to its
 latest tag. Its three fixes (only ENOENT is an absent config, the Landlock fixture's
@@ -130,7 +135,7 @@ the build; that is standing rule 32.
 |---|---|---|
 | `cyrius test src/test.cyr` | **787** assertions | floor read from CLAUDE.md; a shrinking suite fails |
 | `bash scripts/aarch64-exec-gate.sh` | **782** assertions + 5 syscall probes | executes aarch64 under `qemu-user`; its own declared floor |
-| `bash qemu/boot-test-aarch64.sh` | **18** properties | boots `kybernet-aarch64` as PID 1 (TCG) |
+| `bash qemu/boot-test-aarch64.sh` | **66** properties, 19 services | boots `kybernet-aarch64` as PID 1 (TCG), entropy-starved |
 | `bash qemu/boot-test.sh` | **84** properties, 5 passes | `HARNESS_STRICT=1` in CI makes a skip a failure |
 | `bash scripts/verify-lock.sh` | 2 halves, 5 commit pins | the committed lock (HEAD's, not the working tree's) vs a fresh resolve |
 | `bash scripts/bench-history.sh` | **56** benchmarks (2 reported-not-gated) | ≥15% regression gate; `LAYOUT_SENSITIVE` names the two exempt ones |
@@ -142,7 +147,7 @@ x86-only (`BS_OPEN`/`BS_STAT`/`BS_LSTAT`/`BS_PIPE`/`BS_POLL`/`BS_NANOSLEEP`) and
 aarch64-only (`BS_PPOLL`). Both floors are declared in CLAUDE.md and must be bumped
 together. **Do not pad the short arch to equalise them.**
 
-20 modules in `src/lib/`. 19 `kyb-*` harness fixtures. 5 `.cyr` files under `qemu/`.
+20 modules in `src/lib/`. 20 `kyb-*` services in the x86 harness and 19 in the aarch64 gate. 6 `.cyr` files under `qemu/`.
 
 ## Verification posture
 
@@ -167,18 +172,17 @@ stricter bar on the next sweep.**
 
 ## In flight
 
-**v1.7.1 is ready and untagged.** It changes no dependency, lock or toolchain pin,
-so `verify-lock.sh` passes against HEAD as it stands. Every gate was run on this
-tree; the numbers are in the 1.7.1 CHANGELOG entry.
+**v1.7.2 is ready and untagged.** It changes no dependency, lock or toolchain pin, and
+no `src/` file: it is harness work, plus docs. The 1.7.2 CHANGELOG entry has the numbers.
 
 ## Next
 
 In the order I would take them. The full list is [roadmap.md](roadmap.md), with 14 open
 items.
 
-1. **aarch64 fixture parity.** The boot gate still runs with **no services**. The Cyrius
-   fixtures already cross-build. It is also now the only way to test the fixed Landlock
-   probe on aarch64 and an entropy-starved first audit record.
+1. **aarch64: the edge, emergency-auth and quiet passes.** None of them needs busybox. The
+   dm-verity images are host-built data, and `-M virt` takes virtio drives. The auth passes
+   would be the first time aarch64 runs Argon2id as PID 1.
 2. **`ready_check` / `environment` / `env_files` config keys.** These have been unblocked
    since 1.6.20 consumed argonaut 1.15.0. Check that something downstream reads each field
    before adding its key.

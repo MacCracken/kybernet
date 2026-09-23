@@ -24,7 +24,7 @@
 #   "started: kyb-live"              — a LIVE service, so a cgroup is really
 #                                      created and the pid moved into it
 #                                      (a completed oneshot correctly gets none)
-#   "removed service cgroups: 18"    — the shutdown sweep killed and rmdir'd them
+#   "removed service cgroups: 19"    — the shutdown sweep killed and rmdir'd them
 #
 #     ⚠ NINE of NINE. This said EIGHT from 1.5.3 to 1.6.1, with a comment
 #     arguing the shortfall was correct: kyb-orphan backgrounds a child, this
@@ -364,12 +364,12 @@ for marker in \
     "kybernet: services started" \
     "kybernet: harness done" \
     "kybernet: shutdown" \
-    "kybernet: config: services parsed: 19" \
+    "kybernet: config: services parsed: 20" \
     "kybernet:   completed (oneshot): kyb-dep" \
     "kybernet:   completed (oneshot): kyb-svc" \
     "kybernet: boot: skipped (not applicable): Start udev device manager" \
     "kybernet:   started: kyb-live" \
-    "kybernet: removed service cgroups: 18"; do
+    "kybernet: removed service cgroups: 19"; do
     if echo "$RUNTIME_OUT" | grep -aqF "$marker"; then
         echo "  OK: $marker"
     else
@@ -990,8 +990,19 @@ fi
 # arm is health-check-driven.
 #
 # kyb-health fails deterministically: a TCP connect to 127.0.0.1:9
-# (discard), which nothing in the initramfs listens on, with retries=1 so
-# the first failed poll crosses the threshold.
+# (discard), which nothing in the initramfs listens on.
+#
+# ⚠ TWO SERVICES, BECAUSE ONE SERVICE MADE THE TWO ASSERTIONS A RACE. 1.7.2.
+# Until 1.7.2 kyb-health (retries 1) carried both. argonaut's watchdog deadline
+# is interval * retries + timeout = 1.2 s, the loop-mode watchdog ticks every
+# 1 s and the health tick every 2 s, so the first probe and the kill both fell
+# around the 2 s mark. When the watchdog tick was handled first, the service was
+# killed before any probe ran, and "health check failed" never appeared. KVM
+# always ordered them the same way. The aarch64 gate under TCG did not, and
+# standing rule 36 says a gate must not assert the outcome of a race. Now
+# kyb-health has retries 10 (deadline 10.2 s, outside the window), so its probe
+# is always what acts first, and kyb-wdog has retries 1, so its kill is always
+# observed. Each assertion now has one service and no ordering to depend on.
 # 1.6.1 — PID 1 reaps a child it did not start.
 #
 # kyb-orphan backgrounds `sleep 1` and exits, so the sleep is reparented
@@ -1057,11 +1068,11 @@ fi
 # Deliberately NOT asserting "watchdog restart scheduled": measured absent under
 # this fixture and correctly so — the restart half is already covered by the
 # `restarting:` / `restarted:` assertions above.
-if echo "$LOOP_OUT" | grep -aqF "watchdog killed: kyb-health"; then
-    echo "  OK: the watchdog actually KILLED the unhealthy service"
+if echo "$LOOP_OUT" | grep -aqF "watchdog killed: kyb-wdog"; then
+    echo "  OK: the watchdog actually KILLED the unhealthy service (kyb-wdog)"
 else
-    echo "  FAIL: the watchdog never killed kyb-health — the probe ran but the kill path did not"
-    echo "$LOOP_OUT" | grep -aiE 'watchdog|kyb-health' | head -5 || true
+    echo "  FAIL: the watchdog never killed kyb-wdog — its 1.2 s deadline passed and the kill path did not run"
+    echo "$LOOP_OUT" | grep -aiE 'watchdog|kyb-wdog' | head -5 || true
     fail=1
 fi
 

@@ -394,7 +394,23 @@ cat > "${INITRAMFS_DIR}/etc/kybernet/config.json" << 'CFGEOF'
     },
     {
       "name": "kyb-health",
-      "description": "fails a TCP health check so the reactor acts on it",
+      "description": "fails a TCP health check; retries 10 keeps its watchdog deadline outside the 5 s window, so the PROBE is always observed",
+      "binary": "/bin/sleep",
+      "args": ["600"],
+      "type": "simple",
+      "restart": "on-failure",
+      "health_check": {
+        "type": "tcp",
+        "target": "127.0.0.1",
+        "port": 9,
+        "interval_ms": 1000,
+        "timeout_ms": 200,
+        "retries": 10
+      }
+    },
+    {
+      "name": "kyb-wdog",
+      "description": "the same failing check with retries 1: a 1.2 s watchdog deadline, so the watchdog KILL is always observed",
       "binary": "/bin/sleep",
       "args": ["600"],
       "type": "simple",
