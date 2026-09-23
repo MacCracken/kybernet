@@ -1,6 +1,6 @@
 # Kybernet Roadmap
 
-**Current: v1.7.5** — [CHANGELOG.md](../../CHANGELOG.md) is the record of what each
+**Current: v1.7.6** — [CHANGELOG.md](../../CHANGELOG.md) is the record of what each
 release actually did. This file carries only what is **not** done; a completed item is
 deleted from here and summarised in History below, never left ticked.
 
@@ -41,9 +41,9 @@ something outside this repo.
 `cyrius lint` reports **0 untracked deferrals and 0 warnings** across the tree, and as
 of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into fiction.
 
-**Gate counts at v1.7.5** (a next agent must not let these shrink; each is enforced):
-**831** test assertions on x86_64 and **826** on aarch64 · **113** harness properties ·
-**167** aarch64 boot-gate properties · 56 benchmarks (two reported-not-gated, declared) ·
+**Gate counts at v1.7.6** (a next agent must not let these shrink; each is enforced):
+**849** test assertions on x86_64 and **844** on aarch64 · **120** harness properties ·
+**174** aarch64 boot-gate properties · 56 benchmarks (two reported-not-gated, declared) ·
 the aarch64 execution gate · the committed-lock gate.
 ⚠ **The two assertion counts differ on purpose and neither floor gates the other** — a
 seccomp allowlist is arch-specific, so six assertions are x86-only and one aarch64-only.
@@ -105,45 +105,21 @@ method, not about the code.
 
 ## v1.6.x — code that does nothing, and docs that say it does
 
-- [ ] **Port `agnos-init.sh`'s `setup_directories()` to a kybernet oneshot service.**
-      Replaces the deleted phase 6b (1.6.2), and it is the *real* form of the need
-      phase 6b pretended to serve. `/run` is a fresh tmpfs on every boot
-      (`mount.cyr`), so `/run/agnos/{agents,plugins}` and `/run/user/1000` cannot be
-      shipped in an image — and `aethersafha`, which kybernet starts **by default** in
-      `BOOT_DESKTOP` (argonaut `services.cyr:216`), binds sockets in both
-      (`aethersafha/src/apps.cyr:381`, `plugin_host.cyr:468`) and contains no `mkdir`.
-      Today AGNOS covers this with a systemd oneshot
-      (`agnosticos/config/init/agnos-init.sh:47-62`); kybernet is the PID 1 that
-      replaces systemd (`agnosticos/README.md:64`), so the work lands here.
-      **Do it as a `"type": "oneshot"` service definition, not as init-resident code** —
-      that path is already parsed, wave-ordered, cgroup-placed, supervised and
-      harness-gated (six of the nine QEMU fixtures are oneshots), and a service with no
-      `security` block runs unconfined as root, so it can `mkdir`/`chown`/`chmod`
-      freely. Putting the same capability inside PID 1 would mean a new root-privileged
-      filesystem-mutation surface in the least recoverable process on the machine, plus
-      a JSON schema, a path validator, a symlink-safe walk and a rule-27 fixture — to
-      buy what one config object already buys. This is mostly an agnosticos change.
-      ⚠ **VERIFIED 1.6.19, and it is worse than this item said.** `agnos-init.sh`
-      only does `mkdir -p /run/agnos` — it never creates `agents/` or `plugins/`,
-      which are the two directories aethersafha actually binds in
-      (`apps.cyr:381`, `plugin_host.cyr:468`). A tree-wide search finds
-      `/run/agnos/agents` created in exactly one place,
-      `agnosticos/scripts/archive-pre-cyrius/edge-image.sh` — archived,
-      pre-Cyrius — and `/run/agnos/plugins` created **nowhere at all**. Since
-      `/run` is a fresh tmpfs every boot, the port has to create more than the
-      script it is replacing does.
-      ⚠ **One kybernet-side blocker remains, and the one that closed made it
-      WORSE.** Until 1.6.18 a failed prerequisite did not block its dependents —
-      `start_services` ordered the waves but a wave-N failure only incremented
-      `failed`, so wave N+1 ran anyway and a broken `agnos-init` would still have
-      let the confined compositor start and exit 126. `failed_names` fixed that.
-      ⚠ **Which means adding an `agnos-init` dependency to `aethersafha` before
-      agnosticos ships the binary now BLOCKS the compositor** rather than merely
-      running it too early: a working desktop boot becomes a non-booting one.
-      **Ship the binary first, then the dep** — the ordering is not a preference.
-      The remaining blocker: **`aethersafha`'s `depends_on` is hardcoded** in
-      argonaut's `default_services(BOOT_DESKTOP)`, so the dependency needs either
-      an argonaut change or a config that replaces the default set.
+- [ ] **Make aethersafha depend on `agnos-init`.** The half of the `setup_directories()`
+      port that is left. 1.7.6 ships `agnos-init` in the kybernet package
+      (`/usr/lib/agnos/agnos-init`): it makes `/run/agnos/{agents,plugins}`,
+      `/run/user/1000` and the `/var/lib/agnos` / `/var/log/agnos` / `/etc/agnos`
+      layout, and both harnesses run it as a oneshot. What remains:
+      1. **argonaut** — `default_services(BOOT_DESKTOP)` adds an `agnos-init` oneshot
+         and aethersafha `depends_on` it. It has to be argonaut: kybernet ignores a
+         config service that collides with a built-in, so an operator cannot add the
+         edge from `config.json`.
+      2. **kybernet** consumes that argonaut tag. The binary and the dependency then
+         always ship in the same package, which is why the binary is in kybernet.
+      3. **zugot** — the `kybernet` recipe (still at 1.3.4) must install
+         `/usr/lib/agnos/agnos-init` when it moves to 1.7.6 or later. ⚠ A kybernet
+         that carries the dependency on an image without the binary skips the
+         compositor (a failed prerequisite blocks its dependents since 1.6.18).
 
 ---
 
@@ -240,6 +216,14 @@ Moved into the v1.6.1 gate line. Recording why here so the claim is not re-made:
 
 One line per release. Detail lives in [CHANGELOG.md](../../CHANGELOG.md).
 
+- **v1.7.6** — `agnos-init`, a separate oneshot program the kybernet package ships at
+  `/usr/lib/agnos/agnos-init`, makes the AGNOS directory layout: the `/run/agnos`
+  socket directories aethersafha binds in (which nothing created before), `/run/user/1000`,
+  and `setup_directories()`'s `/var` and `/etc` directories, with modes and owners
+  from `/etc/passwd`. It checks every path with `lstat`, sets owners only on the
+  directories it lists, never recursively, and exits 1 on any directory it cannot
+  make. It is never linked into PID 1. Both harnesses run it and `lstat` the result
+  from a dependent service. aethersafha's dependency on it, in argonaut, is next.
 - **v1.7.5** — Three service keys: `environment` and `ready_check`, whose fields argonaut
   1.15.0 reads, and `env_files`, whose field argonaut still ignores, so kybernet reads
   the files itself at load. A file overrides `environment`, as in systemd. The ready

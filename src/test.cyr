@@ -25,6 +25,8 @@ include "src/lib/emergency_auth.cyr"
 include "src/lib/service_sandbox.cyr"
 include "src/lib/restart_queue.cyr"
 include "src/lib/boot_stages.cyr"
+# agnos-init's layout (1.7.6). Linked into build/agnos-init, not into PID 1.
+include "src/lib/agnos_dirs.cyr"
 
 # log.cyr's slog() short-circuits on g_log_fd <= 0; we never call
 # slog_init() in tests so the default 0 is the right starting state.
@@ -2778,6 +2780,103 @@ fn test_emerg_shell_needs_auth() {
     return 0;
 }
 
+# 1.7.6 — agnos-init's directory layout, made under a scratch root. The unit suite
+# runs unprivileged, so it proves the walk, the modes, the refusals and the passwd
+# lookup; a real chown to another uid is proven by the harness, which runs as root.
+fn _ad_t_path(root, p) {
+    return _cat2(root, p);
+}
+
+fn _ad_t_mode(p) {
+    var st[STAT_BUFSZ];
+    if (sys_lstat(p, &st) != 0) { return 0 - 1; }
+    return load32(&st + STAT_MODE) & 0xFFFF;
+}
+
+fn _ad_t_cleanup(root) {
+    var n = agnos_dirs_count();
+    var i = n - 1;
+    while (i >= 0) {
+        sys_rmdir(_ad_t_path(root, agnos_dirs_path(i)));
+        i = i - 1;
+    }
+    sys_unlink(_ad_t_path(root, "/etc/passwd"));
+    sys_unlink(_ad_t_path(root, "/decoy-link"));
+    sys_rmdir(_ad_t_path(root, "/decoy"));
+    sys_rmdir(_ad_t_path(root, "/var/lib"));
+    sys_rmdir(_ad_t_path(root, "/var/log"));
+    sys_rmdir(_ad_t_path(root, "/var"));
+    sys_rmdir(_ad_t_path(root, "/etc"));
+    sys_rmdir(_ad_t_path(root, "/run"));
+    sys_rmdir(root);
+    return 0;
+}
+
+fn test_agnos_dirs() {
+    println("--- agnos-init directory layout (1.7.6) ---");
+    agnos_dirs_set_log(0 - 1, 0);
+    var root = "/tmp/kyb-agnos-dirs-test";
+    _ad_t_cleanup(root);
+    sys_mkdir(root, 493);
+    sys_mkdir(_ad_t_path(root, "/etc"), 493);
+
+    # A passwd that maps `agnos` to this process's own ids (so the chown can succeed
+    # unprivileged), gives uid 4242 a primary gid of 1234, and has a broken line.
+    # 4242, not 1000: the suite's own uid is often 1000 and would match first.
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "root:x:0:0:root:/root:/bin/sh\nbroken:x:abc:1\nagnos:x:");
+    str_builder_add_int(sb, sys_getuid());
+    str_builder_add_cstr(sb, ":");
+    str_builder_add_int(sb, sys_getgid());
+    str_builder_add_cstr(sb, ":AGNOS:/var/lib/agnos:/usr/sbin/nologin\nuser2:x:4242:1234::/home/user2:/bin/sh\n");
+    _write_file(_ad_t_path(root, "/etc/passwd"), str_data(str_builder_build(sb)), 420);
+
+    var ids[16];
+    assert(agnos_dirs_passwd_lookup(root, "agnos", 0, &ids) == 1, "agnos-init: passwd finds a user by name");
+    assert(load64(&ids) == sys_getuid(), "agnos-init: ... with its uid");
+    assert(load64(&ids + 8) == sys_getgid(), "agnos-init: ... and its primary gid");
+    assert(agnos_dirs_passwd_lookup(root, 0, 4242, &ids) == 1, "agnos-init: passwd finds a user by uid");
+    assert(load64(&ids + 8) == 1234, "agnos-init: that uid's primary gid is read, not assumed");
+    assert(agnos_dirs_passwd_lookup(root, "agnos-llm", 0, &ids) == 0, "agnos-init: an absent user is not found");
+    assert(agnos_dirs_passwd_lookup(root, "broken", 0, &ids) == 0, "agnos-init: a malformed entry is not a match");
+
+    # A fresh root: every directory made, each with its exact mode. agnos-llm is
+    # missing from passwd, which is reported and tolerated, not a failure.
+    assert(agnos_dirs_setup(root) == 0, "agnos-init: a fresh root is laid out with no failures");
+    var n = agnos_dirs_count();
+    var bad = 0;
+    for (var i = 0; i < n; i = i + 1) {
+        var m = _ad_t_mode(_ad_t_path(root, agnos_dirs_path(i)));
+        if (m != (0x4000 | agnos_dirs_mode(i))) { bad = bad + 1; }
+    }
+    assert(bad == 0, "agnos-init: every directory exists as a directory with its listed mode");
+    assert(_ad_t_mode(_ad_t_path(root, "/run/agnos/plugins")) == 0x41ED, "agnos-init: /run/agnos/plugins, 0755");
+    assert(_ad_t_mode(_ad_t_path(root, "/run/user/1000")) == 0x41C0, "agnos-init: /run/user/1000, 0700");
+    assert(_ad_t_mode(_ad_t_path(root, "/var/log/agnos")) == 0x41E8, "agnos-init: /var/log/agnos, 0750");
+
+    # Drift is corrected, and a second run is a no-op success.
+    sys_chmod(_ad_t_path(root, "/run/agnos/agents"), 511);
+    assert(agnos_dirs_setup(root) == 0, "agnos-init: a second run succeeds");
+    assert(_ad_t_mode(_ad_t_path(root, "/run/agnos/agents")) == 0x41ED, "agnos-init: a drifted mode is put back");
+
+    # A symlink where a directory belongs is refused, and its target is untouched.
+    sys_rmdir(_ad_t_path(root, "/run/agnos/plugins"));
+    sys_mkdir(_ad_t_path(root, "/decoy"), 448);
+    sys_symlink(_ad_t_path(root, "/decoy"), _ad_t_path(root, "/run/agnos/plugins"));
+    assert(agnos_dirs_setup(root) == 1, "agnos-init: a symlink in place of a directory is a failure");
+    assert(_ad_t_mode(_ad_t_path(root, "/decoy")) == 0x41C0, "agnos-init: the symlink's target was not chmod'd");
+    sys_unlink(_ad_t_path(root, "/run/agnos/plugins"));
+
+    # A regular file where a directory belongs is refused too.
+    _write_file(_ad_t_path(root, "/run/agnos/plugins"), "x", 420);
+    assert(agnos_dirs_setup(root) == 1, "agnos-init: a file in place of a directory is a failure");
+    sys_unlink(_ad_t_path(root, "/run/agnos/plugins"));
+    assert(agnos_dirs_setup(root) == 0, "agnos-init: and it recovers once the file is gone");
+
+    _ad_t_cleanup(root);
+    return 0;
+}
+
 fn test_emerg_cred_resolve() {
     println("--- emergency credential source (1.7.1) ---");
     var rec = _cat2("v1$2$19456$1$6b796265726e65742d746573742d3031$",
@@ -3490,6 +3589,7 @@ fn main() {
     test_emerg_cred_file();
     test_emerg_cred_resolve();
     test_emerg_shell_needs_auth();
+    test_agnos_dirs();
     test_cfg_read_class();
     test_edge_compare_pcrs_cstr();
     test_edge_boot_gating();

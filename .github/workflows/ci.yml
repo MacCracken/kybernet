@@ -83,7 +83,7 @@ jobs:
         # underneath the later build/test steps. Matches argonaut CI.
         run: |
           fail=0
-          for f in src/main.cyr src/test.cyr src/bench.cyr src/lib/*.cyr; do
+          for f in src/main.cyr src/agnos_init.cyr src/test.cyr src/bench.cyr src/lib/*.cyr; do
             [ -f "$f" ] || continue
             if ! cyrius fmt "$f" --check > /dev/null 2>&1; then
               echo "needs fmt: $f"
@@ -108,7 +108,7 @@ jobs:
         # count — which is how `Deferred` / `Not yet` went red at 1.7.0.
         run: |
           FAIL=0
-          for f in src/main.cyr src/test.cyr src/bench.cyr src/lib/*.cyr; do
+          for f in src/main.cyr src/agnos_init.cyr src/test.cyr src/bench.cyr src/lib/*.cyr; do
             [ -f "$f" ] || continue
             # ⚠ THE EXIT STATUS IS CHECKED. Discarding it made this gate
             # vacuous in exactly the way it exists to prevent: `cyrius lint`
@@ -143,10 +143,14 @@ jobs:
         run: cyrius vet src/main.cyr
 
       - name: Build (DCE)
+        # agnos-init (1.7.6) ships in the kybernet package: the oneshot that makes the
+        # AGNOS directory layout. A separate program, never linked into PID 1.
         run: |
           mkdir -p build
           CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet
           echo "kybernet: $(wc -c < build/kybernet) bytes"
+          CYRIUS_DCE=1 cyrius build src/agnos_init.cyr build/agnos-init
+          echo "agnos-init: $(wc -c < build/agnos-init) bytes"
 
       - name: Verify ELF
         # `od` is coreutils — always present. `xxd` was NOT: Ubuntu 24.04 split
@@ -155,10 +159,12 @@ jobs:
         # perfectly good binary. Checks magic AND e_machine (0x003E = x86_64)
         # rather than magic alone, so a cross-built binary can't pass as native.
         run: |
-          got=$(od -An -tx1 -j0 -N4 build/kybernet | tr -d ' \n')
-          [ "$got" = "7f454c46" ] || { echo "ERROR: not an ELF (magic=$got)"; exit 1; }
-          mach=$(od -An -tx1 -j18 -N2 build/kybernet | tr -d ' \n')
-          [ "$mach" = "3e00" ] || { echo "ERROR: e_machine=$mach, expected 3e00 (x86_64)"; exit 1; }
+          for b in build/kybernet build/agnos-init; do
+            got=$(od -An -tx1 -j0 -N4 "$b" | tr -d ' \n')
+            [ "$got" = "7f454c46" ] || { echo "ERROR: $b is not an ELF (magic=$got)"; exit 1; }
+            mach=$(od -An -tx1 -j18 -N2 "$b" | tr -d ' \n')
+            [ "$mach" = "3e00" ] || { echo "ERROR: $b e_machine=$mach, expected 3e00 (x86_64)"; exit 1; }
+          done
 
       - name: Cross-build aarch64 (best-effort)
         # Only when the toolchain ships an aarch64 backend. cyrius 6.0.x
@@ -186,6 +192,10 @@ jobs:
           [ "$amach" = "b700" ] || {
             echo "ERROR: kybernet-aarch64 e_machine=$amach, expected b700 (aarch64)"; exit 1; }
           echo "kybernet-aarch64: $(wc -c < build/kybernet-aarch64) bytes"
+          CYRIUS_DCE=1 cyrius build --aarch64 src/agnos_init.cyr build/agnos-init-aarch64
+          imach=$(od -An -tx1 -j18 -N2 build/agnos-init-aarch64 | tr -d ' \n')
+          [ "$imach" = "b700" ] || {
+            echo "ERROR: agnos-init-aarch64 e_machine=$imach, expected b700 (aarch64)"; exit 1; }
 
       - name: aarch64 execution gate
         # ⚠ THE ONLY GATE THAT EXECUTES AARCH64 CODE. Added 1.6.13 (HIGH-9).
@@ -543,6 +553,7 @@ jobs:
           cyrius deps
           mkdir -p build
           CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet
+          CYRIUS_DCE=1 cyrius build src/agnos_init.cyr build/agnos-init
 
       - name: Run harness
         if: steps.prereqs.outputs.skip == '0'

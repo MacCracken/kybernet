@@ -24,7 +24,7 @@
 #   "started: kyb-live"              — a LIVE service, so a cgroup is really
 #                                      created and the pid moved into it
 #                                      (a completed oneshot correctly gets none)
-#   "removed service cgroups: 22"    — the shutdown sweep killed and rmdir'd them
+#   "removed service cgroups: 24"    — the shutdown sweep killed and rmdir'd them
 #
 #     ⚠ NINE of NINE. This said EIGHT from 1.5.3 to 1.6.1, with a comment
 #     arguing the shortfall was correct: kyb-orphan backgrounds a child, this
@@ -147,6 +147,15 @@ if [ -n "$_newest_src" ] || [ "${PROJECT_DIR}/cyrius.cyml" -nt "${PROJECT_DIR}/b
     echo "       run: CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet"
     exit 1
 fi
+# The same rule for agnos-init (1.7.6), the oneshot the kybernet package also ships.
+# The image stages it at /usr/lib/agnos/agnos-init and the gate runs it as a service.
+_ai_newest=$(find "${PROJECT_DIR}/src" -name '*.cyr' -newer "${PROJECT_DIR}/build/agnos-init" -print -quit 2>/dev/null || true)
+if [ ! -f "${PROJECT_DIR}/build/agnos-init" ] || [ -n "$_ai_newest" ] \
+    || [ "${PROJECT_DIR}/cyrius.cyml" -nt "${PROJECT_DIR}/build/agnos-init" ]; then
+    echo "ERROR: build/agnos-init is missing or STALE${_ai_newest:+ (newer: ${_ai_newest})}."
+    echo "       run: CYRIUS_DCE=1 cyrius build src/agnos_init.cyr build/agnos-init"
+    exit 1
+fi
 
 # Build / rebuild the initramfs when anything it is BUILT FROM is newer.
 #
@@ -175,7 +184,7 @@ fi
 _initramfs_stale() {
     [ ! -f "$INITRAMFS" ] && return 0
     local f
-    for f in "${PROJECT_DIR}/build/kybernet" "${PROJECT_DIR}/cyrius.cyml" \
+    for f in "${PROJECT_DIR}/build/kybernet" "${PROJECT_DIR}/build/agnos-init" "${PROJECT_DIR}/cyrius.cyml" \
              "${SCRIPT_DIR}/build-initramfs.sh" "${SCRIPT_DIR}"/*.cyr; do
         [ -e "$f" ] && [ "$f" -nt "$INITRAMFS" ] && return 0
     done
@@ -364,12 +373,12 @@ for marker in \
     "kybernet: services started" \
     "kybernet: harness done" \
     "kybernet: shutdown" \
-    "kybernet: config: services parsed: 23" \
+    "kybernet: config: services parsed: 25" \
     "kybernet:   completed (oneshot): kyb-dep" \
     "kybernet:   completed (oneshot): kyb-svc" \
     "kybernet: boot: skipped (not applicable): Start udev device manager" \
     "kybernet:   started: kyb-live" \
-    "kybernet: removed service cgroups: 22"; do
+    "kybernet: removed service cgroups: 24"; do
     if echo "$RUNTIME_OUT" | grep -aqF "$marker"; then
         echo "  OK: $marker"
     else
@@ -407,6 +416,33 @@ else
     echo "  FAIL: kyb-ready-ok did not start (its process-alive ready_check should pass)"
     fail=1
 fi
+# --- agnos-init (1.7.6) --------------------------------------------------------
+# The real /usr/lib/agnos/agnos-init runs as a oneshot, and kyb-agnos-dirs, which
+# depends on it, lstat()s the result from inside the guest: an observer, not the
+# program's own report. The image's /etc/passwd maps agnos 900, agnos-llm 901 and
+# user 1000 with primary gid 1001, so each owner below comes from that lookup.
+if echo "$RUNTIME_OUT" | grep -aqF "completed (oneshot): agnos-init"; then
+    echo "  OK: agnos-init ran as a oneshot and exited 0"
+else
+    echo "  FAIL: agnos-init did not complete"
+    echo "$RUNTIME_OUT" | grep -aF 'agnos-init' | head -4 || true
+    fail=1
+fi
+for want in \
+    'STAT-/run/agnos/agents=dir 0755 0:0' \
+    'STAT-/run/agnos/plugins=dir 0755 0:0' \
+    'STAT-/run/user/1000=dir 0700 1000:1001' \
+    'STAT-/var/lib/agnos/agents=dir 0755 900:900' \
+    'STAT-/var/lib/agnos/models=dir 0755 901:901' \
+    'STAT-/var/log/agnos=dir 0750 0:0'; do
+    if echo "$RUNTIME_OUT" | grep -aqF "ST[kyb-agnos-dirs]-$want"; then
+        echo "  OK: agnos-init layout: $want"
+    else
+        echo "  FAIL: agnos-init layout: no $want"
+        echo "$RUNTIME_OUT" | grep -aF 'ST[kyb-agnos-dirs]' | head -8 || true
+        fail=1
+    fi
+done
 if echo "$RUNTIME_OUT" | grep -aqF "FAILED to start: kyb-ready-fail"; then
     echo "  OK: a service whose ready_check cannot pass is reported as failing to start"
 else

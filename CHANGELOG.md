@@ -7,6 +7,105 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.7.6] — 2026-09-23
+
+**`agnos-init`: the AGNOS directory layout, as a oneshot the kybernet package ships.**
+The first half of the roadmap item that replaces agnosticos's `agnos-init.sh`
+`setup_directories()`. The binary ships now; the argonaut change that makes the
+desktop compositor depend on it comes next (below). kybernet's own binaries are
+byte-identical to 1.7.5's. Suite 831 → **849** assertions (826 → **844** on aarch64).
+Harness 113 → **120** properties, aarch64 boot gate 167 → **174**.
+
+### Added — `agnos-init` (`src/agnos_init.cyr`, `src/lib/agnos_dirs.cyr`)
+
+`/run` is a fresh tmpfs on every boot, so nothing under it can ship in an image.
+aethersafha, which argonaut starts by default in `BOOT_DESKTOP`, binds sockets in
+`/run/agnos/agents` and `/run/agnos/plugins` and creates neither. Under systemd,
+`agnos-init.sh` made the AGNOS directories, and even it never made those two:
+`/run/agnos/plugins` was created nowhere in the tree.
+
+`agnos-init` makes this layout, sets each mode, and sets the owners it names:
+
+| directory | mode | owner |
+|---|---|---|
+| `/run/agnos`, `/run/agnos/agents`, `/run/agnos/plugins`, `/run/user` | 0755 | root |
+| `/run/user/1000` | 0700 | uid 1000, with its primary gid from `/etc/passwd` |
+| `/var/lib/agnos`, `…/cache`, `…/audit` | 0755 | root |
+| `/var/lib/agnos/agents` | 0755 | user `agnos` |
+| `/var/lib/agnos/models` | 0755 | user `agnos-llm` |
+| `/var/log/agnos` | 0750 | root |
+| `/var/log/agnos/audit`, `/etc/agnos` | 0755 | root |
+
+- **It is a separate program, run as a `type: oneshot` service.** It is never linked
+  into PID 1, and `main.cyr` does not include the module. It ships in the kybernet
+  package, which agnova already maps as the replacement for the old `agnos-init`
+  package. That also means the binary and argonaut's coming dependency on it always
+  arrive in the same package: a desktop cannot get the dependency without the
+  binary. It is installed at `/usr/lib/agnos/agnos-init`.
+- **Symlink-safe, and not recursive.** Every path component that exists must be a
+  real directory (`lstat`, never `stat`). An owner is set on the listed directory
+  only, with `AT_SYMLINK_NOFOLLOW`. The script's `chown -R` is deliberately not
+  reproduced: every boot it would walk trees that services own, following whatever
+  they had placed there.
+- **Fails closed on the layout, tolerant on owners.** A directory it cannot make, or
+  a file or symlink where a directory belongs, makes it exit 1, so kybernet skips
+  every service that depends on it. An owner it cannot set, because the user does
+  not exist yet, is reported and tolerated, as the script's `|| true` was.
+- **Reports to dmesg.** Under kybernet a service's stdout and stderr are `/dev/null`,
+  so each problem is written to `/dev/kmsg` as `agnos-init: …`.
+
+`CYRIUS_DCE=1 cyrius build src/agnos_init.cyr build/agnos-init` (x86_64 248,384 B;
+aarch64 2,034,024 B). CI builds both arches and checks each `e_machine`. `release.yml`
+publishes `agnos-init-<tag>-<arch>-linux` beside kybernet's binaries, under the same
+rule as kybernet's: both arches, and the aarch64 one dropped only with kybernet's.
+
+### Tests
+
+- **Unit, 18 assertions** (`test_agnos_dirs`), under a scratch root with its own
+  `/etc/passwd`. They cover:
+  - the name and uid lookups, including a malformed line;
+  - every directory's exact mode, and a drifted mode being put back;
+  - a second run as a no-op success;
+  - a symlink where a directory belongs, refused with its target left untouched;
+  - a regular file where a directory belongs, refused, then recovery once it is gone.
+- **Both harnesses, 7 properties each.** The image stages the real binary at
+  `/usr/lib/agnos/agnos-init` and an `/etc/passwd` mapping agnos 900, agnos-llm 901,
+  and user 1000 with **primary gid 1001**, so a gid read from passwd is
+  distinguishable from one assumed. `agnos-init` runs as a oneshot, and `kyb-agnos-dirs`,
+  which depends on it, `lstat`s the result from inside the guest with a new
+  `svc-fixture stat` mode: an observer, not the program's own report. The unit suite
+  runs unprivileged, so it cannot chown to another uid. That is proven here, as
+  root. Service counts: x86 23 → 25, aarch64 22 → 24.
+
+### Next — the dependency, in argonaut
+
+argonaut's `default_services(BOOT_DESKTOP)` hardcodes aethersafha's `depends_on`, and
+kybernet ignores a config service that collides with a built-in, so the dependency
+has to be added in argonaut. The argonaut change adds `agnos-init` to the desktop
+defaults and makes aethersafha depend on it. kybernet consumes it in the release after
+this one. zugot's `kybernet` recipe (still at 1.3.4) must install
+`/usr/lib/agnos/agnos-init` when it moves to 1.7.6 or later, or images will not have
+the binary the dependency names.
+
+### Verification
+
+| check | result |
+|---|---|
+| `cyrius test src/test.cyr` | **849 passed, 0 failed** |
+| `bash scripts/aarch64-exec-gate.sh` | **844** assertions, 0 failed; 5/5 syscall probes |
+| `bash qemu/boot-test.sh` (`HARNESS_STRICT=1`, KVM) | **120/120**, 0 failed, 0 skipped |
+| `bash qemu/boot-test-aarch64.sh` (TCG) | **174/174**, 0 failed |
+| inject into the unit suite: the walk follows symlinks (`stat`, not `lstat`) | red, 847 / 2: the symlink is not refused, and its target is chmod'd |
+| inject into both harnesses: owners never set | red on both arches, exactly the three owner properties (x86 117 OK / 3 FAIL, aarch64 171 / 3) |
+| `cyrius lint` / `fmt --check` over `src/`, now including `src/agnos_init.cyr`; `cyrius vet` on both programs | clean |
+| `bash scripts/verify-lock.sh`, `cyrius deps --verify` | OK; 76 verified, 0 failed; no dependency or lock change |
+| kybernet binaries | byte-identical to 1.7.5's (`main.cyr` does not include the new module) |
+| sibling-free reproduction | lock and all four binaries byte-identical |
+
+The bench gate was not run: kybernet's binaries are byte-identical to 1.7.5's.
+
+---
+
 ## [1.7.5] — 2026-09-23
 
 **Three service keys: `environment`, `env_files` and `ready_check`.** Each sets a

@@ -20,6 +20,9 @@
 #   orphan           fork a child that outlives this process, then exit 0
 #   status           report this process's own confinement, see below
 #   relay <file>     copy a status report from a file to the console
+#   stat <path>...   report each path as `STAT-<path>=<kind> <mode> <uid>:<gid>`, kind
+#                    dir, link, file, other or absent, from lstat so a symlink shows as
+#                    one. The observer for agnos-init's layout (1.7.6).
 #
 # EMERGENCY SHELL (1.7.3) — started AS /usr/bin/agnoshi, i.e. with that argv[0], this
 # is the shell kybernet's drop_to_emergency execs after a correct password. It
@@ -404,6 +407,66 @@ fn basename_is(path, name) {
     return streq(b, name);
 }
 
+var _NUMB[4];   # GLOBAL: 32 bytes of number scratch
+
+fn add_dec(v) {
+    var n = fmt_int_buf(v, &_NUMB);
+    store8(&_NUMB + n, 0);
+    return line_add(&_NUMB);
+}
+
+# Four octal digits, the way `stat -c %a` pads a mode.
+fn add_oct4(v) {
+    var d = 0;
+    while (d < 4) {
+        store8(&_NUMB + d, 48 + ((v >> ((3 - d) * 3)) & 7));
+        d = d + 1;
+    }
+    store8(&_NUMB + 4, 0);
+    return line_add(&_NUMB);
+}
+
+fn do_stat() {
+    if (open_sink() < 0) { return 3; }
+    var i = 2;
+    var p = argv_at(i);
+    while (p != 0) {
+        line_add("ST[");
+        line_add(_leaf);
+        line_add("]-STAT-");
+        line_add(p);
+        line_add("=");
+        var st[STAT_BUFSZ];
+        var r = sys_lstat(p, &st);
+        if (r != 0) {
+            line_add("absent");
+        } else {
+            var mode = load32(&st + STAT_MODE) & 0xFFFF;
+            var ft = mode & 0xF000;
+            if (ft == 0x4000) {
+                line_add("dir ");
+            } elif (ft == 0xA000) {
+                line_add("link ");
+            } elif (ft == 0x8000) {
+                line_add("file ");
+            } else {
+                line_add("other ");
+            }
+            add_oct4(mode & 4095);
+            line_add(" ");
+            add_dec(load32(&st + STAT_UID));
+            line_add(":");
+            add_dec(load32(&st + STAT_GID));
+        }
+        line_emit();
+        i = i + 1;
+        p = argv_at(i);
+    }
+    emit_kv("DONE", "1");
+    sys_close(_sink);
+    return 0;
+}
+
 # The child is reparented to PID 1 when this process exits, and kybernet has to
 # reap a process it never started (the reactor's "reaped orphans: N").
 fn do_orphan() {
@@ -430,6 +493,10 @@ fn main() {
     }
     if (streq(mode, "orphan") == 1) { return do_orphan(); }
     if (streq(mode, "status") == 1) { return do_status(); }
+    if (streq(mode, "stat") == 1) {
+        load_cgroup();
+        return do_stat();
+    }
     if (streq(mode, "relay") == 1) {
         var f = argv_at(2);
         if (f == 0) { return 3; }

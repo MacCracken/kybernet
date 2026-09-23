@@ -1,0 +1,304 @@
+# kybernet/agnos_dirs.cyr — the directory layout AGNOS services expect at boot. (1.7.6)
+#
+# WHY THIS EXISTS
+# ---------------
+# `/run` is a fresh tmpfs on every boot, so nothing under it can ship in an image.
+# aethersafha, which argonaut starts by default in BOOT_DESKTOP, binds sockets in
+# /run/agnos/agents and /run/agnos/plugins and creates neither. Under systemd,
+# agnosticos's `agnos-init.sh` made the AGNOS directories in `setup_directories()`,
+# and even that never made agents/ or plugins/: /run/agnos/plugins was created
+# nowhere in the tree. kybernet replaces systemd as PID 1, and its package replaces
+# the old agnos-init package, so the layout lives here.
+#
+# ⚠ NOT IN PID 1. This module is linked into build/agnos-init, a separate program
+# kybernet runs as a `type: oneshot` service (src/agnos_init.cyr). kybernet itself
+# never calls it: root-owned filesystem mutation inside the least recoverable
+# process on the machine is what the roadmap declined to build.
+#
+# ⚠ SYMLINK-SAFE, AND NOT RECURSIVE. Every path component that already exists must be
+# a real directory (lstat, never stat), and an owner is set on the listed directory
+# only, with AT_SYMLINK_NOFOLLOW. The script's `chown -R` is not reproduced: every
+# boot it would walk trees that services own, following whatever they had placed
+# there.
+#
+# A directory that cannot be made, or where something other than a directory sits,
+# is a FAILURE, and the program exits non-zero so kybernet skips the services that
+# depend on it. An owner that cannot be set (the user does not exist yet, or this is
+# not root) is reported and tolerated, as the script's `|| true` was.
+
+enum AgnosDirOwner {
+    AD_OWN_NONE = 0;    # created by root, ownership left alone
+    AD_OWN_USER = 1;    # the named user's uid and primary gid, from /etc/passwd
+    AD_OWN_UID = 2;     # a fixed uid, with that uid's primary gid (or the uid)
+}
+
+# S_IFMT / S_IFDIR from the kernel's stat.h. The stdlib has no constants for them.
+var AD_S_IFMT = 0xF000;
+var AD_S_IFDIR = 0x4000;
+
+# The layout, parents before children. Each entry: path, mode, owner kind, and the
+# user name (AD_OWN_USER) or uid (AD_OWN_UID).
+var _ad_paths = 0;
+var _ad_modes = 0;
+var _ad_kinds = 0;
+var _ad_whos = 0;
+
+fn _ad_add(path, mode, kind, who) {
+    vec_push(_ad_paths, path);
+    vec_push(_ad_modes, mode);
+    vec_push(_ad_kinds, kind);
+    vec_push(_ad_whos, who);
+    return 0;
+}
+
+fn agnos_dirs_layout_init() {
+    if (_ad_paths != 0) { return 0; }
+    _ad_paths = vec_new();
+    _ad_modes = vec_new();
+    _ad_kinds = vec_new();
+    _ad_whos = vec_new();
+    # Sockets. aethersafha: apps.cyr (agents), plugin_host.cyr (plugins).
+    _ad_add("/run/agnos", 493, AD_OWN_NONE, 0);                  # 0755
+    _ad_add("/run/agnos/agents", 493, AD_OWN_NONE, 0);
+    _ad_add("/run/agnos/plugins", 493, AD_OWN_NONE, 0);
+    # XDG_RUNTIME_DIR for the default interactive user, uid 1000.
+    _ad_add("/run/user", 493, AD_OWN_NONE, 0);
+    _ad_add("/run/user/1000", 448, AD_OWN_UID, 1000);            # 0700
+    # State and logs, as agnos-init.sh's setup_directories() made them.
+    _ad_add("/var/lib/agnos", 493, AD_OWN_NONE, 0);
+    _ad_add("/var/lib/agnos/agents", 493, AD_OWN_USER, "agnos");
+    _ad_add("/var/lib/agnos/models", 493, AD_OWN_USER, "agnos-llm");
+    _ad_add("/var/lib/agnos/cache", 493, AD_OWN_NONE, 0);
+    _ad_add("/var/lib/agnos/audit", 493, AD_OWN_NONE, 0);
+    _ad_add("/var/log/agnos", 488, AD_OWN_NONE, 0);              # 0750
+    _ad_add("/var/log/agnos/audit", 493, AD_OWN_NONE, 0);
+    _ad_add("/etc/agnos", 493, AD_OWN_NONE, 0);
+    return 0;
+}
+
+fn agnos_dirs_count() {
+    agnos_dirs_layout_init();
+    return vec_len(_ad_paths);
+}
+
+fn agnos_dirs_path(i) { return vec_get(_ad_paths, i); }
+fn agnos_dirs_mode(i) { return vec_get(_ad_modes, i); }
+
+# Where reports go. The program sends them to dmesg as well, because a service's
+# stdout and stderr are /dev/null under kybernet; the unit suite silences them.
+var _ad_log_fd = 2;
+var _ad_use_kmsg = 0;
+
+fn agnos_dirs_set_log(fd, use_kmsg) {
+    _ad_log_fd = fd;
+    _ad_use_kmsg = use_kmsg;
+    return 0;
+}
+
+var _AD_LINE[64];   # GLOBAL: 64 slots = 512 bytes, one report line
+var _ad_line_len = 0;
+
+fn _ad_add_text(s) {
+    var n = strlen(s);
+    if (_ad_line_len + n > 500) { n = 500 - _ad_line_len; }
+    if (n > 0) {
+        memcpy(&_AD_LINE + _ad_line_len, s, n);
+        _ad_line_len = _ad_line_len + n;
+    }
+    return 0;
+}
+
+fn _ad_report(what, path) {
+    _ad_line_len = 0;
+    _ad_add_text("agnos-init: ");
+    _ad_add_text(what);
+    _ad_add_text(path);
+    store8(&_AD_LINE + _ad_line_len, 10);
+    if (_ad_log_fd >= 0) { sys_write(_ad_log_fd, &_AD_LINE, _ad_line_len + 1); }
+    if (_ad_use_kmsg == 1) {
+        var fd = sys_open("/dev/kmsg", O_WRONLY | O_CLOEXEC, 0);
+        if (fd >= 0) {
+            sys_write(fd, &_AD_LINE, _ad_line_len);
+            sys_close(fd);
+        }
+    }
+    _ad_line_len = 0;
+    return 0;
+}
+
+# `root` + `path` as a new NUL-terminated string. `root` is "" in production and a
+# scratch directory in the unit suite.
+fn _ad_join(root, path) {
+    var rl = strlen(root);
+    var pl = strlen(path);
+    var out = alloc(rl + pl + 1);
+    if (out == 0) { return 0; }
+    memcpy(out, root, rl);
+    memcpy(out + rl, path, pl);
+    store8(out + rl + pl, 0);
+    return out;
+}
+
+# 1 when `p` exists and is a directory itself, not a symlink to one; 0 when it
+# does not exist; -1 when something else is there or it cannot be inspected.
+fn _ad_is_dir(p) {
+    var st[STAT_BUFSZ];
+    var r = sys_lstat(p, &st);
+    if (r == 0 - ENOENT) { return 0; }
+    if (r != 0) { return 0 - 1; }
+    if ((load32(&st + STAT_MODE) & AD_S_IFMT) == AD_S_IFDIR) { return 1; }
+    return 0 - 1;
+}
+
+# mkdir -p for `full`, checking only the components after the first `skip` bytes
+# (the root prefix, which the caller owns). Returns 0, or -1 with a report.
+fn _ad_make_path(full, skip) {
+    var n = strlen(full);
+    var i = skip + 1;
+    while (i <= n) {
+        if (i == n || load8(full + i) == 47) {
+            var saved = load8(full + i);
+            store8(full + i, 0);
+            var st = _ad_is_dir(full);
+            if (st == 0) {
+                var m = sys_mkdir(full, 493);
+                if (m != 0 && m != 0 - EEXIST) {
+                    _ad_report("cannot create ", full);
+                    store8(full + i, saved);
+                    return 0 - 1;
+                }
+                st = _ad_is_dir(full);
+            }
+            if (st != 1) {
+                _ad_report("not a directory (a file or a symlink is in the way): ", full);
+                store8(full + i, saved);
+                return 0 - 1;
+            }
+            store8(full + i, saved);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# /etc/passwd lookups. `name` != 0 matches the login name; otherwise `uid` matches
+# the uid field. On a match writes the uid to out[0] and the gid to out[8] and
+# returns 1; returns 0 when there is no such entry or no readable file.
+var _AD_PW[8192];   # GLOBAL: 8192 slots = 64 KiB of /etc/passwd
+
+fn _ad_field_num(p, e) {
+    var v = 0;
+    if (p >= e) { return 0 - 1; }
+    while (p < e) {
+        var c = load8(p) & 0xFF;
+        if (c < 48 || c > 57) { return 0 - 1; }
+        v = v * 10 + (c - 48);
+        if (v > 4294967295) { return 0 - 1; }
+        p = p + 1;
+    }
+    return v;
+}
+
+fn agnos_dirs_passwd_lookup(root, name, uid, out) {
+    var path = _ad_join(root, "/etc/passwd");
+    if (path == 0) { return 0; }
+    var n = file_read_all(path, &_AD_PW, 65535);
+    if (n <= 0) { return 0; }
+    var p = &_AD_PW;
+    var end = &_AD_PW + n;
+    while (p < end) {
+        var ls = p;
+        while (p < end && load8(p) != 10) { p = p + 1; }
+        var le = p;
+        p = p + 1;
+        # name:passwd:uid:gid:...  Field starts and ends, up to the gid.
+        var f = ls;
+        var fs0 = ls;
+        var fe0 = 0;
+        var fs2 = 0;
+        var fe2 = 0;
+        var fs3 = 0;
+        var fe3 = 0;
+        var k = 0;
+        while (f < le && k < 4) {
+            if (load8(f) == 58) {
+                if (k == 0) { fe0 = f; }
+                if (k == 1) { fs2 = f + 1; }
+                if (k == 2) {
+                    fe2 = f;
+                    fs3 = f + 1;
+                }
+                if (k == 3) { fe3 = f; }
+                k = k + 1;
+            }
+            f = f + 1;
+        }
+        if (k < 3) { continue; }
+        if (fe3 == 0) { fe3 = le; }
+        var hit = 0;
+        if (name != 0) {
+            var nl = strlen(name);
+            if (fe0 - fs0 == nl && memeq(fs0, name, nl) == 1) { hit = 1; }
+        } else {
+            if (_ad_field_num(fs2, fe2) == uid) { hit = 1; }
+        }
+        if (hit == 1) {
+            var u = _ad_field_num(fs2, fe2);
+            var g = _ad_field_num(fs3, fe3);
+            if (u < 0 || g < 0) { return 0; }
+            store64(out, u);
+            store64(out + 8, g);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+# Set the listed owner on `full`. Reports, never fails the run.
+fn _ad_own(root, full, kind, who) {
+    if (kind == AD_OWN_NONE) { return 0; }
+    var ids[16];
+    var found = 0;
+    if (kind == AD_OWN_USER) {
+        found = agnos_dirs_passwd_lookup(root, who, 0, &ids);
+        if (found == 0) {
+            _ad_report("no such user, owner left as is: ", who);
+            return 0;
+        }
+    } else {
+        store64(&ids, who);
+        store64(&ids + 8, who);
+        agnos_dirs_passwd_lookup(root, 0, who, &ids);
+    }
+    var r = sys_fchownat(AT_FDCWD, full, load64(&ids), load64(&ids + 8), AT_SYMLINK_NOFOLLOW);
+    if (r != 0) { _ad_report("could not set the owner of ", full); }
+    return 0;
+}
+
+# Make every directory in the layout under `root`, set each one's mode, and set the
+# owners the layout names. Returns the number of directories that could NOT be made
+# as listed: 0 is success.
+fn agnos_dirs_setup(root) {
+    agnos_dirs_layout_init();
+    var failed = 0;
+    var skip = strlen(root);
+    var n = vec_len(_ad_paths);
+    for (var i = 0; i < n; i = i + 1) {
+        var full = _ad_join(root, vec_get(_ad_paths, i));
+        if (full == 0) {
+            failed = failed + 1;
+        } elif (_ad_make_path(full, skip) != 0) {
+            failed = failed + 1;
+        } else {
+            # lstat said directory a moment ago, under parents only root can write,
+            # so chmod (which follows links) cannot be redirected here.
+            if (sys_chmod(full, vec_get(_ad_modes, i)) != 0) {
+                _ad_report("could not set the mode of ", full);
+                failed = failed + 1;
+            } else {
+                _ad_own(root, full, vec_get(_ad_kinds, i), vec_get(_ad_whos, i));
+            }
+        }
+    }
+    return failed;
+}

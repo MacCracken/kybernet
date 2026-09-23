@@ -1,0 +1,25 @@
+# agnos-init — make the directories AGNOS services expect at boot, then exit. (1.7.6)
+#
+# kybernet runs this as a `type: oneshot` service, before the services that need the
+# layout. It is a separate program, not PID 1 code. The layout and the reasons for
+# each choice are in src/lib/agnos_dirs.cyr, where the unit suite can reach them.
+#
+# Exits 0 when every directory is in place, and 1 when any could not be made, so the
+# services that depend on it are skipped rather than started without it. Reports go
+# to stderr and to dmesg, because under kybernet a service's stdout and stderr are
+# /dev/null.
+
+include "lib/thread_local.cyr"
+include "src/lib/agnos_dirs.cyr"
+
+fn main() {
+    alloc_init();
+    agnos_dirs_set_log(2, 1);
+    var failed = agnos_dirs_setup("");
+    if (failed != 0) {
+        _ad_report("the directory layout is INCOMPLETE; see the lines above", "");
+        return 1;
+    }
+    _ad_report("directory layout in place", "");
+    return 0;
+}

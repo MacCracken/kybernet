@@ -141,6 +141,19 @@ if [ -n "$newest" ]; then
     echo "       run: CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr build/kybernet-aarch64"
     exit 1
 fi
+# The same rule for agnos-init (1.7.6), which the kybernet package also ships and the
+# image runs as a oneshot from /usr/lib/agnos/agnos-init.
+AI_BIN="${PROJECT_DIR}/build/agnos-init-aarch64"
+ai_newest=""
+for f in "${PROJECT_DIR}"/src/*.cyr "${PROJECT_DIR}"/src/lib/*.cyr "${PROJECT_DIR}/cyrius.cyml"; do
+    [ -e "$f" ] || continue
+    [ -f "$AI_BIN" ] && [ "$f" -nt "$AI_BIN" ] && ai_newest="$f"
+done
+if [ ! -f "$AI_BIN" ] || [ -n "$ai_newest" ]; then
+    echo "ERROR: $AI_BIN is missing or STALE${ai_newest:+ (newer: ${ai_newest#$PROJECT_DIR/})}."
+    echo "       run: CYRIUS_DCE=1 cyrius build --aarch64 src/agnos_init.cyr build/agnos-init-aarch64"
+    exit 1
+fi
 
 # The edge and auth passes (1.7.3) FORMAT their dm-verity image with the host's real
 # veritysetup, and check the in-guest stand-in against it. Without it they cannot
@@ -240,6 +253,23 @@ done
 # The Landlock truncate probe's victim: outside the rule set, 16 known bytes.
 printf '0123456789abcdef' > "$ROOT/etc/kyb-landlock-victim"
 
+# agnos-init (1.7.6) at its production path, and the users it looks up. user 1000's
+# primary gid is 1001 so a gid read from passwd differs from one assumed from the uid.
+aim="$(od -An -tx1 -j18 -N2 "$AI_BIN" | tr -d ' \n')"
+if [ "$aim" != "b700" ]; then
+    echo "ERROR: $AI_BIN has e_machine=$aim, expected b700 (aarch64)"
+    exit 1
+fi
+mkdir -p "$ROOT/usr/lib/agnos"
+cp "$AI_BIN" "$ROOT/usr/lib/agnos/agnos-init"
+chmod 755 "$ROOT/usr/lib/agnos/agnos-init"
+cat > "$ROOT/etc/passwd" << 'PWEOF'
+root:x:0:0:root:/root:/bin/sh
+agnos:x:900:900:AGNOS Agent Runtime:/var/lib/agnos:/usr/sbin/nologin
+agnos-llm:x:901:901:AGNOS LLM Gateway:/var/lib/agnos/models:/usr/sbin/nologin
+user:x:1000:1001:AGNOS User:/home/user:/bin/sh
+PWEOF
+
 # ⚠ EVERY SERVICE BELOW IS ASSERTED ON. The roadmap item this closes said "do not
 # close this by adding services that do not assert anything", and a service with
 # no assertion is exactly that. Each mirrors the x86 fixture of the same name; the
@@ -317,7 +347,13 @@ cat > "$ROOT/etc/kybernet/config.json" << 'CFGEOF'
     { "name": "kyb-ready-fail", "binary": "/usr/bin/kyb-svc-fixture", "args": ["sleep", "30"],
       "type": "simple", "restart": "never",
       "ready_check": { "type": "tcp", "target": "127.0.0.1", "port": 9,
-                       "timeout_ms": 500, "retries": 2, "retry_delay_ms": 50 } }
+                       "timeout_ms": 500, "retries": 2, "retry_delay_ms": 50 } },
+    { "name": "agnos-init", "binary": "/usr/lib/agnos/agnos-init",
+      "type": "oneshot", "restart": "never" },
+    { "name": "kyb-agnos-dirs", "binary": "/usr/bin/kyb-svc-fixture",
+      "args": ["stat", "/run/agnos/agents", "/run/agnos/plugins", "/run/user/1000",
+               "/var/lib/agnos/agents", "/var/lib/agnos/models", "/var/log/agnos"],
+      "type": "oneshot", "restart": "never", "depends_on": ["agnos-init"] }
   ]
 }
 CFGEOF
@@ -760,14 +796,14 @@ fi
 # Each assertion mirrors the x86 harness's assertion of the same name. The reasoning
 # behind each one lives there; what is new here is that it RUNS on aarch64, where
 # the syscall numbers, the seccomp allowlist and the struct layouts differ.
-_prop "config: services parsed: 22" \
-    'kybernet: config: services parsed: 22([^0-9]|$)' "$OUT1"
+_prop "config: services parsed: 24" \
+    'kybernet: config: services parsed: 24([^0-9]|$)' "$OUT1"
 _prop "completed (oneshot): kyb-dep" 'completed \(oneshot\): kyb-dep' "$OUT1"
 _prop "completed (oneshot): kyb-svc, after its dependency" 'completed \(oneshot\): kyb-svc' "$OUT1"
 _prop "started: kyb-live" 'started: kyb-live' "$OUT1"
-# 21, not 22: kyb-prereq-dep is skipped, so no cgroup is ever made for it.
-_prop "removed service cgroups: 21 (every started service, torn down)" \
-    'kybernet: removed service cgroups: 21([^0-9]|$)' "$OUT1" 'removed service cgroups'
+# 23, not 24: kyb-prereq-dep is skipped, so no cgroup is ever made for it.
+_prop "removed service cgroups: 23 (every started service, torn down)" \
+    'kybernet: removed service cgroups: 23([^0-9]|$)' "$OUT1" 'removed service cgroups'
 
 # ⚠ THE LABEL IS THE PLACEMENT CHECK. svc-fixture labels its report with the leaf
 # of its OWN cgroup path, so a service whose child-side join failed (standing rule
@@ -820,6 +856,19 @@ _prop "an env file overrides environment (KYB_OVERRIDDEN)" \
     'ST\[kyb-env\]-ENV-KYB_OVERRIDDEN=from file' "$OUT1" 'ST\[kyb-env\]'
 _prop "a service whose ready_check passes is started" 'started: kyb-ready-ok' "$OUT1" 'kyb-ready'
 _prop "a service whose ready_check cannot pass is failed" 'FAILED to start: kyb-ready-fail' "$OUT1" 'kyb-ready'
+# agnos-init (1.7.6): the real binary as a oneshot, and an observer that depends on it
+# lstat()ing the result from inside the guest. Owners come from the staged passwd.
+_prop "agnos-init ran as a oneshot and exited 0" 'completed \(oneshot\): agnos-init' "$OUT1" 'agnos-init'
+_prop "agnos-init: /run/agnos/agents, 0755 root" \
+    'ST\[kyb-agnos-dirs\]-STAT-/run/agnos/agents=dir 0755 0:0' "$OUT1" 'ST\[kyb-agnos-dirs\]'
+_prop "agnos-init: /run/agnos/plugins, 0755 root" 'ST\[kyb-agnos-dirs\]-STAT-/run/agnos/plugins=dir 0755 0:0' "$OUT1"
+_prop "agnos-init: /run/user/1000, 0700, uid 1000 with passwd's gid 1001" \
+    'ST\[kyb-agnos-dirs\]-STAT-/run/user/1000=dir 0700 1000:1001' "$OUT1"
+_prop "agnos-init: /var/lib/agnos/agents owned by agnos (900)" \
+    'ST\[kyb-agnos-dirs\]-STAT-/var/lib/agnos/agents=dir 0755 900:900' "$OUT1"
+_prop "agnos-init: /var/lib/agnos/models owned by agnos-llm (901)" \
+    'ST\[kyb-agnos-dirs\]-STAT-/var/lib/agnos/models=dir 0755 901:901' "$OUT1"
+_prop "agnos-init: /var/log/agnos, 0750 root" 'ST\[kyb-agnos-dirs\]-STAT-/var/log/agnos=dir 0750 0:0' "$OUT1"
 _prop "a oneshot whose binary is missing fails to start" 'FAILED to start: kyb-prereq-fail' "$OUT1"
 _prop "its dependent is SKIPPED, with the blocker named" \
     'SKIPPED \(prerequisite failed\): kyb-prereq-dep' "$OUT1" 'prereq'

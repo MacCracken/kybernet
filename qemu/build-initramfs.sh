@@ -322,6 +322,24 @@ cp "$SVC_BIN" "${INITRAMFS_DIR}/usr/bin/kyb-svc-fixture"
 chmod +x "${INITRAMFS_DIR}/usr/bin/kyb-svc-fixture"
 echo "  staged kyb-svc-fixture (status / environment probe)"
 
+# agnos-init (1.7.6) at its production path. It is a PRODUCT binary, built by the
+# documented `CYRIUS_DCE=1 cyrius build src/agnos_init.cyr build/agnos-init`, which
+# boot-test.sh checks is not stale; this script only stages it, as it does kybernet.
+AI_BIN="${PROJECT_DIR}/build/agnos-init"
+[ -f "$AI_BIN" ] || { echo "  ERROR: $AI_BIN not found (build it first; see boot-test.sh)"; exit 1; }
+mkdir -p "${INITRAMFS_DIR}/usr/lib/agnos"
+cp "$AI_BIN" "${INITRAMFS_DIR}/usr/lib/agnos/agnos-init"
+chmod 755 "${INITRAMFS_DIR}/usr/lib/agnos/agnos-init"
+# The users agnos-init looks up. user 1000's primary gid is 1001 on purpose, so the
+# gate can tell a gid read from here from one assumed equal to the uid.
+cat > "${INITRAMFS_DIR}/etc/passwd" << 'PWEOF'
+root:x:0:0:root:/root:/bin/sh
+agnos:x:900:900:AGNOS Agent Runtime:/var/lib/agnos:/usr/sbin/nologin
+agnos-llm:x:901:901:AGNOS LLM Gateway:/var/lib/agnos/models:/usr/sbin/nologin
+user:x:1000:1001:AGNOS User:/home/user:/bin/sh
+PWEOF
+echo "  staged /usr/lib/agnos/agnos-init and /etc/passwd"
+
 # The truncate probe's victim: outside the fixture's Landlock rule set, with
 # 16 known bytes. If the sandbox governs TRUNCATE this file is untouched; if
 # it does not, the fixture zeroes it and says so. Staged as its own file so a
@@ -583,6 +601,23 @@ cat > "${INITRAMFS_DIR}/etc/kybernet/config.json" << 'CFGEOF'
       "restart": "never",
       "ready_check": { "type": "tcp", "target": "127.0.0.1", "port": 9,
                        "timeout_ms": 500, "retries": 2, "retry_delay_ms": 50 }
+    },
+    {
+      "name": "agnos-init",
+      "description": "the real agnos-init oneshot: the AGNOS directory layout (1.7.6)",
+      "binary": "/usr/lib/agnos/agnos-init",
+      "type": "oneshot",
+      "restart": "never"
+    },
+    {
+      "name": "kyb-agnos-dirs",
+      "description": "observer: lstat()s what agnos-init made, from inside the guest (1.7.6)",
+      "binary": "/usr/bin/kyb-svc-fixture",
+      "args": ["stat", "/run/agnos/agents", "/run/agnos/plugins", "/run/user/1000",
+               "/var/lib/agnos/agents", "/var/lib/agnos/models", "/var/log/agnos"],
+      "type": "oneshot",
+      "restart": "never",
+      "depends_on": ["agnos-init"]
     }
   ]
 }
