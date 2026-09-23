@@ -5,7 +5,7 @@ description = "PID 1 init system for AGNOS"
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/kybernet"
 language = "cyrius"
-cyrius = "6.6.2"
+cyrius = "6.6.6"
 
 [build]
 entry = "src/main.cyr"
@@ -27,6 +27,7 @@ stdlib = [
     "vec",
     "str",
     "syscalls",
+    "sys",
     "io",
     "fs",
     "process",
@@ -71,17 +72,17 @@ stdlib = [
 # dm-verity is deliberately not sourced from sigil; see CHANGELOG.md [1.4.0].
 [deps.sigil]
 git = "https://github.com/MacCracken/sigil.git"
-tag = "3.12.16"
+tag = "3.12.18"
 modules = ["dist/sigil-mldsa.cyr", "src/sha_ni.cyr", "src/sha256.cyr", "src/hex.cyr", "dist/sigil-tpm.cyr", "dist/sigil-argon2.cyr"]
 
 [deps.agnostik]
 git = "https://github.com/MacCracken/agnostik.git"
-tag = "1.6.1"
+tag = "1.6.3"
 modules = ["dist/agnostik.cyr"]
 
 [deps.libro]
 git = "https://github.com/MacCracken/libro.git"
-tag = "2.10.0"
+tag = "2.10.3"
 modules = ["dist/libro.cyr"]
 
 # argonaut ships no dist bundle, so imports stay selective. Order mirrors
@@ -90,7 +91,7 @@ modules = ["dist/libro.cyr"]
 # omitted — kybernet IS PID 1; that harness is argonaut's own test rig.
 [deps.argonaut]
 git = "https://github.com/MacCracken/argonaut.git"
-tag = "1.15.0"
+tag = "1.15.2"
 modules = [
     "src/syscall_compat.cyr",
     "src/types.cyr",

@@ -54,10 +54,9 @@ fn drop_privileges(uid, gid) {
     return Ok(0);
 }
 
-# Check if we're running as root
-fn is_root() {
-    return sys_geteuid() == 0;
-}
+# `is_root()` comes from the stdlib's lib/sys.cyr (effective uid == 0 on Linux),
+# declared in cyrius.cyml's stdlib list. kybernet carried an identical copy here
+# until 1.7.0, when sys.cyr entered the link and the two collided.
 
 # ================================================================
 # Capability drop via prctl

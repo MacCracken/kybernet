@@ -6,129 +6,75 @@
 
 ## Version
 
-**1.6.19** — `seccomp: basic` could not open a file on x86_64, and had not been
-able to since 1.6.0. Suite 739 → **747** assertions (742 on aarch64: the seccomp
-allowlist is arch-specific, so six assertions are x86-only and one is
-aarch64-only, and each gate now reads its own declared floor). Harness 72 →
-**79** properties. **No dep bumps**: sigil 3.12.13 / agnostik 1.5.1 / libro 2.9.0 /
-argonaut 1.14.0. **cyrius 6.5.35 → 6.5.36.**
+**1.7.0**: toolchain **6.6.2 → 6.6.6**, and every dependency at its latest tag (sigil
+3.12.18, agnostik 1.6.3, libro 2.10.3, argonaut 1.15.2). Suite 747 → **758** assertions
+(742 → **753** on aarch64). The x86_64 harness passed **79/79** under
+`HARNESS_STRICT=1`, and the aarch64 boot gate **18/18**.
 
-⚠ **The defect, and why it hid.** aarch64 is an `*at`-only architecture, so the
-stdlib's `sys_open()` compiles to `openat` there — allowed since 1.6.0. On
-x86_64 the *same wrapper* compiles to legacy `open` (nr 2), which was not on the
-list. So a confined service could not open a single file on x86_64. Under
-standing rule 28's deliberate `ERRNO(EPERM)` default it failed **silently**: the
-service ran to completion, did nothing, and kybernet logged
-`completed (oneshot)`. It survived six releases because the only fixture was a
-busybox `/bin/sh` one-liner and **glibc uses `openat`** — the profile had never
-been executed against the binary shape AGNOS actually ships, which is a static,
-libc-free Cyrius binary. Standing rules **47** and **48** are the generalisation.
+⚠ **The bump compiled clean, and that was not the finding.** Reading what 6.6.3–6.6.6
+changed turned up three things in kybernet, and all three are fixed:
 
-⚠ **An adversarial review of that fix then found a second hole in the same
-profile: a confined daemon could not SLEEP, on either arch.** `chrono.sleep_ms`
-is `syscall(7, 0, 0, ms)` and discards the result — `poll` on x86_64, and on
-aarch64 the ESYSXLAT ladder rewrites source-7 to `ppoll` (nr 73). Neither was
-allowed, so the call was a silent no-op and **every confined daemon's main loop
-busy-spun at 100% of a core**. sakshi's TSC calibration was worse: its 10 ms
-`nanosleep` window collapsed and `_sk_tsc_freq_hz` came back 2.5x–4.3x low and
-different every run, making every log timestamp and span duration in a confined
-service plausible-looking fiction. This one is a **widening**, so it carries its
-own rule — *add a syscall when the capability is already reachable through an
-allowed one* — and `epoll_wait` (allowed since 1.6.0) is a strictly more capable
-wait than either, so nothing new is granted. The harness asserts it by **elapsed
-time**, since a discarded return leaves no other observable.
+- **A reload could apply DEFAULT timeouts after a read error.** 6.6.6's `file_read_all`
+  returns a negative errno when a read fails part way, where it used to return the bytes
+  read so far. `load_config`'s `n <= 0` test moved that case from "present but unusable"
+  (standing rule 30: reload keeps the running config) to "absent", and on SIGHUP that path
+  applies the default `boot_timeout_ms` / `shutdown_timeout_ms` / `log_to_console` over
+  the live ones. Only **ENOENT** is absent now. The classification is `cfg_read_class` in
+  `svc_config.cyr`, unit-tested against the real `file_read_all`: a directory must read
+  as UNREADABLE, which pins 6.6.6's contract. Injecting the old `n <= 0` logic turns the
+  suite red with 5 failures.
+- **The Landlock fixture's truncate probe ran `recvfrom` on aarch64.** 6.6.5 added a
+  `45 → 207` row to the aarch64 x86-compat ladder, and the fixture's `#ifdef`-gated native
+  `SYS_TRUNCATE_NR = 45` became x86 `recvfrom`, confirmed by `qemu-aarch64 -strace`. So its
+  denial check was vacuous on aarch64. It uses `sys_truncate` now. Standing rule 1 gained
+  a clause: an `#ifdef`-gated native aarch64 number is not safe by construction either.
+- **`read_signal` warned on every build, 1.6.20's included.** That was the mixed-return
+  diagnostic misfiring on a nullary `None()`, verified correct on both arches. It returns
+  `Ok(signum)` / `Err(errno)` now, so a failed signalfd read carries its errno.
 
-The same review found three defects in this release's own gate: the initramfs
-staleness guard did not list the new fixture (**standing rule 43, reintroduced
-by the release that cites it** — now a glob), the EPERM assertion was an
-unanchored match that EACCES and EEXIST both satisfied, and two comments said
-`openat` where the binary issues `open`, in the file whose subject is that
-distinction. ⚠ The obvious fix for the second — a `$` anchor — was also wrong:
-`RUNTIME_OUT` is `cat -v | tr '\r' '\n'` and **`cat -v` runs first**, so every
-line ends in a literal `^M` and an end-of-line anchor fails on correct output.
-
-**The fix is four x86_64-only syscalls** — `open`, `stat`, `lstat`, `pipe` —
-added under a rule narrow enough to apply mechanically: *add only where the
-other arch's counterpart is already allowed*. Each is then a parity fix granting
-no new capability, and `mkdir`/`unlink`/`chmod`/`rename`/`readlink` fall out as
-excluded without a judgement call. Filesystem mutation stays denied, and the
-harness asserts that.
-
-**`qemu/seccomp-fixture.cyr`** is the new primary evidence: a Cyrius binary run
-as **two services** — `kyb-seccomp-on` under `basic` and `kyb-seccomp-off` with
-no security block. ⚠ The control arm is load-bearing: a denial-only assertion
-cannot tell a working filter from a broken environment. The gate asserts the
-denial, that the denial is specifically **EPERM**, that an on-list syscall still
-works, and that the unconfined arm performs the same operation successfully. The
-fixture labels its output with the seccomp mode it reads from its own
-`/proc/self/status` rather than an argv it was handed, and **exits non-zero if
-it cannot report** — silent success is precisely how this hid.
-
-Verified by injection: commenting out the single `seccomp_allow(b, BS_OPEN)`
-turns the harness red with four failures and exit 1.
-
-**Also added: the `restart_config` config key** (`max_restarts`,
-`base_delay_ms`, `max_delay_ms`), validated at load and **refused rather than
-clamped** per rule 25. ⚠ `environment` and `env_files` were implemented and then
-**withheld**: both would have parsed correctly and done nothing, because
-`fork_exec_service` builds envp from `build_default_envp()` and never reads
-`svc_def_env`. The seam is in argonaut 1.15.0 (unreleased); the keys land once
-it is tagged.
-
-**Unreleased dep work sitting ready to tag:** libro **2.10.0** (the canonical-JSON
-object emitter no longer allocates for ordinary documents — an empty `{}` cost
-608 bytes of vectors before a single key was parsed, paid per nesting level, per
-audit record) and argonaut **1.15.0** (`_append_service_env`,
-`svc_def_set_ready_check`, audit source/action caching).
-
-## cyrius 6.5.36 — the aarch64 boot blocker is gone (1.6.19)
-
-⚠ **1.6.13 CRITICAL-1 is closed upstream, with the fix this repo filed.** 6.5.36
-moves `SYS_PPOLL` 73 → **1073** and `SYS_SIGNALFD4` 74 → **1074** into the ≥1000
-private-alias band, ending the ESYSXLAT collision that made `sys_signalfd()`
-issue `fsync(-1)` and stopped the aarch64 binary booting at all.
-`AARCH64_KNOWN_BROKEN` is now **empty** — stricter than declaring the pair
-broken, since the gate fails if either regresses.
-
-⚠ **Verified against the RELEASED tarballs, not the local install**, because
-this box has patched copies of both 6.5.35 and 6.5.36 and neither is a
-reference.
-
-**And the binary now BOOTS.** `qemu/boot-test-aarch64.sh` (18 properties) runs
-`kybernet-aarch64` as PID 1 under TCG: phases 2/3/4/6/8/9, 6 cgroup controllers,
-config loaded, argonaut initialised, clean `reboot: Power down`, no panic — and
-the reactor wakes **21 times in 5 s, the identical count x86_64 reports**. It
-worked on the first attempt. ⚠ `phase 4: signals ready` is the gate's CRITICAL-1
-sentinel, verified by injecting `Err(EBADF)` into `setup_signals`.
-⚠ It boots with **no services** — the x86 fixtures exec busybox applets and an
-aarch64 busybox is a host capability rule 33 forbids assuming — so everything
-the x86 harness proves about services is still x86-only. That is the roadmap's
-next item, and the three Cyrius fixtures already cross-build.
-
-⚠ **The pack-wide 6.5.35 lockstep is retired.** kybernet is on 6.5.36 alone;
-argonaut 1.15.0 / libro 2.10.0 / agnostik 1.5.1 / sigil 3.12.13 remain 6.5.35,
-which is fine — a dep's pin governs only the dep's own CI, since kybernet
-compiles dep *source* with its own toolchain.
+⛔ **Found and NOT fixed: a refused `emergency.cred` falls back to the config key**,
+against 1.6.18's explicit promise that it would not. `emerg_load_cred_file_at` returns 0
+for both "absent" and "refused", and `load_config` falls back on any 0. The unit test
+asserts only the loader's 0, which is exactly the value that triggers the fallback. The
+fix changes authentication behaviour and needs its own harness fixture, so it is the first
+roadmap item rather than part of a toolchain bump.
 
 ## Toolchain
 
-**cyrius 6.5.36**, via `~/.cyrius/bin/cyrius` (`cyriusly use 6.5.36`). ⚠ kybernet
-moved alone — the pack-wide lockstep is retired and every other repo is still on
-6.5.35. A dep's pin governs only that dep's CI; kybernet compiles dep source
-with its own toolchain. Do not move any pin without being told to.
+**cyrius 6.6.6**, via `~/.cyrius/bin/cyrius` (`cyriusly use 6.6.6`). The user asked for
+it. The pack-wide lockstep is retired, so a dep's own pin governs only that dep's CI.
+**Do not move any pin without being told to.**
 
-`owl` reads `.cyr` files. **`cyim` is NOT installed here** despite sibling-repo references —
-use ordinary file edits.
+**Provenance was checked, not assumed.** The install carries `tree-matches-tag: yes`, and
+all **56** stdlib hashes in `cyrius.lock` match the files at the `6.6.6` tag on GitHub
+byte for byte. That matters more than it did: since 6.6.4 a stdlib file whose hash
+differs from the lock **aborts `cyrius build`**, so a locally patched `~/.cyrius/lib` now
+breaks the build itself, not just `verify-lock.sh` and the exec gate.
 
-⚠ **The aarch64 syscall mis-emission is FIXED and the declaration is now empty.**
-Filed upstream 2026-08-27 in the **cyrius** repo (not this one) as
-`<cyrius>/docs/development/issues/2026-08-27-aarch64-esysxlat-eats-native-signalfd4-and-ppoll.md`,
-with a runnable repro; **cyrius took the proposed fix** in 6.5.36 —
-the ≥1000 private-alias band (`SYS_PPOLL = 1073`, `SYS_SIGNALFD4 = 1074`), ending the
-collision with the `73 → 32` flock and `74 → 82` fsync rows. `AARCH64_KNOWN_BROKEN` is
-now **empty**, which is stricter than declaring the pair broken: the gate fails if
-either regresses. ⚠ Verified against the **released tarballs**, not this box — see
-"In flight" for why no local install is a reference.
+What else 6.6.x changed that kybernet can see:
+
+- The lock is **sorted** and ends with a `cyrius	6.6.6` record. `verify-lock.sh` keys on
+  `commit` lines and compares sorted, so it needed nothing.
+- **cyrlint** folds case and reads a deferral phrase across a whole comment paragraph,
+  but a tracking pointer still has to sit on a line the phrase touches. Two lines went red
+  and were fixed. One of them, in `cgroup.cyr`, was simply false: it said
+  `cglim_cpu_max` is never read, and it has been read since 1.6.17.
+- The aarch64 ladder grew (6.6.4, 6.6.5, 6.6.6). Every native literal in `src/` and
+  `qemu/` was re-verified **by execution**: capget 90, capset 91 and clock_gettime 113
+  pass through untranslated, `main()`'s `syscall(26, 0x30)` still lands on
+  `inotify_init1`, and the fixtures' `syscall(60)` is routed to `exit`.
+- ⚠ **qemu-user drops unknown flag bits.** `inotify_init1(0x30)` returned fd 3 under
+  `qemu-aarch64`. The kernel refuses it: -22 natively, same generic check, same flag
+  values. When qemu-user says yes to an argument the kernel should refuse, check it on a
+  real kernel before believing it.
+- The `CAP_*` conflicting-value warning is **blind** past about 1,024 globals. A probe
+  with 1,500 globals ahead of a conflicting redefinition printed nothing.
+  `test_capability_numbers_are_kernel` is the guard that counts.
+- `lib/process.cyr`'s new fork guard (PDEATHSIG and a ppid check) is **dead** in PID 1.
+  Services fork through argonaut's `fork_exec_service`.
+
+`owl` reads `.cyr` files. **`cyim` is NOT installed here** despite sibling-repo references.
+Use ordinary file edits.
 
 ## Dependencies
 
@@ -137,35 +83,42 @@ gitignored: **the contract is the lock file, not the bytes on disk.**
 
 | Dep | Tag | Commit | Shape |
 |---|---|---|---|
-| sigil | 3.12.13 | `6a422b1` | THIN surface — mldsa + sha_ni + sha256 + hex + tpm + argon2. **Never the monolith.** |
-| agnostik | 1.5.1 | `a09383a` | `dist/agnostik.cyr` full bundle |
-| libro | 2.9.0 | `ce5aa0c` | `dist/libro.cyr` full bundle |
-| argonaut | 1.14.0 | `25f39ba` | **12 selective modules**, no dist bundle |
-| patra | 1.13.10 | `490f8ff` | transitive via libro; kybernet calls no `patra_*` |
+| sigil | 3.12.18 | `eb6b922` | THIN surface: mldsa + sha_ni + sha256 + hex + tpm + argon2. **Never the monolith.** |
+| agnostik | 1.6.3 | `3729b55` | `dist/agnostik.cyr` full bundle |
+| libro | 2.10.3 | `c95f296` | `dist/libro.cyr` full bundle |
+| argonaut | 1.15.2 | `41c8948` | **12 selective modules**, no dist bundle |
+| patra | 1.14.3 | `b9d3cf8` | stdlib fold, and libro's pin (byte-identical); kybernet calls no `patra_*` |
 
-Unchanged at 1.6.19 — no dep bump. `cyrius deps --verify` → **70 verified, 0 failed**,
-5 commit pins, and the committed lock is gated by `scripts/verify-lock.sh` rather than
-by a verify that runs after the resolve rewrites it.
+`cyrius deps --verify`: **76 verified, 0 failed**, 5 commit pins. Every tag was confirmed
+on the remote, and each remote commit matches the local tag. The folded sakshi is 2.5.2.
 
-⚠ **libro 2.10.0 and argonaut 1.15.0 are RELEASED and not yet consumed.** They carry
-the whole of MEDIUM-10's fix plus the `svc_def_set_ready_check` and
-`_append_service_env` seams. Bumping both pins is the single highest-value next change,
-and it is a release in its own right — dep-then-consumer order, full gate run.
+⚠ **Every dep change was checked against the DCE list** (`CYRIUS_DCE_VERBOSE=1`), not
+against a reading of the call graph. agnostik 1.6.3's `_fill_random` exits 70 when
+`getrandom` fails, and it is **dead** in PID 1. libro 2.10.3's `uuid_v4` now calls
+`getrandom(…, 0)` and is **live**, since every audit record calls it. That is better than
+2.10.0's `/dev/urandom` open, which exited 74 without the device node, a panic in init.
+But it waits for the CRNG, and no gate has exercised that on a machine with no hardware
+RNG (roadmap).
+
+`refusing to overwrite stdlib leaf 'patra'` is structural and expected. 1.6.20 explained
+it as a stale libro pin, which was wrong: at 6.6.6 the pin and the fold are both 1.14.3
+and byte-identical, and the warning still fires.
 
 ## Binary
 
 | Arch | Bytes | `e_machine` |
 |---|---|---|
-| x86_64 (`CYRIUS_DCE=1`) | 1,543,280 | `0x3e` |
-| aarch64 | 2,034,504 | `0xb7` |
+| x86_64 (`CYRIUS_DCE=1`) | 704,776 | `0x3e` |
+| aarch64 | 2,166,736 | `0xb7` |
 
-Static data is 143,872 bytes. ⚠ The config read buffer is `alloc()`ed once and cached
-rather than living in BSS: the BSS version worked and grew static data by 16,392 bytes,
-which moved `is_mounted` 15–19% on the bench gate — **binary layout is a benchmark
-input**, which is why two benchmarks are reported-not-gated.
+The toolchain accounts for almost all of the change: the unchanged 1.6.20 source built
+under 6.6.6 is +512 B on x86_64 and **+66,048 B on aarch64**, where the ladder is emitted
+at every syscall site and DCE still NOP-fills. Static data is 144,320 bytes. The
+sibling-free reproduction produced byte-identical binaries on both arches and a
+byte-identical lock.
 
-⚠ **The aarch64 binary is no longer shipped on a cross-build exiting 0.** It BOOTS —
-`qemu/boot-test-aarch64.sh` runs it as PID 1. See Gate counts.
+⚠ Binary layout is a benchmark input. `strlen(52 chars)` moved +38% at this bump, and it
+is one of the two benchmarks declared layout-sensitive (reported, not gated).
 
 ## Gate counts
 
@@ -174,19 +127,18 @@ the build; that is standing rule 32.
 
 | Gate | Count | Enforcement |
 |---|---|---|
-| `cyrius test src/test.cyr` | **747** assertions | floor read from CLAUDE.md; a shrinking suite fails |
-| `bash scripts/aarch64-exec-gate.sh` | **742** assertions + 5 syscall probes | executes aarch64 under `qemu-user`; its own declared floor |
-| `bash qemu/boot-test-aarch64.sh` | **18** properties | **NEW at 1.6.19** — boots `kybernet-aarch64` as PID 1 (TCG) |
+| `cyrius test src/test.cyr` | **758** assertions | floor read from CLAUDE.md; a shrinking suite fails |
+| `bash scripts/aarch64-exec-gate.sh` | **753** assertions + 5 syscall probes | executes aarch64 under `qemu-user`; its own declared floor |
+| `bash qemu/boot-test-aarch64.sh` | **18** properties | boots `kybernet-aarch64` as PID 1 (TCG) |
 | `bash qemu/boot-test.sh` | **79** properties, 5 passes | `HARNESS_STRICT=1` in CI makes a skip a failure |
 | `bash scripts/verify-lock.sh` | 2 halves, 5 commit pins | the committed lock (HEAD's, not the working tree's) vs a fresh resolve |
-| `bash scripts/bench-history.sh` | **56** benchmarks (2 reported-not-gated) | ≥15% regression gate; a dropped benchmark must be declared `BENCH_REMOVED=n`; `LAYOUT_SENSITIVE` names the two exempt ones |
-| `cyrius lint` | 0 warnings, **0 untracked deferrals** | HARD GATE — both halves |
+| `bash scripts/bench-history.sh` | **56** benchmarks (2 reported-not-gated) | ≥15% regression gate; `LAYOUT_SENSITIVE` names the two exempt ones |
+| `cyrius lint` | 0 warnings, **0 untracked deferrals** | HARD GATE, both halves |
 | `cyrius fmt --check` | clean | non-mutating; never `diff <(cyrius fmt …)` |
 
-⚠ **747 and 742 are both correct and neither floor gates the other.** A seccomp
-allowlist is arch-specific, so six assertions are x86-only (`BS_OPEN`/`BS_STAT`/
-`BS_LSTAT`/`BS_PIPE`/`BS_POLL`/`BS_NANOSLEEP`) and one is aarch64-only (`BS_PPOLL`).
-Both floors are declared in CLAUDE.md, each gate reads its own, and they must be bumped
+⚠ **758 and 753 are both correct, and neither floor gates the other.** Six assertions are
+x86-only (`BS_OPEN`/`BS_STAT`/`BS_LSTAT`/`BS_PIPE`/`BS_POLL`/`BS_NANOSLEEP`) and one is
+aarch64-only (`BS_PPOLL`). Both floors are declared in CLAUDE.md and must be bumped
 together. **Do not pad the short arch to equalise them.**
 
 20 modules in `src/lib/`. 19 `kyb-*` harness fixtures. 5 `.cyr` files under `qemu/`.
@@ -194,62 +146,44 @@ together. **Do not pad the short arch to equalise them.**
 ## Verification posture
 
 The technique that has repeatedly worked here, and whose absence is what let defects ship:
-**inject the defect and watch the gate go red.** Used seven times at 1.6.19 alone:
-removing `BS_OPEN` (harness red, exit 1), denying `BS_POLL` (`SC[2]-SLEEP_MS=0` against
-the control arm's 50), dropping `BS_STAT` from the allowlist (unit suite red), forcing
-`setup_signals` to return `Err(EBADF)` (the aarch64 boot gate's CRITICAL-1 sentinel
-fires by name), staging an initramfs with no PID 1 in it (the empty-image guard), a
-stale `cyrius.cyml` (the rule-43 staleness guard), and flipping libro's inline sort
-comparator from `<=` to `<` — which failed **only** the new inline-vs-spill digest
-assertion while every pre-existing golden vector stayed green, which is the whole
-argument for that test existing.
+**inject the defect and watch the gate go red.** At 1.7.0: restoring `load_config`'s old
+`n <= 0` classification failed 5 of the new assertions (753 passed, 5 failed, exit 5).
+The Landlock fix was checked under `qemu-aarch64 -strace` before and after. The raw
+literal ran `recvfrom` and got EBADF; `sys_truncate` runs `truncate`.
 
-⚠ **The audit's own verification bar was weaker than 1.4.2's, and this is recorded so the
-findings are not over-trusted.** A candidate survived if fewer than two of its two
-skeptics refuted it, so a single refutation did not kill it. 1.4.2 refuted 13 of 39;
-this one refuted 0 of 37, which is a property of the threshold rather than evidence that
-every candidate was airtight. **Ten findings were re-verified by hand** — including both
-CRITICALs, each reproduced by execution — and are marked in the report. ⚠ **Set a
-stricter bar on the next sweep**: a 100% survival rate is a finding about the method,
-not about the code.
+⚠ **"Does PID 1 reach this?" is answerable, and it should be answered by lookup.**
+`CYRIUS_DCE=1 CYRIUS_DCE_VERBOSE=1 cyrius build` lists every eliminated function. At
+1.7.0 that list settled four dep-change questions in minutes, and it caught one stale
+claim: CLAUDE.md said edge boot calls `tpm_read_pcr`, which has been dead since 1.6.16
+moved the read onto `tpm_read_pcr_timeout`.
+
+⚠ **The 2026-08-26 audit's verification bar was weaker than 1.4.2's**, and that is
+recorded so its findings are not over-trusted. A candidate survived unless both of its two
+skeptics refuted it. 1.4.2 refuted 13 of 39, and this audit refuted 0 of 37. **Set a
+stricter bar on the next sweep.**
 
 ## In flight
 
-**v1.6.19 is tagged but NOT released** — the tag exists, the GitHub release does not,
-because the workflow failed on the aarch64 suite-count gate. ⚠ Per this project's
-practice a failed tag **keeps its version number**: fix in place under 1.6.19, never
-invent a follow-up patch release. The fixes are in; the user re-tags.
-
-⚠ **The cyrius pin moved to 6.5.36, kybernet alone.** The pack-wide lockstep is retired
-(the user's call). argonaut / libro / agnostik / sigil stay on 6.5.35, which is fine — a
-dep's pin governs only that dep's CI, since kybernet compiles dep *source* with its own
-toolchain. **Do not move any pin without being told to.**
-
-⚠ **`~/.cyrius/lib` and every `~/.cyrius/versions/*/lib` on the dev box carry in-place
-patches**, so `cyrius --version` says nothing about the stdlib behind it and no local
-install is a reference. Verify toolchain claims against the RELEASED tarballs
-(`raw.githubusercontent.com/MacCracken/cyrius/<tag>/lib/...`).
+**v1.7.0 is ready and untagged.** Every dep tag it pins already exists on the remote, so
+nothing upstream has to be released first. `git show HEAD:cyrius.lock` is still 1.6.20's,
+so `verify-lock.sh` will fail half 1 **until the new lock is committed**. That is correct:
+it checks what CI checks out. It passes against a committed snapshot of this tree.
 
 ## Next
 
-**11 open items.** In the order I would take them:
+In the order I would take them. The full list is [roadmap.md](roadmap.md), with 15 open
+items.
 
-1. **Bump libro 2.9.0 → 2.10.0 and argonaut 1.14.0 → 1.15.0.** Both are released. This
-   closes MEDIUM-10 outright and unblocks `ready_check` / `environment` / `env_files`.
-   Highest value per unit of risk, and it is a release in its own right.
-2. **aarch64 fixture parity.** The boot gate runs with **no services**, so everything
-   the x86 harness proves *about services* — cgroup placement and limits, `kyb_pre_exec`,
-   seccomp, Landlock, capabilities, uid/gid drop, health checks, watchdog, restart
-   backoff, sd_notify, prerequisite blocking — is still x86-only. The three Cyrius
-   fixtures already cross-build; that is the path. Do not close it by adding services
-   that assert nothing.
-3. **Port `agnos-init.sh`'s `setup_directories()` to a oneshot.** ⚠ Verify the ordering
-   hazard first: now that a failed prerequisite blocks its dependents, adding the dep
-   before agnosticos ships the binary turns a working desktop boot into a non-booting
-   one. Binary first, then the dep.
-4. **Give the AGNOS default services a non-root uid.** Strictly downstream of (3) — a
-   service with a uid needs its runtime directories to exist *and* be owned by it, and
-   nothing currently creates `/run/agnos/{agents,plugins}` at all.
+1. **Fix the `emergency.cred` fallback, with a rule-27 fixture.** It is security-relevant,
+   a promise the code does not keep, and the one open item this release found.
+2. **aarch64 fixture parity.** The boot gate still runs with **no services**. The Cyrius
+   fixtures already cross-build. It is also now the only way to test the fixed Landlock
+   probe on aarch64 and an entropy-starved first audit record.
+3. **`ready_check` / `environment` / `env_files` config keys.** These have been unblocked
+   since 1.6.20 consumed argonaut 1.15.0. Check that something downstream reads each field
+   before adding its key.
+4. **Port `agnos-init.sh`'s `setup_directories()` to a oneshot.** ⚠ Ship the binary before
+   adding the dependency, or a working desktop boot becomes a non-booting one.
 
 ## Release order (cross-repo)
 

@@ -12,11 +12,17 @@ struct ReapedProcess { pid; exit_code; }
 # ⚠ NEVER MUTATE THE RETURNED VEC. Every idle reap hands back this same
 # object; a vec_push into it would be visible to every later caller. Callers
 # only ever read it (vec_len / vec_get), which is what makes sharing safe.
-var _reap_empty = 0;
+#
+# The `_kyb_` prefix is deliberate (1.7.0): these were `_reap_empty` /
+# `_reap_empty_vec`, the same names argonaut's process_mgmt uses for the same
+# idea, so both repos' definitions shared one link and "last definition wins"
+# decided whose ran. The bodies were identical, so nothing broke; the build
+# warned about it on every compile.
+var _kyb_reap_empty = 0;
 
-fn _reap_empty_vec() {
-    if (_reap_empty == 0) { _reap_empty = vec_new(); }
-    return _reap_empty;
+fn _kyb_reap_empty_vec() {
+    if (_kyb_reap_empty == 0) { _kyb_reap_empty = vec_new(); }
+    return _kyb_reap_empty;
 }
 
 # Reap all zombie children (non-blocking).
@@ -64,7 +70,7 @@ fn reap_zombies() {
         store64(rp + 8, code);
         vec_push(results, rp);
     }
-    if (results == 0) { return _reap_empty_vec(); }
+    if (results == 0) { return _kyb_reap_empty_vec(); }
     return results;
 }
 

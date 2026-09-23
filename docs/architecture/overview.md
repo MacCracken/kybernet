@@ -22,15 +22,15 @@ Service management library: argonaut (952 assertions across 33 suites)
 ```
 
 ⚠ **This is a source-level split, not a process or isolation boundary.**
-argonaut is 13 modules compiled directly into kybernet's single static binary —
+argonaut is 12 modules compiled directly into kybernet's single static binary —
 there is no separate process, no shared object, no runtime loading. A bug in
 argonaut's service management *can* panic PID 1, and several have come close:
 the 1.5.6 aarch64 syscall repairs and the 1.5.7 fail-open exec fix were both
 argonaut-side defects reachable from kybernet's boot path.
 
 What the split actually buys is that the service-management logic is
-independently tested (952 assertions in argonaut's own suite, against
-kybernet's 747) and independently versioned, so a change there is reviewed and
+independently tested (971 assertions in argonaut's own suite at 1.15.2, against
+kybernet's 758) and independently versioned, so a change there is reviewed and
 gated on its own before kybernet pins the tag. That is real value — it is just
 not fault isolation.
 
@@ -93,12 +93,13 @@ All under `src/lib/`, included by `src/main.cyr`.
 Resolved by `cyrius deps` from `cyrius.cyml` and sha256-pinned in `cyrius.lock`;
 `lib/` is gitignored, so the contract is the lock file rather than the bytes on disk.
 
-- **argonaut 1.13.2** — service lifecycle, boot sequencing, health checks, crash
-  recovery, audit. Imported as **13 selective modules**, not a dist bundle.
-- **agnostik 1.5.1** — shared AGNOS types (`security_context`, `capability_set`,
+- **argonaut 1.15.2** — service lifecycle, boot sequencing, health checks, crash
+  recovery, audit. Imported as **12 selective modules**, not a dist bundle
+  (`src/tmpfiles.cyr` was dropped at 1.6.2: it had no call site in the link set).
+- **agnostik 1.6.3** — shared AGNOS types (`security_context`, `capability_set`,
   `cgroup_limits`, `agent_config`)
-- **libro 2.8.12** — cryptographic audit logging (SHA-256 hash-linked chain)
-- **sigil 3.12.10** — a deliberately **thin** surface: ML-DSA, SHA-256, hex, the TPM
+- **libro 2.10.3** — cryptographic audit logging (SHA-256 hash-linked chain)
+- **sigil 3.12.18** — a deliberately **thin** surface: ML-DSA, SHA-256, hex, the TPM
   profile, and (1.5.9) Argon2id. Never the monolith, whose x509/RSA banks add `.bss`
   that DCE cannot strip. The Argon2 profile had the same problem until 3.12.10 moved
   its 352 KB working lane onto the caller's arena — see CHANGELOG [1.5.9].

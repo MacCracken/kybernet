@@ -7,6 +7,284 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.7.0] — 2026-09-22
+
+**Toolchain 6.6.2 → 6.6.6, and every dependency at its latest tag.** The bump
+compiled clean. Reading what the new toolchain changed, and what it now warns
+about, found one regression it introduced into the config-reload path, one
+aarch64 fixture it silently broke, and a compiler warning on the PID-1 signal
+path that 1.6.20 shipped without explaining. Suite 747 → **758** assertions
+(742 → **753** on aarch64). The x86_64 harness passed **79/79** under
+`HARNESS_STRICT=1` and the aarch64 boot gate **18/18**.
+
+### Changed — toolchain pin 6.6.2 → **6.6.6**
+
+`cyrius.cyml`'s pin, re-resolved from an empty `lib/`. `cyrius.lock` grows from 73
+to **76** hashed files and keeps 5 commit pins. The new leaves are `lib/sys.cyr`,
+from libro 2.10.2's sidecar and now also declared by kybernet (see below), and
+`lib/alloc_cx.cyr` / `lib/args_agnos.cyr`, which are 6.6.x stdlib peers. The lock
+is now sorted and ends with a `cyrius	6.6.6` record, both formats from 6.6.3/6.6.4.
+`scripts/verify-lock.sh` keys on `commit` lines and compares sorted, so it
+needed no change.
+
+Binary size, with the toolchain's share measured by building the **unchanged
+1.6.20 source** under 6.6.6:
+
+| | 1.6.20 on 6.6.2 | 1.6.20 on 6.6.6 | 1.7.0 on 6.6.6 |
+|---|---:|---:|---:|
+| x86_64 (`CYRIUS_DCE=1`) | 704,008 | 704,520 (+512) | **704,776** (+256) |
+| aarch64 | 2,100,424 | 2,166,472 (+66,048) | **2,166,736** (+264) |
+
+The aarch64 growth is the toolchain's. 6.6.5 extended the x86-compat syscall
+translation ladder, which is emitted at every syscall site, and aarch64 DCE
+still NOP-fills rather than removing code. The dep bumps and this release's
+source changes cost 256 and 264 bytes.
+
+### Changed — dependency pins
+
+| dep | from | to |
+|---|---|---|
+| `sigil` | 3.12.16 | **3.12.18** |
+| `agnostik` | 1.6.1 | **1.6.3** |
+| `libro` | 2.10.0 | **2.10.3** |
+| `argonaut` | 1.15.0 | **1.15.2** |
+| `patra` (stdlib fold; libro's pin) | 1.14.1 (libro pinned 1.13.10) | **1.14.3** (both) |
+| `sakshi` (stdlib fold) | 2.5.1 | **2.5.2** |
+
+Every tag was confirmed on the remote before it was pinned, and each remote
+tag's commit matches the local one.
+
+⚠ **What reaches PID 1 was checked against the DCE list, not assumed.**
+`CYRIUS_DCE_VERBOSE=1` names every function the production build eliminates, so
+"kybernet calls this" is a lookup rather than a reading of the call graph:
+
+- **agnostik 1.6.2 / 1.6.3.** `_fill_random` now calls only `sys_getrandom`, and
+  1.6.3 removed its `/dev/urandom` fallback, so a failed `getrandom` **exits 70**.
+  In PID 1 that would be a panic. It cannot happen: `_fill_random` and
+  `agent_id_new` are both **dead** in the production binary.
+- **libro 2.10.3.** `uuid_v4` now takes its bytes from `random_bytes`, which is
+  `getrandom(buf, 16, 0)`, where it used to open and read `/dev/urandom`. This one
+  **is live**: argonaut writes an audit record on every service start, stop and
+  readiness change, and each record calls `uuid_v4`. For PID 1 it is a net gain.
+  2.10.0 exits 74 when the device cannot be opened, which in init is a panic,
+  and `getrandom` needs no device node. The cost is inherited: `getrandom(…, 0)`
+  **waits for the kernel CRNG to be seeded**. kybernet's own
+  `emergency_auth.cyr` already refuses to draw entropy at phase 6c for exactly
+  that reason. The first audit record is written in phase 8. A modern kernel has
+  seeded by then, or seeds within about a second once something waits. **No gate
+  exercises an entropy-starved first record**, because the x86_64 guest has
+  RDRAND through `-cpu host` and the aarch64 boot runs no services. That is
+  recorded on the roadmap under aarch64 fixture parity.
+- **sigil 3.12.17 / 3.12.18.** The two fixes, `agnosys_uname` on aarch64 and
+  `luks_write_keyfile`'s per-arch `O_NOFOLLOW`, are in code kybernet's thin
+  surface does not link.
+- **argonaut 1.15.1 / 1.15.2.** No change to any of the twelve imported modules
+  beyond comments in `src/audit.cyr`. The head hash `audit_log_record` returns
+  now has a lifetime (it lives in libro's two-slot scratch), but kybernet makes
+  no direct `audit_*` call.
+- **patra 1.14.3.** Its aarch64 `O_NOFOLLOW` fix is reachable only with
+  `audit_persist`, which kybernet never enables. **sakshi 2.5.2** has no source
+  change.
+- **cyrius 6.6.6's `lib/process.cyr` fork guard** (`PR_SET_PDEATHSIG` and a ppid
+  check in every child it forks) does not touch PID 1: `_proc_child_guard` is
+  dead. Services are forked by argonaut's `fork_exec_service`, and the PCR read by
+  sigil's `agnosys_run_capture_timeout`. Neither forks through `lib/process.cyr`.
+
+### Fixed — a SIGHUP could apply the DEFAULT timeouts after a read error
+
+cyrius 6.6.6 changed `file_read_all` so that a read which fails part way returns
+a negative errno. It used to return the bytes read so far. `load_config` tested
+`n <= 0` for "no config found, using defaults".
+
+Under 6.6.2 a read that died half way handed back a prefix. The prefix failed to
+parse and took standing rule 30's "present but unusable" path: `load_config`
+returns 0, boot says so loudly and uses defaults, and a reload **keeps the
+running config**. Under 6.6.6 the same failure is negative and took the "absent"
+path. On a reload that path applies the default `boot_timeout_ms`,
+`shutdown_timeout_ms` and `log_to_console` over the live values. That is rule
+30's failure in a smaller form.
+
+⚠ **The `n <= 0` test was already wrong before the bump.** An open that failed
+for any reason other than ENOENT (EACCES, ELOOP, ENOTDIR), a first read that
+failed (EISDIR, EIO), and an empty file all read as "no config found". Only
+**ENOENT** means absent now. Any other errno, and an empty file, is "present but
+unusable". An empty file is not valid JSON, and a truncated file is what an edit
+in progress looks like to a SIGHUP. Boot is unaffected in substance, since it
+takes defaults either way, but now it says why.
+
+The classification moved out of `main.cyr` into `cfg_read_class`
+(`src/lib/svc_config.cyr`), because the unit suite cannot reach `main.cyr`
+(standing rule 34). Ten new assertions cover it. Three of them feed the
+classifier what `file_read_all` **actually returns** (standing rule 46): a
+missing path, `/tmp` (a directory, so EISDIR), and an empty file. If the stdlib
+ever goes back to reporting a failed read as end-of-file, the directory case
+fails in the suite rather than on a board.
+
+### Fixed — the Landlock fixture's truncate probe ran `recvfrom` on aarch64
+
+`qemu/landlock-fixture.cyr` issued `syscall(SYS_TRUNCATE_NR)` with 76 on x86_64
+and **45** on aarch64. cyrius 6.6.5 added a `45 → 207` row to the aarch64
+x86-compat translation ladder, because x86 45 is `recvfrom`. So the aarch64 arm
+stopped issuing `truncate` at all. Measured under `qemu-aarch64 -strace`:
+
+```
+recvfrom(6293972,NULL,5,MSG_DONTROUTE|MSG_EOR|MSG_TRUNC|MSG_WAITALL,NULL,NULL) = -1 errno=9 (Bad file descriptor)
+truncate("/tmp/claude-1000/kyb-trunc-probe.txt",0) = 0
+```
+
+The first line is the fixture's literal, the second is the stdlib's
+`sys_truncate`. `LL-TRUNCATE=DENIED` would have printed on aarch64 whether
+Landlock denied the call or not. It is latent today, since the aarch64 boot gate
+runs no services, and it would have made the first aarch64 fixture-parity run
+report Landlock's truncate denial as proven when it was not. The probe now calls
+`sys_truncate`, which spells `SYS_TRUNCATE` per peer: 76 on both arches, routed to
+45 on aarch64. Confirmed by the same strace.
+
+⚠ **This is standing rule 1 arriving from the other side.** The literal was
+correct under 6.6.2 and wrong under 6.6.5, and not one character of it changed.
+The ladder grows between releases, and it can claim an aarch64-native number as
+an x86 source. Every other native literal in `src/` and `qemu/` was re-checked by
+execution under 6.6.6: capget 90, capset 91 and clock_gettime 113 still pass
+through untranslated, `syscall(26, 0x30)` in `main()` still lands on
+`inotify_init1`, and `syscall(60)` is routed to `exit`.
+
+⚠ **qemu-user is not a faithful oracle for flag validation.**
+`inotify_init1(0x30)` returned **fd 3** under `qemu-aarch64`, which would mean
+`main()`'s checkpoint leaks an inotify fd on every aarch64 boot. It does not.
+qemu-user maps the flags through a table and silently drops the bits it does not
+know. The kernel's own check, run natively on the x86_64 host (the same generic
+code and the same flag values), returns **-22**. The comment in `main()` is
+right. Treat a qemu-user success on an argument the kernel is meant to refuse as
+a question, not an answer.
+
+### Fixed — `read_signal` returned a warning on every build, including 1.6.20's
+
+```
+warning:src/lib/signals.cyr:55:5: `read_signal` returns a `: stack` pair on another path
+but a SINGLE value here — the tag is dropped, so the caller reads this error as its TAG.
+```
+
+1.6.20 shipped with this warning and did not explain it. The function returned
+`Some(signum)` on one path and `None()` on the other. That is legal: a nullary
+variant returns its tag alone, as `lib/tagged.cyr` and the language guide both
+state. A probe returning `Some(x)` / `None()` from one function read tag 0 on the
+None path and the right payload on the Some paths, on x86_64 and under
+`qemu-aarch64`. So the diagnostic was a **false positive**. It cannot tell a
+nullary constructor from a dropped error tag.
+
+A warning that fires on every build is a warning nobody reads, though, and this
+one sits on the PID-1 signal path and names exactly the defect the 1.6.20
+migration was about. `read_signal` now returns `Ok(signum)` or `Err(errno)`.
+Both variants carry a payload, so the function is uniformly pair-returning, and a
+failed signalfd read now says why (EAGAIN, EBADF) instead of looking like "no
+signal". It has two call sites, the reactor's signalfd arm (token 1) and one test,
+and both changed from `is_some` to `is_ok`. A new assertion pins that
+`read_signal(-1)` carries EBADF. The misfire belongs to cyrius's diagnostic, not
+to kybernet, and is noted on the roadmap for upstream.
+
+### Changed — two duplicate-symbol warnings removed
+
+- **`is_root`** collided with the stdlib's new `lib/sys.cyr`, which reaches the
+  link through libro 2.10.2's sidecar. The two bodies are equivalent on Linux
+  (effective uid == 0), and kybernet's copy had no production caller, only the
+  suite and the bench. kybernet's copy is deleted and `sys` is declared in its
+  own stdlib list, so the definition no longer depends on another package's
+  sidecar. The lock is unchanged by the declaration.
+- **`_reap_empty_vec`** is now `_kyb_reap_empty_vec`. kybernet's reaper had
+  borrowed the exact name, and global, that argonaut's `process_mgmt` uses for
+  the same memoised empty vec. The two bodies were identical, so "last
+  definition wins" did no harm.
+
+**Still reported, and benign:** seven `crypto_scratch` functions duplicated
+byte-for-byte between sigil's mldsa and argon2 profiles, as before; `_hex_nibble`,
+duplicated between agnostik and sigil's `hex.cyr`, with identical semantics (0-9,
+a-f and A-F to their values, anything else to -1) and agnostik's to rename; and
+`refusing to overwrite stdlib leaf 'patra'`. ⚠ **1.6.20 explained that last one
+wrongly**, as libro pinning a stale patra. The warning is structural. kybernet
+declares `patra` as a stdlib fold leaf and libro depends on the package, and
+cyrius keeps the fold, which is what CLAUDE.md asks for. At 6.6.6 libro's pin and
+the fold are both 1.14.3 and `cmp` finds the two files **byte-identical**, and
+the warning still fires.
+
+### Fixed — two comments the 6.6.6 linter flagged
+
+cyrlint now folds case and reads a deferral phrase across a whole comment
+paragraph, so two lines went red on the CI hard gate:
+
+- `src/lib/cgroup.cyr`: "cglim_cpu_max is consequently never read. Deferred with
+  the config key". This was **false**. `cgroup_apply_limits` has read
+  `cglim_cpu_max` and written `cpu.max` since 1.6.17. The two lines are gone, and
+  the write-order list in the same comment now ends with `cpu.max`.
+- `src/test.cyr`: "Not yet started" was test prose, not a deferral. It was reworded
+  rather than suppressed with `#skip-lint`.
+
+The lint step's own comment in `ci.yml` said "the matcher is per-line". It now
+says the phrase is matched across a comment paragraph and the pointer must sit on
+a line the phrase touches.
+
+### Known — found during this bump, NOT fixed here
+
+⚠ **A refused `emergency.cred` falls back to the config key, and 1.6.18 promised
+it would not.** The 1.6.18 entry states that a group- or world-readable
+credential file "is REFUSED, **not fallen back from**". The loader's header and
+`test_emerg_cred_file` say the same. But `emerg_load_cred_file_at` returns 0 both
+for "absent" and for "refused", and `load_config` falls back to
+`emergency_password_hash` whenever it sees 0. So a 0644 credential file, which
+is logged as refused, hands the prompt to whatever record `config.json` holds.
+The unit test asserts only the loader's 0, which is exactly the value that
+triggers the fallback. It is structurally unable to see this, the same shape
+standing rule 34 records for `test_reload_config_is_narrow`. 6.6.6's
+`file_read_all` change adds one more route in, since an unreadable credential
+file also returns 0. Not fixed in this release, because the fix changes
+authentication behaviour and needs its own harness fixture (standing rule 27).
+It is the first item on the roadmap.
+
+### Verification
+
+| gate | result |
+|---|---|
+| `rm -rf lib && cyrius deps && cyrius deps --verify` | 76 verified, 0 failed; 5 commit pins |
+| `CYRIUS_DCE=1 cyrius build` (x86_64) | 704,776 B, `e_machine` 0x3e |
+| `cyrius build --aarch64` | 2,166,736 B, `e_machine` 0xb7 |
+| `cyrius test src/test.cyr` | **758 passed, 0 failed** |
+| `bash scripts/aarch64-exec-gate.sh` | **753** assertions, 0 failed; 5/5 syscall probes; declared-broken `[]` |
+| `bash qemu/boot-test.sh` (`HARNESS_STRICT=1`, KVM) | **79/79**; kybernet span 333 ms (budget 1200); reactor 24 wakeups |
+| `bash qemu/boot-test-aarch64.sh` (TCG) | **18/18**; kybernet span 1037 ms (budget 4000); reactor 23 wakeups |
+| `bash scripts/bench-history.sh` | 56 benchmarks, **0 regressions ≥15%**, 7 improvements |
+| fmt `--check` / lint / vet over CI's globs | clean; 0 warnings, 0 untracked deferrals |
+| CI security scan, replayed verbatim | clean |
+| `bash scripts/verify-lock.sh`, run against a committed snapshot of this tree | both halves OK; 4 declared deps, 5 commit pins |
+| sibling-free reproduction (no `../<dep>` checkouts, fresh `lib/`) | lock and **both binaries byte-identical** |
+| stdlib hashes in `cyrius.lock` vs the `6.6.6` tag on GitHub | **56/56** match |
+| inject the old `n <= 0` classification into `cfg_read_class` | suite red: **753 passed, 5 failed**, exit 5 |
+
+### Performance
+
+`scripts/bench-history.sh`: **56 benchmarks, 0 regressions ≥15%, 7 improvements**.
+Calibration 128 → 122 ns/op, syscall scale 288 → 288. The box ran at its
+recorded pace.
+
+| benchmark | 1.6.20 | 1.7.0 | delta |
+|---|---:|---:|---:|
+| `agent_config(new+get+set)` | 127 | **110** | −13% |
+| `restart_queue_has_miss8` | 176 | **153** | −13% |
+| `is_mounted(/proc, 2KiB fixed table)` ⚠ layout | 4,336 | **3,775** | −12% |
+| `str_builder(cstr+int mix)` | 279 | **256** | −8% |
+| `set_no_new_privs` | 430 | **398** | −7% |
+| `emerg_cred_parse (v1 record)` | 1,435 | **1,355** | −5% |
+| `alloc(4 sizes burst)` | 37 | **35** | −5% |
+| `strlen(52 chars)` ⚠ layout | 26 | **36** | +38%, **not gated** |
+
+⭐ `agent_config` is the benchmark 1.6.20 accepted as a +19% growth tax (101 →
+127), bisected to the 6.6.0 value-form flip. Under 6.6.6 it recovers most of
+that, to 110. `strlen(52 chars)` is one of the two benchmarks declared
+layout-sensitive at 1.6.14, where inert BSS padding alone was shown to swing it
+by 37%. The binary's layout moved at this bump, and so did the number. It is
+reported, not gated, as that declaration says. `Err+is_err_result` read 3 → 4
+ns, a single quantisation step below the 20 ns floor.
+
+---
+
 ## [1.6.20] — 2026-09-10
 
 **Ecosystem migration onto cyrius 6.6.2, plus a name collision that had been

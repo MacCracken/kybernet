@@ -40,12 +40,12 @@
 
 ## Build
 
-Requires Cyrius 6.5.36 (`cyriusly install 6.5.36 && cyriusly use 6.5.36`).
+Requires Cyrius 6.6.6 (`cyriusly install 6.6.6 && cyriusly use 6.6.6`).
 
 ```sh
 cyrius deps                                # Resolve deps from cyrius.cyml into lib/
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet   # Build (DCE recommended)
-cyrius test src/test.cyr                   # Run 747 tests
+cyrius test src/test.cyr                   # Run 758 tests
 cyrius bench src/bench.cyr                 # Run benchmarks
 ```
 
@@ -53,34 +53,35 @@ cyrius bench src/bench.cyr                 # Run benchmarks
 
 | Module | Lines | What |
 |--------|-------|------|
-| main | 1478 | Boot sequence, argonaut init, event loop, emergency shell, shutdown |
-| edge_boot | 580 | Verified-boot pre-flight: TPM PCR, dm-verity verification |
-| cgroup | 564 | Cgroup v2 controllers, paths, limits, move, kill, teardown |
-| svc_config | 538 | JSON → ServiceDefinition; security, limits and edge blocks |
-| emergency_auth | 520 | Argon2id credential: record format, parameter bounds, legacy migration |
-| sandbox | 325 | Landlock filesystem sandboxing (builder pattern) |
-| seccomp | 393 | Seccomp BPF filter builder + loader |
-| eventloop | 268 | epoll, timerfds, arch-gated `struct epoll_event` ABI |
-| privdrop | 247 | Capability dropping + no_new_privs + agnostik bridge |
-| log | 182 | klog / klog2 / kmsg / slog |
-| boot_stages | 186 | Per-stage work with OK / SKIP / FAIL status |
+| main | 2141 | Boot sequence, argonaut init, event loop, emergency shell, shutdown |
+| svc_config | 1028 | JSON → ServiceDefinition; security, limits and edge blocks; config-read classification |
+| edge_boot | 777 | Verified-boot pre-flight: TPM PCR, dm-verity verification |
+| cgroup | 623 | Cgroup v2 controllers, paths, limits, move, kill, teardown |
+| emergency_auth | 577 | Argon2id credential: record format, parameter bounds, legacy migration |
+| notify | 517 | sd_notify socket (READY, STOPPING, WATCHDOG, STATUS, RELOADING) |
+| seccomp | 516 | Seccomp BPF filter builder + loader |
+| privdrop | 408 | Capability dropping + no_new_privs + agnostik bridge |
+| sandbox | 351 | Landlock filesystem sandboxing (builder pattern) |
+| eventloop | 294 | epoll, timerfds, arch-gated `struct epoll_event` ABI |
+| service_sandbox | 238 | Per-service pre-exec: cgroup join → no_new_privs → caps → Landlock → seccomp |
+| log | 224 | klog / klog2 / kmsg / slog |
+| boot_stages | 216 | Per-stage work with OK / SKIP / FAIL status |
 | mount | 163 | Data-driven essential mount table |
-| service_sandbox | 153 | Per-service pre-exec: cgroup join → no_new_privs → caps → Landlock → seccomp |
-| notify | 134 | sd_notify socket (READY, STOPPING, WATCHDOG, STATUS, RELOADING) |
 | termios | 120 | Console echo suppression (hand-rolled ioctl/termios) |
-| restart_queue | 100 | Deferred restarts, static storage |
-| signals | 83 | Block 5 signals, create signalfd, classify |
 | console | 113 | stdio redirect; interactive `/dev/console` open |
-| reaper | 75 | Non-blocking waitpid loop, structured results |
+| reaper | 109 | Non-blocking waitpid loop, structured results |
+| restart_queue | 100 | Deferred restarts, static storage |
+| signals | 92 | Block 5 signals, create signalfd, classify |
+| console_io | 77 | Bounded line read, integer formatting — testable helpers moved out of main |
 | cmdline | 56 | `/proc/cmdline` token scanning |
 
-**6,278 lines of Cyrius** across `main.cyr` + 19 modules.
+**8,740 lines of Cyrius** across `main.cyr` + 20 modules.
 
 ## Features
 
 - **Full argonaut integration** — boot stages, wave-based service startup, health checks, watchdog, crash recovery, coordinated shutdown
 - **cgroup v2 isolation and limits** — per-service slice with `memory.max`,
-  `memory.high`, `cpu.weight` and `pids.max` from a per-service `limits` config
+  `memory.high`, `cpu.weight`, `pids.max` and `cpu.max` from a per-service `limits` config
   block, written to the cgroup *before* the service is forked. The child joins
   its own cgroup in the pre-exec window, so even a oneshot is contained before
   it runs. Controllers are enabled in `cgroup.subtree_control` at boot —
@@ -131,7 +132,7 @@ cyrius bench src/bench.cyr                 # Run benchmarks
 - **Data-driven mount table** — not hardcoded per-mount calls
 - **sd_notify compatible** — READY, STOPPING, WATCHDOG, STATUS, RELOADING messages via epoll
 - **String builder** for path construction and logging
-- **747 tests** (742 on aarch64 — the seccomp allowlist is arch-specific), 56 benchmarks
+- **758 tests** (753 on aarch64 — the seccomp allowlist is arch-specific), 56 benchmarks
 
 ## Dependencies
 
@@ -139,14 +140,14 @@ Resolved via `cyrius.cyml` (locked in `cyrius.lock`):
 
 | Dep | Version | What |
 |-----|---------|------|
-| sigil | 3.12.13 | TPM / crypto trust surface + Argon2id (thin sub-bundles only) |
-| agnostik | 1.5.1 | Shared AGNOS types (security, agent, error) |
-| libro | 2.9.0 | Cryptographic audit chain |
-| argonaut | 1.14.0 | Service lifecycle, boot stages, health, audit, pre-exec + extra-env hooks |
+| sigil | 3.12.18 | TPM / crypto trust surface + Argon2id (thin sub-bundles only) |
+| agnostik | 1.6.3 | Shared AGNOS types (security, agent, error) |
+| libro | 2.10.3 | Cryptographic audit chain |
+| argonaut | 1.15.2 | Service lifecycle, boot stages, health, audit, pre-exec + extra-env hooks |
 
 `patra` and `sakshi` are **not** declared as git deps — cyrius 6.5.20+ ships
 them in the stdlib snapshot, and a git pin would silently downgrade the
-folded copy. They are listed in `[deps].stdlib` alongside 30 other stdlib
+folded copy. They are listed in `[deps].stdlib` alongside 31 other stdlib
 modules from `~/.cyrius/lib/`.
 
 sigil is pulled as a **thin** set of capability sub-bundles rather than the
@@ -170,7 +171,7 @@ boot. With the working lane moved onto the caller's arena it costs +25 KB.
 ## Testing
 
 ```sh
-cyrius test src/test.cyr            # 747 assertions (742 on aarch64)
+cyrius test src/test.cyr            # 758 assertions (753 on aarch64)
 bash scripts/bench-history.sh       # 56 benchmarks, load-tolerant regression gate
 bash qemu/boot-test.sh              # PID-1 boot harness, x86_64 (needs KVM)
 bash qemu/boot-test-aarch64.sh      # PID-1 boot harness, aarch64 (TCG, no KVM)
@@ -210,7 +211,7 @@ operator tool, and CI still exercises its parameter validation.
   `qemu/boot-test-aarch64.sh` boots aarch64 under TCG, each as real PID 1. Until
   1.6.19 the aarch64 artifact shipped on a cross-build exiting 0 — and could not
   boot at all, for ten releases, because of an upstream syscall mis-emission.
-- Cyrius 6.5.36 (`~/.cyrius/bin/cyrius`)
+- Cyrius 6.6.6 (`~/.cyrius/bin/cyrius`)
 - No C, no Rust, no libc
 - OpenSSL 3.2+ — **provisioning only**, for `scripts/mkcred.sh`. Nothing kybernet
   runs at boot depends on it; the verifier is sigil's own Argon2id.

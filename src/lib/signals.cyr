@@ -45,14 +45,23 @@ fn signalfd_raw(sfd_tag, sfd_val) {
 
 # Read signal info from signalfd
 # signalfd_siginfo struct is 128 bytes, signal number at offset 0 (u32)
-# Returns: Option(signal_number) — Some(signum) or None
+# Returns: Result — Ok(signum), or Err(errno) when the read failed.
+#
+# ⚠ A RESULT, NOT AN OPTION, SINCE 1.7.0. This returned Some(signum) / None(),
+# which is legal: a nullary variant returns its tag alone (lib/tagged.cyr).
+# cyrius's mixed-return diagnostic cannot tell that apart from a dropped error
+# tag, so every build since 6.6.0 warned that the PID-1 signal path "reads this
+# error as its TAG", including the build that shipped 1.6.20. A probe on both
+# arches found the None path correct, so it was a false positive, but a warning
+# that is always there is one nobody reads. Both Result variants carry a payload,
+# and a failed read now says why (EAGAIN, EBADF) instead of looking like "no
+# signal". signalfd never returns a short read, so n in 0..3 is EIO.
 fn read_signal(sfd) {
     var buf[128];
     var n = sys_read(sfd, &buf, 128);
-    if (n >= 4) {
-        return Some(load32(&buf));
-    }
-    return None();
+    if (n >= 4) { return Ok(load32(&buf)); }
+    if (n < 0) { return Err(0 - n); }
+    return Err(EIO);
 }
 
 # Classify signal — returns a meaningful constant

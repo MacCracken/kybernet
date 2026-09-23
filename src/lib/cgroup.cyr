@@ -452,12 +452,10 @@ fn _cgroup_write_cpu_max(service, quota_us) {
 # Writes memory.max, memory.high, cpu.weight, pids.max and cpu.max. The last
 # needed its own writer because it takes "<quota> <period>" rather than a single
 # integer — see _cgroup_write_cpu_max. 1.6.17.
-# cglim_cpu_max is consequently never read. Deferred with the config key;
-# see CHANGELOG 1.5.5.
 # Returns: Result
 # NOT fail-fast, deliberately (1.5.5). This used to `return r` on the first
 # error, which silently skipped every later control file: the write order is
-# memory.max -> memory.high -> cpu.weight -> pids.max, so on a kernel with no
+# memory.max -> memory.high -> cpu.weight -> pids.max -> cpu.max, so on a kernel with no
 # cpu controller a service configured for BOTH cpu_weight and pids_max got
 # neither pid cap nor an accurate error — cpu.weight returned ENOENT and
 # pids.max was never attempted. These are independent controllers; one being

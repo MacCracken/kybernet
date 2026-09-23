@@ -84,19 +84,17 @@ fn can_read(path) {
 # for. `truncate` is a distinct syscall from `open`, and denying one says
 # nothing about the other.
 #
-# SYS_TRUNCATE is 76 on x86_64 and 45 on aarch64, so it needs the same
-# per-arch treatment standing rule 1 demands of every syscall number. The
-# harness boots x86_64 only, but this file is compiled by whatever
-# build-initramfs.sh is running on.
-#ifdef CYRIUS_ARCH_X86
-var SYS_TRUNCATE_NR = 76;
-#endif
-#ifdef CYRIUS_ARCH_AARCH64
-var SYS_TRUNCATE_NR = 45;
-#endif
-
+# ⚠ THROUGH THE STDLIB WRAPPER, NOT A PER-ARCH LITERAL. 1.7.0.
+# This used to issue syscall(SYS_TRUNCATE_NR) with 76 on x86_64 and 45 on
+# aarch64. cyrius 6.6.5 added a `45 -> 207` row to the aarch64 x86-compat
+# translation ladder (x86 45 is recvfrom), so the aarch64 arm stopped issuing
+# truncate at all: under `qemu-aarch64 -strace` it ran recvfrom(path) and got
+# EBADF, and LL-TRUNCATE=DENIED would have printed whether Landlock denied it
+# or not. The stdlib's sys_truncate spells SYS_TRUNCATE per peer (76 on both,
+# routed to 45 on aarch64), which is standing rule 1's point: the literal was
+# correct under 6.6.2 and wrong under 6.6.5 without a line of it changing.
 fn can_truncate(path) {
-    if (syscall(SYS_TRUNCATE_NR, path, 0) < 0) { return 0; }
+    if (sys_truncate(path, 0) < 0) { return 0; }
     return 1;
 }
 

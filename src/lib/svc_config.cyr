@@ -39,6 +39,36 @@
 # defaulted, so a typo in config surfaces at boot instead of silently
 # becoming a different restart policy.
 
+# How a read of /etc/kybernet/config.json came back. 1.7.0.
+#
+# Standing rule 30 turns on one distinction: ABSENT takes argonaut's defaults,
+# and everything else that did not yield a parseable document is "present but
+# unusable", which load_config reports as 0 (boot loudly on defaults, reload
+# keeps the running config). Only ENOENT is ABSENT. cyrius 6.6.6 made
+# file_read_all return a negative errno when a read fails (it used to return
+# the bytes read so far), and load_config's old `n <= 0` test sent every such
+# failure down the ABSENT path, which on SIGHUP applies the default timeouts
+# over the live ones. It is a pure function of the byte count so the unit suite
+# can reach it; load_config itself lives in main.cyr, which test.cyr does not
+# include (standing rule 34).
+enum CfgRead {
+    CFG_READ_OK = 0;
+    CFG_READ_ABSENT = 1;
+    CFG_READ_UNREADABLE = 2;
+    CFG_READ_EMPTY = 3;
+    CFG_READ_TOO_BIG = 4;
+}
+
+# `n` is file_read_all's return for a read of `cap + 1` bytes: the headroom
+# byte is what lets a full read be told apart from a truncated one.
+fn cfg_read_class(n, cap) {
+    if (n == 0 - ENOENT) { return CFG_READ_ABSENT; }
+    if (n < 0) { return CFG_READ_UNREADABLE; }
+    if (n == 0) { return CFG_READ_EMPTY; }
+    if (n > cap) { return CFG_READ_TOO_BIG; }
+    return CFG_READ_OK;
+}
+
 # Field-level accessors. Each returns the requested type, or the supplied
 # fallback when the key is absent or holds the wrong JSON type. Being
 # type-strict matters: `"enabled": "false"` is a string, and treating it as

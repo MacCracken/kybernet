@@ -1,21 +1,21 @@
 # Kybernet Roadmap
 
-**Current: v1.6.19** — [CHANGELOG.md](../../CHANGELOG.md) is the record of what each
+**Current: v1.7.0** — [CHANGELOG.md](../../CHANGELOG.md) is the record of what each
 release actually did. This file carries only what is **not** done; a completed item is
 deleted from here and summarised in History below, never left ticked.
 
-**Open: 11.** The 1.5.9 sweep opened **38** items (counted at the `1.6.0` tag); the
-2026-08-26 P(-1) audit is closed apart from MEDIUM-10, which is now fixed in the deps
-and waiting on a pin bump. Every number is `grep -c '^- \[ \]'` against this file at
+**Open: 15.** The 1.5.9 sweep opened **38** items (counted at the `1.6.0` tag); the
+2026-08-26 P(-1) audit is fully closed (its last item, MEDIUM-10, closed when 1.6.20
+consumed libro 2.10.0 / argonaut 1.15.0). Every number is `grep -c '^- \[ \]'` against this file at
 the relevant tag, not an estimate.
 
-⚠ **One dep-pin bump would close MEDIUM-10 outright and shrink one more.** kybernet
-pins libro 2.9.0 / argonaut 1.14.0 against the released **2.10.0 / 1.15.0**, which
-carry the whole of MEDIUM-10's fix plus the `svc_def_set_ready_check` and
-`_append_service_env` seams — so `ready_check`, `environment` and `env_files` become
-implementable, leaving only the genuinely undecided part of that item. Nothing is
-ticked on the strength of an upstream tag: **a fix kybernet does not consume is a fix
-kybernet does not have.**
+⚠ **v1.7.0 moved the toolchain 6.6.2 → 6.6.6 and every dep to its latest tag, and the
+bump found more than it changed.** 6.6.6's `file_read_all` fix turned a mid-read error in
+`load_config` into the "absent" path (fixed: only ENOENT is absent now); 6.6.5's new
+aarch64 translation row turned the Landlock fixture's native truncate literal into
+`recvfrom` (fixed: `sys_truncate`); and reading the loader around both found that a
+refused `emergency.cred` falls back to the config key, which 1.6.18 promised it would
+not. That last one is **open**, and it is the first item below.
 
 ⚠ **Two long-standing items closed at v1.6.19 and both are worth remembering for the
 shape rather than the fix.** `seccomp: basic` could not open a file on x86_64 and had
@@ -32,15 +32,15 @@ something rather than by reading, it says so — and where it was verified by *i
 the defect and watching the gate go red*, it says that too, because this project has
 repeatedly found that a gate nobody has seen fail is a gate nobody should trust.
 
-**Pins:** `v1.6.x` is scoped work with a clear finish line. `v1.x.x` is real but needs
+**Pins:** `v1.7.x` is what the cyrius 6.6.6 bump found. `v1.6.x` is scoped work with a clear finish line. `v1.x.x` is real but needs
 a design decision or is too large to date. The last two sections are blocked on
 something outside this repo.
 
 `cyrius lint` reports **0 untracked deferrals and 0 warnings** across the tree, and as
 of v1.6.1 **CI fails on either** — so this file cannot quietly drift back into fiction.
 
-**Gate counts at v1.6.19** (a next agent must not let these shrink; each is enforced):
-**747** test assertions on x86_64 and **742** on aarch64 · **79** harness properties ·
+**Gate counts at v1.7.0** (a next agent must not let these shrink; each is enforced):
+**758** test assertions on x86_64 and **753** on aarch64 · **79** harness properties ·
 **18** aarch64 boot-gate properties · 56 benchmarks (two reported-not-gated, declared) ·
 the aarch64 execution gate · the committed-lock gate.
 ⚠ **The two assertion counts differ on purpose and neither floor gates the other** — a
@@ -51,44 +51,66 @@ what it says. See [state.md](state.md) for the full current-state handoff.
 
 ---
 
-## Moving the cyrius pin to 6.6.5
+## v1.7.x — found by the cyrius 6.6.6 bump
 
-⛔ Before bumping the pin to 6.6.5: fix the aarch64 truncate literal in the landlock fixture, and
-cross-reference the two deferral notes that turn the CI lint gate red. Details below.
-
-cyrius 6.6.5 is not tagged yet. Nothing below can land against the pin until it is, except items marked
-**(can land now)**. The pin is 6.6.2 today, and this section lists only what 6.6.5 itself changes.
-
-- [ ] ⛔ `qemu/landlock-fixture.cyr:94-96` sets `SYS_TRUNCATE_NR = 45` under `CYRIUS_ARCH_AARCH64`.
-      6.6.5 adds the row `45 → 207` (x86 `recvfrom`), so on aarch64 `can_truncate()` (`:98`) calls
-      `recvfrom` and fails for every path. The TRUNCATE denial then reads as enforced whether it is or not.
-      Replace both arms with `sys_truncate(path, 0)`, and update the comment at `:87-90` with them. That
-      wrapper is new in 6.6.5, so this change ships with the pin bump. See the cyrius CHANGELOG [6.6.5] entry
-      "`memfd_create`, `ftruncate`, `sendmsg` and eleven more had NO STDLIB NAME". `src/lib/privdrop.cyr:88`
-      (capset 91 / capget 90) is unaffected: neither number is a row source in 6.6.5, and 90 is left
-      unrouted on purpose because of this file.
-- [ ] ⛔ The *Lint (HARD GATE)* step (`.github/workflows/ci.yml:95`) fails on two new untracked notes.
-      Both come from the case fold: 6.6.2's cyrlint matched only lowercase, so it never saw `Deferred` or
-      `Not yet`. 6.6.5's cyrlint folds case and reads a whole comment paragraph, but a tracking pointer still
-      counts only on a line the phrase itself touches. **(can land now)** — both fixes below lint clean under
-      the 6.6.2 and the 6.6.5 cyrlint.
-  - `src/lib/cgroup.cyr:455` — "Deferred with the config key;". The `CHANGELOG 1.5.5` pointer is on `:456`,
-    which does not track a phrase on `:455`. Move it onto `:455`.
-  - `src/test.cyr:596` — "Not yet started:" is test prose, not a deferral. Mark it `#skip-lint`.
-
-  See the cyrius CHANGELOG [6.6.5] entry "cyrlint read every rule ONE PHYSICAL LINE at a time".
-- [ ] The gate's own comment (`ci.yml:105`, "the matcher is per-line") is half-stale. The phrase is now
-      matched across a comment paragraph, while the pointer must still sit on the same line.
-- [ ] Re-run `cyrius deps` in the bump commit. The aarch64 peer moved `SYS_UNLINKAT` 35 → 263, and the
-      compiler's matching row is also new. If an old vendored `lib/` is built by the 6.6.5 compiler,
-      `sys_unlink` runs `nanosleep`, and nothing detects the mismatch.
+- [ ] ⛔ **A refused `emergency.cred` falls back to the config key, and 1.6.18 promised it
+      would not.** The 1.6.18 CHANGELOG, the loader's own header
+      (`src/lib/emergency_auth.cyr`, above `emerg_cred_path_default`) and
+      `test_emerg_cred_file` all say a group- or world-readable credential file is
+      "REFUSED, not fallen back from", because an operator who created the file meant it
+      to be the credential. The code does the opposite. `emerg_load_cred_file_at` returns
+      **0** for absent, for refused-by-mode, for unreadable, for oversized and for empty,
+      and `_load_config_inner` (`src/main.cyr`) sets `g_emerg_hash = cfg_hash` whenever it
+      sees 0. So a 0644 file, which is logged as refused, hands the prompt to whatever
+      `emergency_password_hash` holds in the world-readable config. **The unit test cannot
+      see it**: it asserts the loader returns 0, and 0 is exactly the value that triggers
+      the fallback. That is standing rule 34's `test_reload_config_is_narrow` shape again.
+      cyrius 6.6.6 adds a route in, since an unreadable file (EIO) now returns 0 too.
+      **The fix**: the loader reports ABSENT separately from PRESENT-BUT-UNUSABLE (a state
+      getter, or a sentinel distinct from both 0 and a `Str`), `load_config` falls back only
+      on ABSENT, and an unusable file leaves **no** credential, with a console and dmesg line
+      naming the config key as ignored. With `emergency_require_auth` set, that suppresses
+      the shell on an edge refusal, which is the closed outcome 1.5.9 chose. **Gate it with
+      a rule-27 fixture:** a fourth auth image with the real record in a **0644**
+      `emergency.cred` and a *valid, known* record in `config.json`. Today the config-key
+      password authenticates. After the fix it must not, and the boot log must say the key
+      was not used. ⚠ It changes authentication behaviour on a misconfigured board, so it
+      ships in its own release with the reason stated, not folded into a toolchain bump.
+- [ ] **An entropy-starved first audit record has never been exercised.** libro 2.10.3's
+      `uuid_v4` draws from `random_bytes`, i.e. `getrandom(…, 0)`, and it is **live** in
+      PID 1: argonaut writes an audit record on every service start/stop/readiness change
+      (checked with `CYRIUS_DCE_VERBOSE=1`). `getrandom(…, 0)` waits for the CRNG, which
+      is why `emergency_auth.cyr` refuses to draw entropy at phase 6c. The x86_64 harness
+      guest has RDRAND (`-cpu host`), and the aarch64 boot runs no services, so neither
+      gate has ever written a first audit record on a machine with no hardware RNG.
+      **This closes for free with aarch64 fixture parity below**: TCG `cortex-a57` on
+      `-M virt` without `virtio-rng` is exactly that machine. Assert the span budget still
+      holds when it does.
+- [ ] **Adopt `file_read_whole` (cyrius 6.6.6) and retire the 16 KiB config cap.**
+      `_load_config_inner` reads into a fixed 16,385-byte buffer and refuses anything
+      larger (`CFG_READ_TOO_BIG`). That refusal is *correct*, and replacing it is a
+      behaviour change, so it needs its own bite with a test that feeds a >16 KiB config.
+      `src/lib/mount.cyr` (`/proc/self/mounts` into 8,192 bytes) has the same shape and the
+      same opportunity: a machine with many mounts is exactly where 8,192 runs out.
+- [ ] **Upstream (cyrius, filed by the user, not from here): the mixed-return diagnostic
+      misfires on a nullary `None()`.** A fn returning `Some(v)` on one path and `None()` on
+      another warns that "the caller reads this error as its TAG". `lib/tagged.cyr` and the
+      language guide both say that shape is legal, and a probe confirmed it on x86_64 and
+      under `qemu-aarch64`. kybernet sidestepped it at 1.7.0 by making `read_signal` a
+      `Result`, but any other consumer returning an `Option` gets the same false alarm.
+- [ ] **agnostik's `_hex_nibble` collides with sigil `hex.cyr`'s.** The behaviour is
+      identical (0-9/a-f/A-F to 0..15, else -1), so "last definition wins" is harmless
+      today, but it is the one duplicate-fn warning in kybernet's build that is not sigil's
+      own `crypto_scratch` family. The fix is a rename on agnostik's side, released and
+      then consumed.
 
 ---
 
-## v1.6.13+ — the P(-1) audit's deferred findings
+## v1.6.13+ — the P(-1) audit, now closed
 
-The 2026-08-26 P(-1) audit found **31** issues. **All but MEDIUM-10 are closed**, and
-MEDIUM-10 is fixed in the deps and waiting on a pin bump. Full evidence for each —
+The 2026-08-26 P(-1) audit found **31** issues, and **all 31 are closed**. MEDIUM-10,
+the last, closed at 1.6.20, when kybernet consumed libro 2.10.0 (the allocation-free
+canonical-JSON emitter) and argonaut 1.15.0 (`chain_append_nokeep`). Full evidence for each —
 including the adversarial verification each one survived — is in
 [`docs/audit/2026-08-26-audit.md`](../audit/2026-08-26-audit.md).
 
@@ -100,36 +122,6 @@ than evidence that every candidate was airtight. Ten were re-verified by hand an
 marked as such in the report. **Keep the bar in mind when reading the report, and set
 a stricter one on the next sweep** — a survival rate of 100% is a finding about the
 method, not about the code.
-
-- [ ] **MEDIUM-10 — FIXED IN THE DEPS AND TAGGED; kybernet has not consumed it.**
-      Both halves now exist upstream. **libro 2.10.0** closed the part this item
-      said needed "a libro release with real blast radius": the allocation-free
-      hash (`entry_compute_hash_into`, `hasher_finalize_hex_into`,
-      `entry_refill_into`) plus a two-slot chain scratch. ⚠ **And it found that
-      the entry struct was not the dominant cost either** — the canonical-JSON
-      object emitter was, allocating four `vec_new` per object, per record, per
-      nesting level. Measured arena bytes per streaming append:
-
-      | `details`                      | 2.9.0 | 2.10.0 |
-      |--------------------------------|-------|--------|
-      | `{}`                           |   608 |      0 |
-      | `{"a":1}`                      |   696 |     88 |
-      | `{"service":"sshd","pid":412}` |   896 |    136 |
-      | `{"a":{"b":{"c":1}}}`          |  1960 |    136 |
-
-      **argonaut 1.15.0** adopts `chain_append_nokeep` in `audit_log_record`
-      (312 → 176 real bytes/record before libro 2.10.0's cut lands on top).
-
-      ⚠ **The digest is unchanged and that is asserted, not assumed** — libro's
-      suite hashes the same documents through both the inline and spill paths
-      across the whole capacity boundary, and a stability regression in the
-      inline sort fails ONLY that assertion, with every pre-existing golden
-      vector still green.
-
-      **What is left is one dep-pin bump**: kybernet pins libro 2.9.0 /
-      argonaut 1.14.0 against released 2.10.0 / 1.15.0. Bumping both and
-      re-running the gates closes this item. It is not ticked yet because a fix
-      kybernet does not consume is a fix kybernet does not have.
 
 ---
 
@@ -191,6 +183,10 @@ method, not about the code.
       service cgroups: N` markers for the aarch64 config independently of x86.
       ⚠ **Do not close this by adding services that do not assert anything** —
       the point is the confinement effects, asserted from inside the child.
+      ⚠ **1.7.0: two more things only this can test.** The Landlock fixture's
+      truncate probe had been issuing `recvfrom` on aarch64 since cyrius 6.6.5
+      (fixed, but never yet *run* there), and the first audit record under TCG is
+      the entropy-starved `getrandom` case in the v1.7.x section.
 
 ---
 
@@ -220,8 +216,8 @@ method, not about the code.
       `restart_config` landed at 1.6.19 (`max_restarts` / `base_delay_ms` /
       `max_delay_ms`, validated at load and **refused rather than clamped**, per
       standing rule 25). `ready_check` needs argonaut's
-      `svc_def_set_ready_check` — **added in 1.15.0, now tagged**, so this is
-      unblocked and waiting on the same dep-pin bump as MEDIUM-10.
+      `svc_def_set_ready_check`, added in 1.15.0 and **consumed since 1.6.20**, so
+      this is unblocked and simply not done.
       ⚠ **`environment` and `env_files` were implemented at 1.6.19 and then
       WITHHELD**, which is the part worth remembering: both parsed correctly and
       would have done **nothing**. `fork_exec_service` builds the child envp from
@@ -229,8 +225,8 @@ method, not about the code.
       `svc_def_env_files` is read by nothing at all — so shipping them would have
       given operators two config keys that silently have no effect, which is
       worse than not shipping them. The missing seam (`_append_service_env`) shipped in
-      argonaut **1.15.0, now tagged** — so both keys are unblocked and waiting
-      on the dep-pin bump, not on more argonaut work. Before adding a
+      argonaut **1.15.0, consumed since 1.6.20**, so both keys are unblocked and
+      need only the kybernet side, not more argonaut work. Before adding a
       config key, **check that something downstream reads the field**.
       The remainder still needs a decision about how much of argonaut's model
       kybernet intends to expose.
@@ -294,6 +290,28 @@ Moved into the v1.6.1 gate line. Recording why here so the claim is not re-made:
 ## History
 
 One line per release. Detail lives in [CHANGELOG.md](../../CHANGELOG.md).
+
+- **v1.7.0** — Toolchain 6.6.2 → **6.6.6**; sigil 3.12.18, agnostik 1.6.3, libro 2.10.3,
+  argonaut 1.15.2. Three things the bump broke or exposed, all fixed. (1) 6.6.6's
+  `file_read_all` returns an errno on a failed read instead of a prefix, which moved a
+  mid-read failure in `load_config` from "unusable" to "absent", and on SIGHUP that path
+  applies default timeouts. Only ENOENT is absent now, via a unit-tested
+  `cfg_read_class`. (2) 6.6.5's new `45 → 207` aarch64 ladder row made the Landlock
+  fixture's native truncate literal issue `recvfrom`. It uses `sys_truncate` now.
+  (3) `read_signal`'s mixed-return warning, shipped unexplained in 1.6.20, turned out to be
+  a false positive on nullary `None()`. It returns a `Result` now and carries the errno.
+  Found and **not** fixed: a refused `emergency.cred` falls back to the config key,
+  against 1.6.18's promise. `is_root` now comes from the stdlib's `sys.cyr`, and
+  `_reap_empty_vec` was renamed out of argonaut's namespace. Every dep change was checked
+  against the DCE list: agnostik's exit-70 `_fill_random` is dead in PID 1, and libro's
+  `getrandom` `uuid_v4` is live. 747 → 758 assertions (742 → 753 on aarch64); binaries and
+  lock byte-identical in a sibling-free reproduction.
+- **v1.6.20** — cyrius 6.5.36 → 6.6.2, the value-form flip: 65 call sites migrated, with
+  every `return r` propagation re-wrapped as `return Err(rv)`. Consumed libro 2.10.0 and
+  argonaut 1.15.0, **closing MEDIUM-10**. 6.6.2's same-name different-arity refusal
+  surfaced agnostik's `health_check_new` mis-binding against argonaut's (fixed in agnostik
+  1.6.1). The bench gate's syscall reference was repaired: a median of three probes,
+  clamped at the ALU scale.
 
 - **v1.6.19** — Two security findings and the aarch64 milestone. ⚠ **`seccomp:
   basic` could not open a file on x86_64, and had not been able to since 1.6.0.**
@@ -529,129 +547,3 @@ tags. That work is now v1.5.7 (real verification) and the hardware section above
 **Closed and removed from this file:** the v1.5.9 KDF items (all five shipped);
 `drop_cap_sets()` privileged validation (the 1.5.2 `kyb-confined` harness service asserts
 `CapEff=0` / `NoNewPrivs=1` as real root under QEMU).
-
----
-
-## Moving the cyrius pin to 6.6.6
-
-**Current pin: `cyrius = "6.6.2"`** — four releases behind. Nothing must change first;
-this is a pin bump and a rebuild. Three of the 6.6.6 changes land on paths kybernet has
-already written defensive code around, and those are worth acting on afterwards.
-
-### The O_APPEND question, answered first
-
-kybernet opens the **PID 1 journal** with `O_APPEND`:
-
-```cyrius
-# src/lib/log.cyr:128
-g_log_fd = sys_open("/var/log/kybernet.log", O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0x1A4);
-```
-
-That is precisely the case 6.6.6 names as worst: before it, a PE build's `O_APPEND` did not
-append — it overwrote from offset 0 — so every boot would have erased the previous boot's
-log while the open and the writes both reported success. For an init system whose log is the
-only record of why the last boot failed, that is total.
-
-**kybernet is not exposed** — checked rather than assumed: CI is `ubuntu-latest`, there is
-**no `CYRIUS_TARGET_*` conditional anywhere in `src/`** (kybernet is the one repo in this
-group with none at all), no `CYRIUS_TARGET_WIN` / `_TARGET_PE` branch, no PE entry in
-`cyrius.cyml`, and the machinery is signalfd / epoll / timerfd / cgroup v2 / Landlock /
-seccomp-BPF — Linux kernel interfaces with no Windows analogue. The README's own platform
-line is *"Linux, x86_64 or aarch64."*
-
-The three `O_TRUNC` sites (`src/test.cyr:1155`, `:1707`, `:2517`) are test-harness logs, same
-conclusion.
-
-### ⭐ `file_read_whole` retires the documented 16 KiB config cliff
-
-`_load_config_inner` (`src/main.cyr:194–216`) carries a hand-rolled workaround with its
-reasoning written out:
-
-> *One byte of headroom so a full read is distinguishable from a truncated one.
-> `file_read_all` stops at maxlen and returns maxlen with no error (io.cyr:471-476), so
-> without this a config that outgrew the buffer came back as invalid JSON and took the
-> defaults path — a silent 16 KiB cliff with no diagnostic.*
-
-6.6.6 fixes that defect at the source: `lib/io.cyr` gains **`file_read_whole(path, &n)`**,
-which reads into a buffer that **grows**, so there is no cap to get wrong. (The release
-found the same root cause destroying 78 KB of a user's manifest in `cyriusly`, which is why
-it was not fixed with a bigger cap.) After the bump, `_load_config_inner` can drop the `cap +
-1` trick, the `n > cap` refusal branch and the 16,384-byte limit entirely — and a
-`/etc/kybernet/config.json` that outgrows 16 KiB stops being a boot-time refusal. ⚠ Land it
-as its own bite with a test that feeds a >16 KiB config; the current refusal is *correct*
-behaviour and replacing it is a behaviour change, not a cleanup.
-
-`src/lib/mount.cyr:16` (`file_read_all("/proc/self/mounts", _mount_cache, 8192)`) has the
-same shape and the same opportunity — a machine with many mounts is exactly where 8192 runs
-out.
-
-### ⭐ `cyrius deps --lock` is now fail-closed — which is what `verify-lock.sh` exists for
-
-6.6.6 fixes `cyrius deps --lock` silently **omitting any file it could not hash while
-reporting success**: a file with no line in `cyrius.lock` is a file `deps --verify` has
-nothing to check, and the tool printed a success line anyway. The lock walker now records
-the failure and aborts, leaving the previous `cyrius.lock` byte-for-byte rather than writing
-a partial one. `cyrius deps` / `publish` also now **fail** when `cyrius.lock` cannot be
-written at all.
-
-kybernet already treats the committed lock as a release gate (`scripts/verify-lock.sh`, run
-from both `ci.yml` and `release.yml`, written from the 1.6.12 case where
-`cyrius deps --verify` alone could not see a stale lock). This bump makes the toolchain half
-of that guarantee real. **Re-run `bash scripts/verify-lock.sh` immediately after the bump**,
-before anything else: if a `lib/*.cyr` was ever unhashable, the pre-6.6.6 lock may be missing
-a line that the 6.6.6 lock will now insist on.
-
-⚠ Related, and it is a *refusal* rather than a fix: if any `lib/*.cyr` is a stale dangling
-symlink, `cyrius deps` now fails instead of skipping it. kybernet's `lib/` was checked — 40
-files, **no symlinks** — so nothing to clear.
-
-### What else was checked
-
-- **No shape the new refusals catch.** kybernet declares 6 structs (`EpollEvent`,
-  `KybSeccompPolicy`, `MountEntry`, `OwnedFd`, `ReapedProcess`, `SeccompBuilder`) and **not
-  one** is a by-value fn parameter, a fn return type, or a `var x: T = …` declaration — all
-  are heap-offset layouts behind raw pointers. No `async fn`, no `operator` fn, no
-  SIMD-returning fn, no fn mixing pair and scalar returns, no `var` inside a top-level block
-  (zero top-level `{` / `if (` / `while (` at column 0), no `lib/regression.cyr` consumer,
-  no `vec_*` of kybernet's own (so the new `assert.cyr` → `vec.cyr` transitive include
-  cannot collide).
-- **The duplicate globals are across entry files, not co-linked.** `g_log_fd` is declared in
-  `src/main.cyr:55`, `src/test.cyr:31` and `src/bench.cyr:30`; `var r = main();` in
-  `src/main.cyr:2126` and `src/bench.cyr:1314`. Those are three separate entry points, never
-  compiled into one unit, so 6.6.6's "a global declared in two co-linked files with a
-  different type or size is a compile error" does not reach them.
-- **No `statfs`, so the ESYSXLAT work is not kybernet's.** 6.6.6 adds a `137 → 43` aarch64
-  row for `statfs` and names `SYS_STATFS`/`SYS_FSTATFS` in both Linux peers; kybernet has
-  zero statfs call sites. Its own raw-number exceptions (`syscall(26, 0x30)` at
-  `src/main.cyr:2113`, an AGNOS ABI constant, and the `syscall(35)` discussion in
-  `src/lib/seccomp.cyr:480–492`) are already documented with both architectures' landing
-  spots and are unaffected — including the note that a literal `syscall(35)` is not in the
-  translation ladder and lands on aarch64 `unlinkat`, which 6.6.6 does **not** change.
-- Longest string literal is 2,335 B in `src/lib/log.cyr`, so 6.6.4's ≥64 KB literal fix was
-  never reachable here.
-
-### What it gains
-
-The two ⭐ items above; 6.6.3's `#inline`-disarms-`#derive` fix; 6.6.5's aggregate-layout
-fix, silently wrong since **5.8.17** (kybernet's `SeccompBuilder` / `EpollEvent` layouts are
-exactly that surface), and three corrected ENTRY stack bases; and 6.6.6's nine new refusals.
-Also `cyrius build` now exits 1 instead of 0 when its output rename fails — worth a grep of
-`scripts/` for any step that treated a build as successful without checking for the artifact.
-
-### Verify after bumping
-
-`cyrius deps` → **`bash scripts/verify-lock.sh`** (first, see above) → `cyrius deps --verify`
-→ `CYRIUS_DCE=1 cyrius build` → `cyrius test` → and then the part that is not optional here:
-**the aarch64 leg, by EXECUTION under QEMU, not by compile**. The README's own warning is
-that both arches are release-gated by running, and a pin move is exactly when a latent
-arch-specific instance stops being latent. Boot to PID 1, confirm `/var/log/kybernet.log`
-**extends** rather than restarts across two boots, and confirm the `kyb-confined` harness
-service still asserts `CapEff=0` / `NoNewPrivs=1` as real root.
-
-⛔ **Release-ordering note.** kybernet pins `sigil` at tag `3.12.16` and vendors six thin
-sigil modules. sigil's shipped dist currently fails `cyrfmt --check`; the fix belongs in the
-sigil source repo (version-bump, regen dist, re-vendor), not in kybernet's fold. That does
-not block this pin move — kybernet's own format gate loops over
-`src/main.cyr src/test.cyr src/bench.cyr src/lib/*.cyr` and never walks `lib/` — but if
-sigil cuts a release for it, sequence kybernet's sigil bump after that tag rather than
-bundling the two.

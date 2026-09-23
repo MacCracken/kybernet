@@ -593,7 +593,7 @@ fn test_boot_stage_service_groups() {
 
     var init = argonaut_init_new(cfg);
 
-    # Not yet started: the stage must report failure, not success.
+    # Before the service has started, the stage must report failure, not success.
     assert_eq(execute_boot_stage_for(init, cfg, STAGE_AGENT_RUNTIME), STAGE_FAIL, "group: not started fails");
 
     init_start_service(init, "daimon");
@@ -2564,6 +2564,38 @@ fn test_emerg_cred_file() {
     return 0;
 }
 
+# ⚠ 1.7.0 — only ENOENT is "absent". cyrius 6.6.6 made file_read_all return a
+# negative errno when a read fails (it used to return the bytes read so far), and
+# load_config's `n <= 0` test sent every such failure down the defaults path,
+# which on SIGHUP applies the DEFAULT timeouts over the live ones (rule 30).
+# The last three assertions feed the classifier what file_read_all really
+# returns (rule 46), so a stdlib that went back to reporting a failed read as
+# end-of-file fails here rather than on a board.
+fn test_cfg_read_class() {
+    println("--- config read classification (1.7.0) ---");
+    var cap = 16384;
+    assert_eq(cfg_read_class(0 - ENOENT, cap), CFG_READ_ABSENT, "cfg read: ENOENT is absent");
+    assert_eq(cfg_read_class(0 - EACCES, cap), CFG_READ_UNREADABLE, "cfg read: EACCES is unreadable, not absent");
+    assert_eq(cfg_read_class(0 - EISDIR, cap), CFG_READ_UNREADABLE, "cfg read: EISDIR is unreadable, not absent");
+    assert_eq(cfg_read_class(0, cap), CFG_READ_EMPTY, "cfg read: an empty file is unusable, not absent");
+    assert_eq(cfg_read_class(cap + 1, cap), CFG_READ_TOO_BIG, "cfg read: the headroom byte means truncated");
+    assert_eq(cfg_read_class(cap, cap), CFG_READ_OK, "cfg read: exactly cap bytes is a full read");
+    assert_eq(cfg_read_class(2, cap), CFG_READ_OK, "cfg read: a small document is ok");
+
+    # 17 bytes = a 16-byte cap plus the headroom byte, as load_config sizes it.
+    var buf = alloc(17);
+    assert_eq(cfg_read_class(file_read_all("/tmp/kyb_cfg_absent_xyz", buf, 17), 16), CFG_READ_ABSENT,
+      "cfg read: a missing file reads as absent");
+    assert_eq(cfg_read_class(file_read_all("/tmp", buf, 17), 16), CFG_READ_UNREADABLE,
+      "cfg read: a directory reads as unreadable (EISDIR is an errno, not end-of-file)");
+    var empty_path = "/tmp/kyb_cfg_empty";
+    _write_file(empty_path, "", 384);
+    assert_eq(cfg_read_class(file_read_all(empty_path, buf, 17), 16), CFG_READ_EMPTY,
+      "cfg read: an empty file reads as empty");
+    sys_unlink(empty_path);
+    return 0;
+}
+
 fn test_edge_compare_pcrs_cstr() {
     println("--- edge PCR compare over sigil's RAW cstr (1.6.13) ---");
     var d7  = "aabbccddeeff00112233445566778899aabbccddeeff001122334455667788ff";
@@ -2752,9 +2784,11 @@ fn test_signal_buffer() {
     println("--- signal buffer ---");
     # Verify the read_signal buffer is large enough (P(-1) fix)
     # We can't easily test signalfd reads without root,
-    # but we can verify None is returned on invalid fd
+    # but we can verify an Err is returned on an invalid fd
     var r_t, r_v = read_signal(0 - 1);
-    assert(is_none(r_t) == 1, "read_signal(-1) is None");
+    assert(is_err_result(r_t) == 1, "read_signal(-1) is Err");
+    # The errno survives the trip (1.7.0) - an Option could only say "nothing".
+    assert_eq(r_v, EBADF, "read_signal(-1) reports EBADF");
     return 0;
 }
 
@@ -3186,6 +3220,7 @@ fn main() {
     test_edge_config_rejects();
     test_edge_validators();
     test_emerg_cred_file();
+    test_cfg_read_class();
     test_edge_compare_pcrs_cstr();
     test_edge_boot_gating();
     test_notify_edge_cases();

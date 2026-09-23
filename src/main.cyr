@@ -206,11 +206,25 @@ fn _load_config_inner(want_services) {
         return argonaut_config_default();
     }
     var n = file_read_all("/etc/kybernet/config.json", buf, cap + 1);
-    if (n <= 0) {
+    # ⚠ ONLY ENOENT MEANS "ABSENT". 1.7.0. Before, `n <= 0` took the defaults path for every
+    # failure, and since cyrius 6.6.6 that includes a read which fails half way; on SIGHUP the
+    # defaults path applies the DEFAULT timeouts over the live ones. See cfg_read_class.
+    var rc = cfg_read_class(n, cap);
+    if (rc == CFG_READ_ABSENT) {
         klog("no config found, using defaults");
         return argonaut_config_default();
     }
-    if (n > cap) {
+    if (rc == CFG_READ_UNREADABLE) {
+        klog2("config: /etc/kybernet/config.json is present but UNREADABLE - errno ", _u64_str(0 - n));
+        kmsg("kybernet: config present but unreadable");
+        return 0;
+    }
+    if (rc == CFG_READ_EMPTY) {
+        klog("config: /etc/kybernet/config.json is EMPTY - treating it as unusable");
+        kmsg("kybernet: config is empty");
+        return 0;
+    }
+    if (rc == CFG_READ_TOO_BIG) {
         klog("config: /etc/kybernet/config.json exceeds 16384 bytes - REFUSING to parse a truncated config");
         kmsg("kybernet: config exceeds 16384 bytes, refusing to parse a truncated config");
         return 0;
@@ -2068,8 +2082,8 @@ fn kybernet_run() {
             switch (tok) {
                 case 1: {
                     var sig_t, sig_v = read_signal(g_sfd);
-                    if (is_some(sig_t) == 1) {
-                        handle_signal(unwrap(sig_t, sig_v));
+                    if (is_ok(sig_t) == 1) {
+                        handle_signal(result_unwrap(sig_t, sig_v));
                     }
                 }
                 case 2: handle_health_tick();

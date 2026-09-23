@@ -102,7 +102,10 @@ jobs:
         # The tree is at 0 deferrals and 0 warnings as of 1.6.1. Keeping it
         # there is what stops docs/development/roadmap.md drifting back into
         # fiction. If this fails: either fix the line, or cross-reference the
-        # deferral to the roadmap ON THE SAME LINE (the matcher is per-line).
+        # deferral to the roadmap on a line the phrase itself touches. Since
+        # cyrius 6.6.5 the phrase is matched case-insensitively ACROSS a whole
+        # comment paragraph, but a pointer on the next line still does not
+        # count — which is how `Deferred` / `Not yet` went red at 1.7.0.
         run: |
           FAIL=0
           for f in src/main.cyr src/test.cyr src/bench.cyr src/lib/*.cyr; do
