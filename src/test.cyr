@@ -997,6 +997,22 @@ fn test_security_profile_defaults_and_rejection() {
 # privilege drop actually used. Before 1.5.2 argonaut's won and they were an
 # arbitrary 13-entry ordering: CAP_SYS_ADMIN was 1, so "keep CAP_SYS_ADMIN"
 # kept CAP_DAC_OVERRIDE. `1 << cap` goes straight to capset(2).
+# agnostik and argonaut both define `enum RestartPolicy` and `enum SeccompAction`
+# with the same member names, and kybernet links both, so one value per constant
+# silently wins. argonaut 1.15.4 made both value-identical to agnostik's. As with
+# capabilities, the build's conflicting-value warning cannot be counted on to
+# fire (CLAUDE.md), so this asserts the values the link actually uses. 1.7.9.
+fn test_restart_and_seccomp_values_agree() {
+    println("--- RestartPolicy / SeccompAction lockstep (1.7.9) ---");
+    assert_eq(RESTART_NEVER, 0, "lockstep: RESTART_NEVER 0");
+    assert_eq(RESTART_ALWAYS, 1, "lockstep: RESTART_ALWAYS 1");
+    assert_eq(RESTART_ON_FAILURE, 2, "lockstep: RESTART_ON_FAILURE 2");
+    assert_eq(SECCOMP_KILL, 1, "lockstep: SECCOMP_KILL 1");
+    assert_eq(SECCOMP_TRAP, 3, "lockstep: SECCOMP_TRAP 3");
+    assert_eq(SECCOMP_LOG, 4, "lockstep: SECCOMP_LOG 4");
+    return 0;
+}
+
 fn test_capability_numbers_are_kernel() {
     println("--- capability numbers (1.5.2) ---");
     assert_eq(CAP_CHOWN, 0, "cap: chown 0");
@@ -3687,6 +3703,7 @@ fn main() {
     test_svc_config_medium_rejections();
     test_landlock_optional_optin();
     test_capability_numbers_are_kernel();
+    test_restart_and_seccomp_values_agree();
     test_cgroup_controller_probe();
     test_cgroup_apply_null_guard();
     test_cgroup_teardown();

@@ -29,7 +29,7 @@ the 1.5.6 aarch64 syscall repairs and the 1.5.7 fail-open exec fix were both
 argonaut-side defects reachable from kybernet's boot path.
 
 What the split actually buys is that the service-management logic is
-independently tested (976 assertions in argonaut's own suite at 1.15.3, against
+independently tested (984 assertions in argonaut's own suite at 1.15.4, against
 kybernet's 876) and independently versioned, so a change there is reviewed and
 gated on its own before kybernet pins the tag. That is real value — it is just
 not fault isolation.
@@ -94,7 +94,7 @@ All under `src/lib/`, included by `src/main.cyr`.
 Resolved by `cyrius deps` from `cyrius.cyml` and sha256-pinned in `cyrius.lock`;
 `lib/` is gitignored, so the contract is the lock file rather than the bytes on disk.
 
-- **argonaut 1.15.3** — service lifecycle, boot sequencing, health checks, crash
+- **argonaut 1.15.4** — service lifecycle, boot sequencing, health checks, crash
   recovery, audit. Imported as **12 selective modules**, not a dist bundle
   (`src/tmpfiles.cyr` was dropped at 1.6.2: it had no call site in the link set).
 - **agnostik 1.6.3** — shared AGNOS types (`security_context`, `capability_set`,

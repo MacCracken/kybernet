@@ -527,7 +527,10 @@ fn svc_def_from_json(obj) {
 
     var restart_s = _cfg_str(obj, "restart", 0);
     if (restart_s != 0) {
-        var rrt, rrv = restart_policy_parse(restart_s);
+        # argonaut's systemd-style parser ("always" / "on-failure" / "never").
+        # NOT the bare `restart_policy_parse`: that name is agnostik's, for its
+        # PascalCase spelling ("OnFailure"), and both libraries are linked here.
+        var rrt, rrv = argonaut_restart_policy_parse(restart_s);
         if (is_err_result(rrt) == 1) { return 0; }
         svc_def_set_restart_policy(sd, result_unwrap(rrt, rrv));
     }

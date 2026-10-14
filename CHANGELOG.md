@@ -7,6 +7,71 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.7.9] — 2026-10-14
+
+**argonaut 1.15.3 → 1.15.4: `RestartPolicy` and `SeccompAction` now have the same values in
+argonaut and agnostik, and kybernet calls argonaut's config parser by its new name.** Suite
+882 / 877. Harness 121, aarch64 boot gate 175. The binaries are the same size on both arches.
+
+### Why
+
+kybernet links agnostik and argonaut into one unit, and both define `enum RestartPolicy` and
+`enum SeccompAction` with the same member names but different values:
+
+| Constant | argonaut ≤ 1.15.3 | agnostik |
+|---|---:|---:|
+| `RESTART_ALWAYS` / `_ON_FAILURE` / `_NEVER` | 0 / 1 / 2 | 1 / 2 / 0 |
+| `SECCOMP_KILL` / `_TRAP` / `_LOG` | 0 / 1 / 2 | 1 / 3 / 4 |
+
+One value per constant won, with no warning; CLAUDE.md already notes that the
+conflicting-value diagnostic cannot be counted on, as with `LinuxCapability`. kybernet behaved
+only because it compares these constants by name. The collision that forced the fix is a
+function: agnostik is adding `restart_policy_parse` for its own PascalCase spelling
+(`"OnFailure"`), and argonaut already had a one-argument `restart_policy_parse` for the
+systemd-style spelling kybernet's `config.json` uses (`"on-failure"`). In this unit, whichever
+definition came last would have parsed every service's `restart` key. agnostik's consumer sweep
+flagged it here, and agnostik held its pair back until this release.
+
+argonaut 1.15.4 makes both enums explicit and value-identical to agnostik's, and renames its
+parser **`argonaut_restart_policy_parse`**. That is the same lockstep as `LinuxCapability` at
+agnostik 1.5.0 / argonaut 1.11.0.
+
+### Changed
+
+- **`cyrius.cyml`:** `[deps.argonaut]` tag `1.15.3` → **`1.15.4`**. `cyrius.lock` re-resolved:
+  argonaut is commit-pinned at `d362a1c`, the 1.15.4 tag, and `deps --verify` gives 76 of 76
+  with 5 commit pins.
+- **`src/lib/svc_config.cyr`:** the service `restart` key is parsed with
+  `argonaut_restart_policy_parse`. A comment says why the bare name must not come back: once
+  agnostik ships its pair, `restart_policy_parse` still **compiles** here and binds to the
+  PascalCase parser, so every `"on-failure"` in a config would be refused. Against agnostik
+  1.6.3, which kybernet still pins, the old name fails the build loudly instead.
+
+### Tests
+
+**`test_restart_and_seccomp_values_agree`** asserts the values the link actually uses:
+`RESTART_NEVER` = 0, `RESTART_ALWAYS` = 1, `RESTART_ON_FAILURE` = 2, `SECCOMP_KILL` = 1,
+`SECCOMP_TRAP` = 3, `SECCOMP_LOG` = 4. It is `test_capability_numbers_are_kernel`'s guard,
+applied to the two enums that had diverged. The six assertions are arch-neutral, so both floors
+rise by six: **882** on x86_64 and **877** on aarch64, bumped together in CLAUDE.md (standing
+rule 49). The existing config tests (`cfg: restart parsed`, and a bad `restart` value refusing
+its service) now exercise the renamed parser.
+
+### Release gates
+
+| Gate | Result |
+|---|---|
+| `scripts/verify-lock.sh` | lock verified: manifest tags match, and a fresh resolve reproduces the commit pins. Run on a commit of this tree, because the gate reads the committed lock |
+| `rm -rf lib && cyrius deps && cyrius deps --verify` | 76 verified, 0 failed, 5 commit pins |
+| builds, `CYRIUS_DCE=1` | kybernet x86_64 **719,752 B**, aarch64 **2,169,424 B**; agnos-init 248,440 B and 2,034,080 B. All four are the same sizes as 1.7.8, since an enum value and a fn name take the same bytes |
+| build warnings | the documented benign set only: agnostik 1.6.3's `_hex_nibble` vs sigil, and sigil-argon2's byte-identical scratch fns. Nothing for `RESTART_*`, `SECCOMP_*` or `restart_policy_*` |
+| `cyrius test src/test.cyr` | **882 passed, 0 failed** |
+| `scripts/aarch64-exec-gate.sh` | **877** assertions, 0 failed (floor 877); 5 syscall probes ok; declared-broken list empty |
+| `scripts/bench-history.sh` | 56 benchmarks, **no regression ≥ 15%**. Calibration 120 → 120 ns/op (the host at its recorded pace) |
+| `qemu/boot-test.sh` (KVM) | **OK**, 121 properties across the five passes. Locally the `/dev` node staging step reported SKIPPED (no `CAP_MKNOD` without sudo); CI's `HARNESS_STRICT=1` run covers it |
+| `qemu/boot-test-aarch64.sh` (TCG) | **OK**, 175 properties, all five passes |
+| sibling-free reproduction | a copy with no `../<dep>` siblings resolves a byte-identical lock and byte-identical x86_64 and aarch64 binaries |
+
 ## [1.7.8] — 2026-09-23
 
 **config.json may be up to 256 KiB. Over 16 KiB it was refused.** The roadmap named

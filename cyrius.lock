@@ -1,7 +1,7 @@
 commit	eb6b92240ab0d6ae8a0509baa75d74984dc03630	sigil	https://github.com/MacCracken/sigil.git	3.12.18
 commit	3729b553adc400ab80471721ff5d20f8a87de13c	agnostik	https://github.com/MacCracken/agnostik.git	1.6.3
 commit	c95f296093f04272b186f2ff05c5d5b6232720fc	libro	https://github.com/MacCracken/libro.git	2.10.3
-commit	9bae8e201da0855f00f584314fd6479360fa4904	argonaut	https://github.com/MacCracken/argonaut.git	1.15.3
+commit	d362a1cc17ec83f2a04dda44398f243ff8170956	argonaut	https://github.com/MacCracken/argonaut.git	1.15.4
 commit	b9d3cf8c9e8a6ff14cf169c2f1ce336113beef5a	patra	https://github.com/MacCracken/patra.git	1.14.3
 ec62f18f9e28e9b697215702052826933a0cb24e721b00446171b53ebfc8b161  lib/agnostik.cyr
 417031acfb92b8f018315ebf375a410c7aecafecd1175c2e691097bb3373a0ee  lib/alloc.cyr
@@ -20,7 +20,7 @@ e21100c7633d48c0323ad5737973655541a81885bf04df67d50262e1ec5859f1  lib/argonaut_b
 b34e96e128e5eec35322da61fa7a8db44c97d7ffb9793b90e6bbc27e50f8aa1e  lib/argonaut_security.cyr
 bc21648c460b03861a86c6fca7a52836a88c2b29837b0c59c8ed7354ad4864d8  lib/argonaut_services.cyr
 11d3a7947cc4e31ad960c349a9ff14b66ac1887061fbc298371782c305fe8090  lib/argonaut_syscall_compat.cyr
-a689a1bdd113552160748751cd1a3e195382b486d54fbd87539b2e8eeb4b6488  lib/argonaut_types.cyr
+ad733ef47d1fd4c0af278eaf8c74eb759a77be4c62f5fffd822506d440187836  lib/argonaut_types.cyr
 27c9752b70e797b43d30204e5077749526144495ba7021b1272067f3236d81f9  lib/args_agnos.cyr
 99f96283da419ad9f01d076269411c3d5214b6007a92d1bbe2356ab906a5d1a1  lib/args_macos.cyr
 65b99d174e411037dc1662bea183fe4c67835760eda848063d352e590219d955  lib/assert.cyr

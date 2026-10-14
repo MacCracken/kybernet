@@ -6,6 +6,15 @@
 
 ## Version
 
+**1.7.9**: argonaut 1.15.3 → 1.15.4. argonaut's `RestartPolicy` and `SeccompAction` now
+have agnostik's values (RESTART_NEVER / ALWAYS / ON_FAILURE = 0 / 1 / 2, SECCOMP_KILL /
+TRAP / LOG = 1 / 3 / 4). Both enums meet in this unit, where one value per constant
+silently wins, and they had disagreed. argonaut's config parser is now
+`argonaut_restart_policy_parse`, and `svc_config.cyr` calls it by that name, because
+agnostik is adding a PascalCase `restart_policy_parse` that would otherwise take over the
+`restart` key. `test_restart_and_seccomp_values_agree` guards the values. Suite 882 / 877.
+Harness 121, aarch64 boot gate 175. Binaries are the same size as 1.7.8 on both arches.
+
 **1.7.8**: config.json may be up to 256 KiB; over 16 KiB it was refused. The roadmap
 named the stdlib's `file_read_whole` for this, and measuring it found two defects that
 matter in PID 1: it allocates 65,544 bytes per call in an arena that is never reset, and
@@ -144,7 +153,7 @@ gitignored: **the contract is the lock file, not the bytes on disk.**
 | sigil | 3.12.18 | `eb6b922` | THIN surface: mldsa + sha_ni + sha256 + hex + tpm + argon2. **Never the monolith.** |
 | agnostik | 1.6.3 | `3729b55` | `dist/agnostik.cyr` full bundle |
 | libro | 2.10.3 | `c95f296` | `dist/libro.cyr` full bundle |
-| argonaut | 1.15.3 | `9bae8e2` | **12 selective modules**, no dist bundle |
+| argonaut | 1.15.4 | `d362a1c` | **12 selective modules**, no dist bundle |
 | patra | 1.14.3 | `b9d3cf8` | stdlib fold, and libro's pin (byte-identical); kybernet calls no `patra_*` |
 
 `cyrius deps --verify`: **76 verified, 0 failed**, 5 commit pins. Every tag was confirmed
@@ -172,7 +181,9 @@ and byte-identical, and the warning still fires.
 | agnos-init x86_64 (`CYRIUS_DCE=1`) | 248,440 | `0x3e` |
 | agnos-init aarch64 (`CYRIUS_DCE=1`) | 2,034,080 | `0xb7` |
 
-1.7.8's bounded reader added 32 B to kybernet on each arch; agnos-init does not link it.
+1.7.9's argonaut 1.15.4 changed no size on either arch: an enum value and a fn name take
+the same bytes. 1.7.8's bounded reader added 32 B to kybernet on each arch; agnos-init
+does not link it.
 1.7.7's argonaut 1.15.3 (one more desktop default) added 4,160 B to kybernet on x86_64
 and 56 on aarch64. 1.7.5's three service keys had added 5,552 and 1,464. The note below is
 1.7.0's, when the toolchain moved.
@@ -193,8 +204,8 @@ the build; that is standing rule 32.
 
 | Gate | Count | Enforcement |
 |---|---|---|
-| `cyrius test src/test.cyr` | **876** assertions | floor read from CLAUDE.md; a shrinking suite fails |
-| `bash scripts/aarch64-exec-gate.sh` | **871** assertions + 5 syscall probes | executes aarch64 under `qemu-user`; its own declared floor |
+| `cyrius test src/test.cyr` | **882** assertions | floor read from CLAUDE.md; a shrinking suite fails |
+| `bash scripts/aarch64-exec-gate.sh` | **877** assertions + 5 syscall probes | executes aarch64 under `qemu-user`; its own declared floor |
 | `bash qemu/boot-test-aarch64.sh` | **175** properties, all 5 passes, 24 services | boots `kybernet-aarch64` as PID 1 (TCG), entropy-starved; needs host `veritysetup` |
 | `bash qemu/boot-test.sh` | **121** properties, 5 passes | `HARNESS_STRICT=1` in CI makes a skip a failure |
 | `bash scripts/verify-lock.sh` | 2 halves, 5 commit pins | the committed lock (HEAD's, not the working tree's) vs a fresh resolve |
@@ -202,7 +213,7 @@ the build; that is standing rule 32.
 | `cyrius lint` | 0 warnings, **0 untracked deferrals** | HARD GATE, both halves |
 | `cyrius fmt --check` | clean | non-mutating; never `diff <(cyrius fmt …)` |
 
-⚠ **876 and 871 are both correct, and neither floor gates the other.** Six assertions are
+⚠ **882 and 877 are both correct, and neither floor gates the other.** Six assertions are
 x86-only (`BS_OPEN`/`BS_STAT`/`BS_LSTAT`/`BS_PIPE`/`BS_POLL`/`BS_NANOSLEEP`) and one is
 aarch64-only (`BS_PPOLL`). Both floors are declared in CLAUDE.md and must be bumped
 together. **Do not pad the short arch to equalise them.**
@@ -238,8 +249,10 @@ stricter bar on the next sweep.**
 
 ## In flight
 
-Nothing. 1.7.8 is tagged. Four cyrius issues filed on 2026-09-23 are listed under
-"Waiting on cyrius" in [roadmap.md](roadmap.md).
+1.7.9 is cut in the working tree, not yet tagged. Four cyrius issues filed on 2026-09-23
+are listed under "Waiting on cyrius" in [roadmap.md](roadmap.md). When kybernet next takes
+agnostik (1.9.0 or later, which adds `restart_policy_name` / `_parse`), the agnostik sweep
+should show no duplicate here, since argonaut's parser no longer shares the name.
 
 ## Next
 
