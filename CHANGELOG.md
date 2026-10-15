@@ -7,6 +7,130 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.7.10] — 2026-10-15
+
+**cyrius 6.6.6 → 6.6.20, and argonaut 1.15.6 / libro 2.10.8 / agnostik 1.7.1 / sigil 3.13.10.**
+`privdrop.cyr` moves onto the stdlib's new capability wrappers, and `verify-lock.sh` learns the
+lock shape 6.6.20 leaves behind after a tag bump. Suite 882 / 877. Harness 121, aarch64 boot
+gate 175. kybernet is +31,792 B on x86_64 and −193,504 B on aarch64.
+
+### Pins
+
+The user asked for cyrius 6.6.20 and for every dep that also pins it. argonaut 1.15.6, libro
+2.10.8 and agnostik 1.7.1 are the latest tags that do. No sigil tag pins 6.6.20 (3.13.10 pins
+6.6.18, 3.13.11 pins 6.7.5), so sigil moves to **3.13.10, libro 2.10.8's own sigil pin**, the
+one deviation the pin policy allows. It is also forced: sigil 3.13.0 changed the arity of
+private `_mldsa_sv_*` helpers, cyrius dedups libro's sigil block onto kybernet's, and two 3.x
+minors of the mldsa profile cannot share one unit. The folded patra is 1.15.2, the same tag
+libro 2.10.8 pins, and the two files are byte-identical.
+
+### Changed
+
+- **`cyrius.cyml`:** `cyrius` `6.6.6` → **`6.6.20`**; `[deps.sigil]` `3.12.18` → **`3.13.10`**,
+  `[deps.agnostik]` `1.6.3` → **`1.7.1`**, `[deps.libro]` `2.10.3` → **`2.10.8`**,
+  `[deps.argonaut]` `1.15.4` → **`1.15.6`**. Every tag's commit matches the remote.
+- **`cyrius.lock`:** regenerated from scratch. ⚠ 6.6.20's resolver **keeps an old tag's
+  `commit` row** beside the new one after a tag bump (its CVE-83 fix; cyrius already tracks it
+  as `2026-10-12-deps-keeps-a-stale-commit-row-after-a-tag-change.md`). The first resolve of
+  this bump left 10 commit rows for 5 deps, and `deps --verify` still said 76 of 76. Deleting
+  the lock and resolving again gives 5 rows, 76 verified, with a `cyrius	6.6.20` trailer.
+- **`src/lib/privdrop.cyr`:** capget/capset go through **`sys_capget` / `sys_capset`**, which
+  6.6.8 added to the stdlib. The same release defined `SYS_CAPGET`/`SYS_CAPSET` as the x86
+  125/126 on aarch64 too, routed by two new ladder rows to 90/91, so kybernet's own aarch64
+  enum (native 90/91) became a `conflicting value` redefinition of an arch-aware stdlib name
+  and set off the compiler's "raw syscall 91 is x86_64 `fchmod`" warning twice. Both forms
+  were checked under `qemu-aarch64 -strace` before the switch, as literals and as variables:
+  each lands on `capget`/`capset`, so this is not a behaviour fix. It takes one native literal
+  off standing rule 1's re-verify list.
+- **`scripts/verify-lock.sh`:** half 1 counts commit rows per dep. More than one fails with the
+  tags named and the fix that works under 6.6.20 (`rm -rf lib cyrius.lock && cyrius deps`);
+  the stale-tag message gives the same fix. Before, two rows printed as a two-line tag and the
+  suggested re-resolve could not clear them. Checked on a scratch commit of this tree: clean,
+  OK; with a stale agnostik row appended and committed, FAIL, exit 1.
+
+### What the toolchain changed underneath
+
+- **The hash seed stopped blocking, and the wait moved.** 6.6.7 resolved kybernet's filing
+  (`2026-09-23-kybernet-hashseed-getrandom-blocks-pid1-before-crng-seeds.md`): the stdlib hash
+  seed draws with `GRND_INSECURE`. On the entropy-starved aarch64 boot, phase 4 → 6 fell from
+  about 870 ms to **35 ms**. The first `init_start_service` now takes **914 ms** instead, with
+  `random: crng init done` landing inside it before the fork: argonaut's `audit_log_record`
+  calls libro's `uuid_v4`, which is `getrandom(…, 0)`. So the board boots no sooner. Standing
+  rule 51 is rewritten around that, and deciding libro's draw is a roadmap item.
+- **The aarch64 ladder is folded at compile time** (6.6.18): a literal syscall number becomes
+  one `movz`, a variable one calls a shared stub. That is the aarch64 size drop. Every
+  remaining raw or gated number in `src/` and `qemu/` was re-run under `qemu-aarch64 -strace`.
+  The list is 113 as a literal and as a variable, 26, 7, 1, 60, 444–446, and variable 90/91,
+  plus `sys_setsid` and `SYS_PRCTL`. Each lands on the intended call.
+- **Duplicate structs warn** (6.6.9): `struct 'ResourceLimits' redefined with a different layout
+  — the FIRST definition is the one used`. That is standing rule 14's known hazard, now
+  visible. A two-definition probe gives the first definition's size on both arches, so
+  agnostik's 48 B still wins.
+- **A reachable undefined call refuses to emit the binary** (6.6.9), on every target, which is
+  what standing rule 7 asked of every reader of the build log.
+- **The conflicting-enum warning works past 1,024 globals again** (6.6.8). 1.7.0's probe, a
+  conflicting `CAPX` behind 1,500 globals, warns on 6.6.20.
+  `test_capability_numbers_are_kernel` stays the guard.
+- **x86 DCE compaction is capped at 4,096 dead-code runs**, and 6.6.18 says so in the DCE note.
+  kybernet has 3,351 unreachable fns and compacts. **agnos-init has 4,180 and does not**: its
+  dead code is NOP-filled and kept, and the x86_64 binary is **1,574,640 B** (248,440 at 1.7.9).
+  The toolchain alone does it: 1.7.9's source and deps under 6.6.20 give 4,170, against 4,012
+  under 6.6.6. The binary is correct. Filed as
+  `2026-10-15-kybernet-dce-compaction-cap-agnos-init.md`; the cap is the "WPNR 4,096-run merge"
+  on cyrius's roadmap.
+- Standing rule 2's sizing was re-measured on both arches (global `[4]`/`[16]` 32/128 B apart,
+  local 8/16): unchanged.
+- The other three 2026-09-23 filings are resolved too: `file_read_whole` (6.6.7, which adds
+  `file_read_whole_into`), `fl_alloc`'s -12 fault (6.6.7) and the `None()` mixed-return
+  misfire (6.6.9). None needs a change here. Moving onto `file_read_whole_into` is a roadmap
+  item.
+
+### What the deps changed underneath
+
+- **argonaut 1.15.6** starts the services inside a wave in bytewise name order. Before, the
+  per-process hashmap seed reordered them on every boot. It also sends sd_notify through the
+  stdlib's `sys_sendto`. Of the twelve imported modules only `syscall_compat`, `services` and
+  `notify` changed.
+- **agnostik 1.7.1** renamed its private helpers `_stik_*`, so its `_hex_nibble` no longer
+  duplicates sigil's. That closes the roadmap item, and every duplicate-fn warning left is
+  sigil's own byte-identical `crypto_scratch` family. Its exit-70 `_stik_fill_random` stays
+  dead in PID 1.
+- **libro 2.10.8** changed only `patra_store.cyr`, reached only with `audit_persist`. Its
+  sidecar shrank to `hashmap`, so it no longer lands `lib/sys.cyr`; kybernet declares `sys`
+  itself.
+- **sigil 3.13.10:** `argon2id_into`, `argon2_mem_bytes`, `TPM_SHA256` and the raw-cstr PCR
+  digest are unchanged. 3.13.6 made `cbank()` read the thread pointer with inline asm on the
+  first crypto call, which in PID 1 is the first Argon2 call at phase 6c. The unit suites on
+  both arches and pass 4 of both harnesses run it. 3.13.4 makes the TPM child `setsid()` and
+  kill its process group on a deadline. No fixture sets `tpm_attestation`, so that is covered
+  only by the strace check above.
+- The DCE list was diffed against 1.7.9's. Of 23 newly live functions, the one exit is
+  `sys_exit_group(86)` in the stdlib's poison core, armed only under `CYRIUS_POISON`.
+  `mldsa65_sign`/`_verify` and `ed25519_verify` are dead.
+
+### Not changed, roadmapped
+
+The bump leaves new warnings in the build, each with one roadmap line. There are 21 calls of
+`json_v_obj_get`, which bayan has deprecated in favour of `bayan_json_v_obj_get_by_cstr`, its
+forward. And 6.6.20 flags four `streq(str_data(…))` sites in `src/main.cyr`, plus four in
+`src/test.cyr`, because a `Str` is not NUL-terminated at its length.
+
+### Release gates
+
+| Gate | Result |
+|---|---|
+| `scripts/verify-lock.sh` | lock verified on a scratch commit of this tree: four manifest tags match, and a fresh resolve is byte-identical (82 lines) |
+| `rm -rf lib cyrius.lock && cyrius deps && cyrius deps --verify` | 76 verified, 0 failed, 5 commit pins |
+| builds, `CYRIUS_DCE=1` | kybernet x86_64 **751,544 B**, aarch64 **1,975,920 B**; agnos-init **1,574,640 B** and **1,840,648 B** |
+| build warnings | sigil's 15 byte-identical duplicate fns; the `ResourceLimits` struct twin; the `patra` fold notice; the 21 deprecations and 4 `streq` warnings above. Nothing undefined, nothing for `SYS_CAP*` |
+| `cyrius fmt --check` / `cyrius lint` / `cyrius vet` | clean / 0 warnings, 0 untracked deferrals / 0 untrusted, 0 missing |
+| `cyrius test src/test.cyr` | **882 passed, 0 failed** |
+| `scripts/aarch64-exec-gate.sh` | **877** assertions, 0 failed (floor 877); 5 syscall probes ok; declared-broken list empty |
+| `scripts/bench-history.sh` | 56 benchmarks, **no regression ≥ 15%**. Calibration 120 → 131 ns/op (the host about 9% slow, normalised) |
+| `qemu/boot-test.sh` (KVM, `HARNESS_STRICT=1`) | **OK**, 121 properties across the five passes; kybernet span 478 ms, reactor wakeups 24. The `/dev` node staging step reported SKIPPED locally (no `CAP_MKNOD` without sudo) |
+| `qemu/boot-test-aarch64.sh` (TCG, `HARNESS_STRICT=1`) | **OK**, 175 properties, all five passes; CRNG seeded at 2.14 s, after phase 1 at 1.20 s |
+| sibling-free reproduction | a copy with no `../<dep>` siblings resolves a byte-identical lock and byte-identical binaries on both arches, agnos-init included |
+
 ## [1.7.9] — 2026-10-14
 
 **argonaut 1.15.3 → 1.15.4: `RestartPolicy` and `SeccompAction` now have the same values in

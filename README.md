@@ -40,7 +40,7 @@
 
 ## Build
 
-Requires Cyrius 6.6.6 (`cyriusly install 6.6.6 && cyriusly use 6.6.6`).
+Requires Cyrius 6.6.20 (`cyriusly install 6.6.20 && cyriusly use 6.6.20`).
 
 ```sh
 cyrius deps                                # Resolve deps from cyrius.cyml into lib/
@@ -152,10 +152,10 @@ Resolved via `cyrius.cyml` (locked in `cyrius.lock`):
 
 | Dep | Version | What |
 |-----|---------|------|
-| sigil | 3.12.18 | TPM / crypto trust surface + Argon2id (thin sub-bundles only) |
-| agnostik | 1.6.3 | Shared AGNOS types (security, agent, error) |
-| libro | 2.10.3 | Cryptographic audit chain |
-| argonaut | 1.15.4 | Service lifecycle, boot stages, health, audit, pre-exec + extra-env hooks |
+| sigil | 3.13.10 | TPM / crypto trust surface + Argon2id (thin sub-bundles only) |
+| agnostik | 1.7.1 | Shared AGNOS types (security, agent, error) |
+| libro | 2.10.8 | Cryptographic audit chain |
+| argonaut | 1.15.6 | Service lifecycle, boot stages, health, audit, pre-exec + extra-env hooks |
 
 `patra` and `sakshi` are **not** declared as git deps — cyrius 6.5.20+ ships
 them in the stdlib snapshot, and a git pin would silently downgrade the
@@ -239,7 +239,7 @@ operator tool, and CI still exercises its parameter validation.
   `qemu/boot-test-aarch64.sh` boots aarch64 under TCG, each as real PID 1. Until
   1.6.19 the aarch64 artifact shipped on a cross-build exiting 0 — and could not
   boot at all, for ten releases, because of an upstream syscall mis-emission.
-- Cyrius 6.6.6 (`~/.cyrius/bin/cyrius`)
+- Cyrius 6.6.20 (`~/.cyrius/bin/cyrius`)
 - No C, no Rust, no libc
 - OpenSSL 3.2+ — **provisioning only**, for `scripts/mkcred.sh`. Nothing kybernet
   runs at boot depends on it; the verifier is sigil's own Argon2id.

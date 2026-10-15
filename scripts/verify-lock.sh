@@ -180,10 +180,24 @@ while IFS=$'\t' read -r name mtag; do
         fail=1
         continue
     fi
+    # ⚠ cyrius 6.6.20 (its CVE-83 fix) KEEPS the old tag's commit row after a
+    # tag bump and adds the new one beside it, so a re-resolve alone leaves
+    # two rows and cannot fix the lock. Only deleting the lock re-pins.
+    # Filed: cyrius 2026-10-12-deps-keeps-a-stale-commit-row-after-a-tag-change.md
+    nrows=$(printf '%s\n' "$lsha" | grep -c .)
+    if [ "$nrows" -gt 1 ]; then
+        echo "  FAIL: $name — $LOCK has $nrows commit rows (tags: $(printf '%s' "$ltag" | tr '\n' ' '))."
+        echo "        cyrius >= 6.6.20 keeps an old tag's row after a tag bump."
+        echo "        Delete the lock, re-resolve, and commit the result:"
+        echo "          rm -rf lib $LOCK && cyrius deps && cyrius deps --verify"
+        fail=1
+        continue
+    fi
     if [ "$ltag" != "$mtag" ]; then
         echo "  FAIL: $name — $MANIFEST says tag '$mtag', $LOCK pins tag '$ltag' ($lsha)."
-        echo "        The lock is STALE. Re-resolve and commit the result:"
-        echo "          rm -rf lib && cyrius deps && cyrius deps --verify"
+        echo "        The lock is STALE. Delete it, re-resolve, and commit the result"
+        echo "        (cyrius >= 6.6.20 would otherwise keep the stale row):"
+        echo "          rm -rf lib $LOCK && cyrius deps && cyrius deps --verify"
         fail=1
         continue
     fi
