@@ -63,15 +63,17 @@ enum CfgRead {
     CFG_READ_TOO_BIG = 4;
 }
 
-# The config read: the buffer's first size and the largest config.json accepted (1.7.8;
-# the limit was 16,384 bytes before). main.cyr has the reasons for both numbers.
-var CFG_FIRST_CAP = 16384;
+# The largest config.json accepted (1.7.8; the limit was 16,384 bytes before). main.cyr
+# has the reasons for the number.
 var CFG_MAX_BYTES = 262144;
 
-# `n` is read_whole_into's return with `cap` as its ceiling (1.7.8), which is `cap + 1`
-# for a file larger than `cap`, so a full read is told apart from a truncated one.
+# `n` is the stdlib's file_read_whole_into return with `cap` as its ceiling (1.7.11), which
+# is -EFBIG for a file larger than `cap`, so a full read is told apart from a truncated
+# one. `n > cap` is TOO_BIG as well: it was kybernet's own reader's answer from 1.7.8 to
+# 1.7.10, and a count past the ceiling can never be a whole read.
 fn cfg_read_class(n, cap) {
     if (n == 0 - ENOENT) { return CFG_READ_ABSENT; }
+    if (n == 0 - KYB_EFBIG) { return CFG_READ_TOO_BIG; }
     if (n < 0) { return CFG_READ_UNREADABLE; }
     if (n == 0) { return CFG_READ_EMPTY; }
     if (n > cap) { return CFG_READ_TOO_BIG; }

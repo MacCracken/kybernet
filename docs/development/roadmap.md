@@ -35,12 +35,13 @@ In the order they would be taken.
       still describes the unbounded `tpm_read_pcr` path, dead since 1.6.16.
       `src/lib/seccomp.cyr` cites "roadmap v1.6.0" and a hardware section for the aarch64
       numbers, which the aarch64 boot gate executes. Comments only.
-- [ ] **Move config.json and the mount table onto the stdlib's `file_read_whole_into`, and
-      delete `src/lib/read_whole.cyr`.** cyrius 6.6.7 resolved the filing behind the
-      stopgap (`2026-09-23-kybernet-file-read-whole-no-ceiling-unchecked-growth-alloc.md`,
-      archived): every allocation is checked, growth is clamped, and `_into(rb, path, max)`
-      reads into a kept buffer. Check that it allocates nothing per call once the buffer
-      exists, since PID 1's arena is never reset, before retiring the stopgap.
+- [ ] **The bench gate cannot hold on a saturated host.** At 1.7.11, with another
+      workload keeping all 16 cores busy (load 9 to 20), two consecutive runs flagged 15
+      and then 5 benchmarks, disjoint sets, and the first set came back about 50% faster on
+      the second run. The calibration loop normalises CPU speed, not memory contention. An
+      interleaved A/B against the previous release's tree, best of three, showed parity
+      within 5% on every flagged benchmark. Consider making that A/B the gate's own
+      fallback when the history comparison flags.
 - [ ] **`json_v_obj_get` is deprecated in the bayan that cyrius 6.6.20 folds.** 21 call
       sites (20 in `src/lib/svc_config.cyr`, 1 in `src/main.cyr`) warn on every build. The
       alias forwards to `bayan_json_v_obj_get_by_cstr`; every key kybernet passes is a

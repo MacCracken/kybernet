@@ -11,25 +11,43 @@ struct MountEntry { source; target; fstype; flags; data; required; }
 var _mount_cache = 0;
 var _mount_cache_len = 0;
 
-# The buffer behind it, { ptr, cap } for read_whole_into. GLOBAL: 2 slots = 16 bytes.
+# The buffer behind it, { ptr, cap } for the stdlib's file_read_whole_into. GLOBAL: 2 slots
+# = 16 bytes.
 #
 # 1.7.8: this was a new alloc(8192) on every load after an invalidation, filled by
 # file_read_all capped at 8,192 bytes. A longer table was scanned as far as 8 KiB and
 # anything past that reported "not mounted", with nothing said. A dev box's table is 27
 # lines in 2,481 bytes, so 8 KiB is about 90 mounts. The buffer is kept now, grows to
-# 1 MiB, and a table past that is logged.
+# 1 MiB, and a table past that is logged. 1.7.11: the reader is the stdlib's (cyrius
+# 6.6.7), which replaced kybernet's read_whole.cyr stopgap; its buffer starts at 4 KiB.
 var _mount_rb[2];
 var MOUNT_TABLE_MAX = 1048576;
 
+# EFBIG, which file_read_whole_into returns for a file over its ceiling. asm-generic
+# errno-base.h, so the same on x86_64 and aarch64. The stdlib's Errno enum has no EFBIG
+# (io.cyr writes the literal), and the prefix keeps a later stdlib EFBIG from colliding.
+enum KybErrno { KYB_EFBIG = 27; }
+
 fn _mount_cache_load() {
     if (_mount_cache != 0) { return 0; }
-    var n = read_whole_into(&_mount_rb, "/proc/self/mounts", 8192, MOUNT_TABLE_MAX);
-    if (n > MOUNT_TABLE_MAX) {
+    return _mount_cache_load_path("/proc/self/mounts");
+}
+
+# The load itself, with the path a parameter so the unit suite can hand it a table over
+# the ceiling (standing rule 34). PID 1 only ever passes /proc/self/mounts.
+fn _mount_cache_load_path(path) {
+    var n = file_read_whole_into(&_mount_rb, path, MOUNT_TABLE_MAX);
+    if (n == 0 - KYB_EFBIG) {
+        # The stdlib fills the buffer to the ceiling before the one extra byte that says the
+        # file is larger, so the first 1 MiB is in it; test_read_whole pins that. It writes
+        # no NUL on this path, and is_mounted() reads one byte past the data, so write it
+        # here: the buffer holds cap + 1 bytes and cap is the ceiling.
         klog("mount table is over 1 MiB - is_mounted() sees only the first 1 MiB");
         n = MOUNT_TABLE_MAX;
+        store8(load64(&_mount_rb) + n, 0);
     }
     if (n < 0) { n = 0; }
-    _mount_cache = read_whole_buf(&_mount_rb);
+    _mount_cache = load64(&_mount_rb);
     _mount_cache_len = n;
     return 0;
 }

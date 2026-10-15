@@ -6,7 +6,7 @@
 
 - **Type**: Cyrius binary (PID 1 init). Since 1.7.6 the package also ships `agnos-init`, a separate oneshot program that makes the AGNOS directory layout (`src/agnos_init.cyr`); it is never linked into PID 1
 - **License**: GPL-3.0-only
-- **Version**: 1.7.10
+- **Version**: 1.7.11
 - **Language**: Cyrius **6.6.20** (via `~/.cyrius/bin/cyrius`, `cyriusly use 6.6.20`). ⚠ **The pack-wide lockstep is retired.** A dep's own pin governs only the dep's CI, since kybernet compiles dep *source* with its own toolchain. **Do not move any pin without the user saying so.** 6.6.20 changed four things kybernet had to act on (CHANGELOG 1.7.10): the stdlib now defines `SYS_CAPGET`/`SYS_CAPSET` (as the x86 125/126 on aarch64 too, routed by the ladder) and ships `sys_capget`/`sys_capset`, so `privdrop.cyr` dropped its own per-arch numbers (rule 1); `cyrius deps` **keeps an old tag's `commit` row** after a tag bump (its CVE-83 fix), so a dep bump needs `rm cyrius.lock` before the resolve (release gates); the stdlib hash seed no longer blocks on entropy (rule 51); and a duplicate `struct` now warns (rule 14). It also refuses to emit a binary with a reachable undefined function (rule 7), folds the aarch64 ladder at compile time (aarch64 binary -193 KB), and caps x86 DCE compaction at 4,096 dead-code runs, which agnos-init now crosses (1.57 MB, NOP-filled, not compacted; roadmap). 6.6.6 (the prior pin, CHANGELOG 1.7.0) made `file_read_all` return a negative errno when a READ fails (rule 30: only ENOENT is "absent") and cyrlint fold case and read a deferral phrase across a whole comment paragraph. 6.6.2 was the value-form repair release: `Result`/`Option`/`Either` declared `: stack` return a `(tag, payload)` register pair, `payload()` is gone permanently, and a same-name **different-arity** duplicate fn is a hard error (it surfaced the `health_check_new` mis-bind, CHANGELOG 1.6.20). 6.5.36 remains load-bearing history: it moved `SYS_PPOLL` 73 → **1073** and `SYS_SIGNALFD4` 74 → **1074** into the ≥1000 private-alias band, the fix for 1.6.13 CRITICAL-1 — the aarch64 ESYSXLAT collision that made `sys_signalfd()` issue `fsync(-1)` and stopped the aarch64 binary booting at all. Dep pins (1.7.10): argonaut **1.15.6** / libro **2.10.8** / agnostik **1.7.1**, the latest tags pinning cyrius 6.6.20, and sigil **3.13.10**, libro 2.10.8's own sigil pin (no sigil tag pins 6.6.20). Every tag confirmed on the remote.
 - **Tools**: `owl` to read .cyr files. (`cyim` is referenced in sibling repos but is **not installed here** — use ordinary file edits.)
 
@@ -22,7 +22,7 @@ The helmsman that steers the Argo. Manages system boot, essential mounts, signal
 cyrius deps                                  # Resolve deps from cyrius.cyml into lib/
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet   # Build (DCE recommended)
 CYRIUS_DCE=1 cyrius build src/agnos_init.cyr build/agnos-init   # agnos-init, the layout oneshot (1.7.6)
-cyrius test src/test.cyr                     # Run 882 tests
+cyrius test src/test.cyr                     # Run 890 tests
 cyrius bench src/bench.cyr                   # Run benchmarks
 bash scripts/bench-history.sh                # Record bench history + ≥15% regression gate (MANDATORY on every release)
 CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr build/kybernet-aarch64   # Cross-build aarch64 (DCE, as CI and release.yml ship it)
@@ -40,9 +40,9 @@ kybernet/
 ├── src/
 │   ├── main.cyr           # Globals + boot sequence + event loop + harness gate
 │   ├── agnos_init.cyr     # agnos-init: a SEPARATE program, run as a oneshot (1.7.6)
-│   ├── test.cyr           # Integration tests (882 assertions)
+│   ├── test.cyr           # Integration tests (890 assertions)
 │   ├── bench.cyr          # Microbenchmarks
-│   └── lib/               # 22 modules
+│   └── lib/               # 21 modules
 │       ├── log.cyr        # klog / klog2 / kmsg / slog (factored out at 1.2.0)
 │       ├── cmdline.cyr    # /proc/cmdline token scan (factored out at 1.5.7)
 │       ├── termios.cyr    # console echo suppression (1.5.8; no stdlib ioctl)
@@ -62,7 +62,6 @@ kybernet/
 │       ├── emergency_auth.cyr # Argon2id credential: format, bounds, verify (1.5.9)
 │       ├── restart_queue.cyr # Deferred restarts with backoff (1.5.4)
 │       ├── console_io.cyr   # _read_line_fd / _u64_str — testable, out of main (1.6.1)
-│       ├── read_whole.cyr   # a whole file into a kept buffer, up to a ceiling (1.7.8)
 │       ├── boot_stages.cyr  # Per-stage work + OK/SKIP/FAIL status (1.5.1)
 │       └── agnos_dirs.cyr   # agnos-init's directory layout; NOT included by main.cyr (1.7.6)
 ├── qemu/                  # PID-1 boot harnesses (1.1.4+)
@@ -130,7 +129,7 @@ Do **not** add a `path = "../<dep>"` alongside `git`/`tag`. When `path` resolves
 
 1. Make changes to `src/main.cyr` or `src/lib/*.cyr`
 2. Build: `CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet`
-3. Test: `cyrius test src/test.cyr` (882 tests must pass)
+3. Test: `cyrius test src/test.cyr` (890 tests must pass)
 4. Cross-build: `CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr build/kybernet-aarch64` (verify both arches). ⚠ Keep `CYRIUS_DCE=1`: on aarch64 DCE NOP-fills dead code rather than removing it, so a build without it is the same SIZE with different BYTES, and a gate run against it tests a binary CI and `release.yml` do not ship (1.7.3).
 5. Harness (needs KVM): `bash qemu/boot-test.sh` — 121 properties across five passes: boot markers + budget, the reactor gate, dm-verity verification, the emergency-auth prompt against BOTH credential formats plus a refused credential file that must not fall back to the config key (1.7.1) and the emergency shell's own descriptors, signal mask and environment (1.7.3), and the quiet gate (log_to_console=false)
 5a. **aarch64 boot: `bash qemu/boot-test-aarch64.sh`** — 175 properties: all five passes (the edge, auth and quiet passes since 1.7.3, see rule 52), 24 services built from the Cyrius fixtures (1.7.2), on an entropy-starved machine (`dtb-randomness=off`). Needs the host's `veritysetup` to format the edge image. EXECUTES `kybernet-aarch64` as PID 1 under TCG (no KVM; an x86 host cannot accelerate aarch64) against a **pinned, sha256-checked** Alpine netboot kernel cached in `qemu/.cache/`. ⚠ `phase 4: signals ready` is its **CRITICAL-1 sentinel** — that marker's absence has one known cause, and no syscall probe would catch it because the probe tests signalfd in isolation rather than inside init's real startup.
@@ -250,8 +249,8 @@ CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet
 CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr build/kybernet-aarch64
 CYRIUS_DCE=1 cyrius build src/agnos_init.cyr build/agnos-init
 CYRIUS_DCE=1 cyrius build --aarch64 src/agnos_init.cyr build/agnos-init-aarch64
-cyrius test src/test.cyr                            # 882 tests, 0 failed
-bash scripts/aarch64-exec-gate.sh                   # EXECUTES aarch64 (needs qemu-user); aarch64 test floor: 877
+cyrius test src/test.cyr                            # 890 tests, 0 failed
+bash scripts/aarch64-exec-gate.sh                   # EXECUTES aarch64 (needs qemu-user); aarch64 test floor: 885
 bash scripts/bench-history.sh                       # ≥15% regression gate
 bash qemu/boot-test.sh                              # needs KVM
 bash qemu/boot-test-aarch64.sh                      # BOOTS aarch64 as PID 1 (TCG, no KVM)
@@ -268,4 +267,4 @@ Plus a **sibling-free reproduction** — the only gate that catches a tag which 
 - Do not add C, Rust, or assembly files — everything is Cyrius
 - Do not reference `../cyrius/` repo — use installed toolchain at `~/.cyrius/`
 - Do not bump a dep tag to a value > the highest existing git tag (CI clones from `git + tag`; an unreleased VERSION-file value fails resolution — see 1.1.0 CHANGELOG note)
-- Test after every change (882 tests + both harnesses when KVM available)
+- Test after every change (890 tests + both harnesses when KVM available)

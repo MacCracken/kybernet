@@ -60,8 +60,8 @@ services expect at boot: `/run` is a fresh tmpfs every boot, so `/run/agnos/agen
 
 | Module | Lines | What |
 |--------|-------|------|
-| main | 2147 | Boot sequence, argonaut init, event loop, emergency shell, shutdown |
-| svc_config | 1223 | JSON → ServiceDefinition; security, limits and edge blocks; config-read classification |
+| main | 2150 | Boot sequence, argonaut init, event loop, emergency shell, shutdown |
+| svc_config | 1228 | JSON → ServiceDefinition; security, limits and edge blocks; config-read classification |
 | edge_boot | 777 | Verified-boot pre-flight: TPM PCR, dm-verity verification |
 | emergency_auth | 707 | Argon2id credential: record format, parameter bounds, legacy migration, file-vs-key source |
 | cgroup | 623 | Cgroup v2 controllers, paths, limits, move, kill, teardown |
@@ -73,17 +73,16 @@ services expect at boot: `/run` is a fresh tmpfs every boot, so `/run/agnos/agen
 | service_sandbox | 238 | Per-service pre-exec: cgroup join → no_new_privs → caps → Landlock → seccomp |
 | log | 224 | klog / klog2 / kmsg / slog |
 | boot_stages | 216 | Per-stage work with OK / SKIP / FAIL status |
-| mount | 187 | Data-driven essential mount table; the mount-table cache |
+| mount | 205 | Data-driven essential mount table; the mount-table cache |
 | termios | 120 | Console echo suppression (hand-rolled ioctl/termios) |
 | console | 113 | stdio redirect; interactive `/dev/console` open |
 | reaper | 109 | Non-blocking waitpid loop, structured results |
 | restart_queue | 100 | Deferred restarts, static storage |
 | signals | 92 | Block 5 signals, create signalfd, classify |
-| read_whole | 92 | A whole file into a kept buffer, up to a ceiling (config.json, the mount table) |
 | console_io | 77 | Bounded line read, integer formatting — testable helpers moved out of main |
 | cmdline | 56 | `/proc/cmdline` token scanning |
 
-**9,187 lines of Cyrius** across `main.cyr` + 21 modules.
+**9,121 lines of Cyrius** across `main.cyr` + 20 modules.
 
 ## Features
 

@@ -6,6 +6,15 @@
 
 ## Version
 
+**1.7.11**: `src/lib/read_whole.cyr` is gone. config.json and the mount table are read
+with the stdlib's `file_read_whole_into` (cyrius 6.6.7 fixed the filing the stopgap was
+for), which keeps the same `{ptr, cap}` contract: one buffer per call site, nothing
+allocated on a read that fits, a refusal past the ceiling. A file over the ceiling is now
+`-EFBIG` (`KYB_EFBIG`, which `cfg_read_class` calls TOO_BIG). An oversized mount table
+is still scanned to 1 MiB, now through `_mount_cache_load_path`, which the suite drives
+with a 1 MiB+ table. Five defects put back each turn the suite red. Suite 890 / 885. The
+binaries are the same size as 1.7.10 and agnos-init is byte-identical.
+
 **1.7.10**: cyrius 6.6.6 → 6.6.20, with argonaut 1.15.6, libro 2.10.8 and agnostik 1.7.1
 (the latest tags that pin 6.6.20) and sigil 3.13.10 (libro 2.10.8's own sigil pin; no sigil
 tag pins 6.6.20). `privdrop.cyr` now calls the stdlib's new `sys_capget`/`sys_capset`, and
@@ -162,8 +171,10 @@ What 6.6.7–6.6.20 changed that kybernet can see:
 - Rule 2's sizing (global `[4]`/`[16]` 32/128 B apart, local 8/16) re-measured on both
   arches: unchanged.
 - The four kybernet filings from 2026-09-23 (`file_read_whole`, the hash seed, `fl_alloc`,
-  the `None()` misfire) are all resolved by 6.6.9. Adopting `file_read_whole_into` is a
-  roadmap item.
+  the `None()` misfire) are all resolved by 6.6.9. 1.7.11 adopted `file_read_whole_into`
+  and deleted `read_whole.cyr`. The stdlib opens without `O_CLOEXEC`, which the stopgap
+  used; PID 1 opens, reads and closes in one synchronous call, single-threaded and with no
+  signal handlers, so no fork can see the descriptor.
 
 `owl` reads `.cyr` files. **`cyim` is NOT installed here** despite sibling-repo references.
 Use ordinary file edits.
@@ -217,7 +228,7 @@ and byte-identical, and the warning still fires.
 | agnos-init x86_64 (`CYRIUS_DCE=1`) | 1,574,640 | `0x3e` |
 | agnos-init aarch64 (`CYRIUS_DCE=1`) | 1,840,648 | `0xb7` |
 
-1.7.10 moved the toolchain, so most of the change is cyrius's. The unchanged 1.7.9 source and
+1.7.11 (the reader swap) left both kybernet binaries the same size, with different bytes, and agnos-init byte-identical. 1.7.10 moved the toolchain, so most of the change is cyrius's. The unchanged 1.7.9 source and
 deps built under 6.6.20 give 738,488 B on x86_64 (+18,736) and 1,975,152 on aarch64
 (−194,272, the compile-time ladder fold); the dep moves and the `privdrop.cyr` change add
 +13,056 and +768. agnos-init x86_64 went 248,440 → 1,574,640 because it crossed DCE's
@@ -235,8 +246,8 @@ the build; that is standing rule 32.
 
 | Gate | Count | Enforcement |
 |---|---|---|
-| `cyrius test src/test.cyr` | **882** assertions | floor read from CLAUDE.md; a shrinking suite fails |
-| `bash scripts/aarch64-exec-gate.sh` | **877** assertions + 5 syscall probes | executes aarch64 under `qemu-user`; its own declared floor |
+| `cyrius test src/test.cyr` | **890** assertions | floor read from CLAUDE.md; a shrinking suite fails |
+| `bash scripts/aarch64-exec-gate.sh` | **885** assertions + 5 syscall probes | executes aarch64 under `qemu-user`; its own declared floor |
 | `bash qemu/boot-test-aarch64.sh` | **175** properties, all 5 passes, 24 services | boots `kybernet-aarch64` as PID 1 (TCG), entropy-starved; needs host `veritysetup` |
 | `bash qemu/boot-test.sh` | **121** properties, 5 passes | `HARNESS_STRICT=1` in CI makes a skip a failure |
 | `bash scripts/verify-lock.sh` | 2 halves, 5 commit pins | the committed lock (HEAD's, not the working tree's) vs a fresh resolve |
@@ -244,12 +255,12 @@ the build; that is standing rule 32.
 | `cyrius lint` | 0 warnings, **0 untracked deferrals** | HARD GATE, both halves |
 | `cyrius fmt --check` | clean | non-mutating; never `diff <(cyrius fmt …)` |
 
-⚠ **882 and 877 are both correct, and neither floor gates the other.** Six assertions are
+⚠ **890 and 885 are both correct, and neither floor gates the other.** Six assertions are
 x86-only (`BS_OPEN`/`BS_STAT`/`BS_LSTAT`/`BS_PIPE`/`BS_POLL`/`BS_NANOSLEEP`) and one is
 aarch64-only (`BS_PPOLL`). Both floors are declared in CLAUDE.md and must be bumped
 together. **Do not pad the short arch to equalise them.**
 
-22 modules in `src/lib/`. 25 services in the x86 harness and 24 in the aarch64 gate. 8 `.cyr` files under `qemu/`.
+21 modules in `src/lib/`. 25 services in the x86 harness and 24 in the aarch64 gate. 8 `.cyr` files under `qemu/`.
 
 ## Verification posture
 
@@ -280,9 +291,9 @@ stricter bar on the next sweep.**
 
 ## In flight
 
-1.7.10 is cut in the working tree, not yet tagged. One cyrius issue was filed on
-2026-10-15 and is listed under "Waiting on cyrius" in [roadmap.md](roadmap.md); the file is
-untracked in the cyrius repo for the user to commit. The four 2026-09-23 filings are
+1.7.10 and 1.7.11 are cut in the working tree, not yet committed or tagged. One cyrius
+issue was filed on 2026-10-15 and is listed under "Waiting on cyrius" in
+[roadmap.md](roadmap.md); the file is untracked in the cyrius repo for the user to commit. The four 2026-09-23 filings are
 resolved. When kybernet next takes agnostik (1.9.0 or later, which adds
 `restart_policy_name` / `_parse`; 1.7.1 does not), the agnostik sweep should show no
 duplicate here, since argonaut's parser no longer shares the name.

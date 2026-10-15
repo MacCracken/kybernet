@@ -25,7 +25,6 @@ include "src/lib/cmdline.cyr"
 include "src/lib/log.cyr"
 include "src/lib/console.cyr"
 include "src/lib/console_io.cyr"
-include "src/lib/read_whole.cyr"
 include "src/lib/termios.cyr"
 include "src/lib/signals.cyr"
 include "src/lib/reaper.cyr"
@@ -140,8 +139,9 @@ var g_notify_badpid = 0;        # MAINPID malformed, or outside the sender's cgr
 # on a reload that would replace a running board's services, boot mode and
 # edge policy wholesale, and at boot it would quietly turn an edge board into
 # a normal one. Callers decide; neither may confuse the two.
-# The config read buffer, { ptr, cap } for read_whole_into, kept for the life of the
-# process. GLOBAL scope, so [2] is 2 SLOTS = 16 bytes.
+# The config read buffer, { ptr, cap } for the stdlib's file_read_whole_into (1.7.11;
+# kybernet's own read_whole.cyr from 1.7.8 to 1.7.10), kept for the life of the process.
+# GLOBAL scope, so [2] is 2 SLOTS = 16 bytes.
 #
 # ⚠ KEPT, NOT ALLOCATED PER CALL. 1.6.14 HIGH-5: this was `alloc(cap + 1)` on every
 # call, in the arena PID 1 never resets, so `kill -HUP 1` (deliverable to init
@@ -151,11 +151,13 @@ var g_notify_badpid = 0;        # MAINPID malformed, or outside the sender's cgr
 # `is_mounted` 15-19% on the bench gate (1.6.14, isolated deliberately).
 #
 # ⚠ THE LIMIT IS 256 KiB, NOT 16 KiB, SINCE 1.7.8 (CFG_MAX_BYTES, in svc_config.cyr
-# so the unit suite reads the same number). The buffer starts at 16 KiB and doubles
-# only for a larger file. The harness's 25 fixtures already took 8,983 bytes. The
-# limit stays, and stays a refusal: a config.json that points at /dev/zero, or a
-# runaway file, must be refused rather than read until PID 1 runs out of memory
-# (read_whole.cyr has the measurement). 256 KiB is about 700 services at the
+# so the unit suite reads the same number). The buffer starts at 4 KiB, the stdlib's
+# first size, and doubles only for a larger file; a read that fits it allocates nothing.
+# The harness's 25 fixtures already took 8,983 bytes. The limit stays, and stays a
+# refusal: a config.json that points at /dev/zero, or a runaway file, must be refused
+# rather than read until PID 1 runs out of memory (cyrius issue
+# 2026-09-23-kybernet-file-read-whole-no-ceiling-unchecked-growth-alloc.md has the
+# measurement, resolved in 6.6.7). 256 KiB is about 700 services at the
 # harness's density. It also bounds the parse, which costs about 4 bytes of arena per
 # config byte on every load, SIGHUP included (35,904 bytes for an 8,983-byte config,
 # measured).
@@ -176,14 +178,15 @@ fn load_config() { return _load_config_inner(1); }
 
 fn _load_config_inner(want_services) {
     _cfg_saw_services = 0;
-    # A file over the limit comes back as `cap + 1`, never as a truncated prefix: before
+    # A file over the limit comes back as -EFBIG, never as a truncated prefix: before
     # 1.6.0 a config that outgrew the buffer came back as invalid JSON and took the
     # defaults path, a silent cliff with no diagnostic. A buffer that cannot grow is
     # -ENOMEM, which is UNREADABLE, so a SIGHUP then keeps the running config (1.7.8;
     # an allocation failure used to take the defaults path).
     var cap = CFG_MAX_BYTES;
-    var n = read_whole_into(&_cfg_rb, "/etc/kybernet/config.json", CFG_FIRST_CAP, cap);
-    var buf = read_whole_buf(&_cfg_rb);
+    var n = file_read_whole_into(&_cfg_rb, "/etc/kybernet/config.json", cap);
+    # ⚠ Take the pointer AFTER the read: growing the buffer replaces it.
+    var buf = load64(&_cfg_rb);
     # ⚠ ONLY ENOENT MEANS "ABSENT". 1.7.0. Before, `n <= 0` took the defaults path for every
     # failure, and since cyrius 6.6.6 that includes a read which fails half way; on SIGHUP the
     # defaults path applies the DEFAULT timeouts over the live ones. See cfg_read_class.
