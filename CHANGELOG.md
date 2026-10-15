@@ -7,6 +7,137 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.7.11] — 2026-10-15
+
+**`src/lib/read_whole.cyr` is retired. config.json and the mount table are read with the
+stdlib's `file_read_whole_into`.** cyrius 6.6.7 fixed what the 1.7.8 stopgap was for, and
+1.7.10 pinned past it. Suite 890 / 885. Harness 121, aarch64 boot gate 175.
+The binaries are the same size as 1.7.10, with different bytes; agnos-init is byte-identical.
+
+### Why it could go
+
+1.7.8 kept the stdlib's `file_read_whole` out of PID 1 for two measured defects: a new
+64 KiB buffer on every call, in an arena PID 1 never resets, and no ceiling, so /dev/zero
+under a memory limit ended in a write through NULL. Both were filed
+(`2026-09-23-kybernet-file-read-whole-no-ceiling-unchecked-growth-alloc.md`), and 6.6.7
+resolved them. Every allocation is checked, growth clamps to a ceiling, and
+`file_read_whole_into(rb, path, max)` reads into a `{ptr, cap}` buffer the caller keeps.
+That is the stopgap's own contract.
+
+Measured against the stdlib's code, not its comments (standing rule 46):
+
+- A read that fits the kept buffer allocates nothing.
+- A file over the ceiling is refused, never returned as a prefix.
+- /dev/zero is refused at the ceiling, having allocated at most twice it.
+
+The suite asserts all three, plus a control: the /dev/zero read must show up in
+`_heap_used`, so "allocates nothing" cannot pass by measuring nothing.
+
+### Changed
+
+- **`src/lib/read_whole.cyr` deleted**, with its includes in `main.cyr`, `test.cyr` and
+  `bench.cyr`.
+- **`load_config`** reads through `file_read_whole_into(&_cfg_rb, path, CFG_MAX_BYTES)`. The
+  256 KiB limit is unchanged. The buffer now starts at the stdlib's 4 KiB rather than 16 KiB
+  (`CFG_FIRST_CAP` is gone). Once per process, a config over 8 KiB costs about 12 KB more
+  arena on the way up (61,444 bytes against 49,154 for the harness's 22,200-byte config),
+  and one under 4 KiB costs less (4,097 against 16,385).
+- **`cfg_read_class`** maps `-EFBIG`, the stdlib's answer for a file over the ceiling, to
+  TOO_BIG. The stopgap answered `ceiling + 1`, and `n > cap` stays TOO_BIG as well, since a
+  count past the ceiling can never be a whole read. The stdlib's Errno enum has no EFBIG
+  (`io.cyr` writes `0 - 27`), so `mount.cyr` defines `KYB_EFBIG = 27`. That value comes from
+  asm-generic and is the same on both arches, and the prefix keeps a later stdlib `EFBIG`
+  from colliding.
+- **The mount cache** reads through the stdlib too, from `_mount_cache_load_path(path)`,
+  which `_mount_cache_load` calls with `/proc/self/mounts`. The path became a parameter so
+  the suite can hand it a table over the 1 MiB ceiling (standing rule 34).
+  - A table that large is still scanned to the ceiling, with the same log line. The stdlib
+    fills the buffer before it reads the byte that proves the file is larger, so the first
+    1 MiB is there; a test pins that, since it is behaviour, not contract.
+  - The stdlib writes no NUL on that path, and `is_mounted` reads one byte past the data,
+    so `mount.cyr` writes the NUL itself.
+- One property did not carry over: the stopgap opened with `O_CLOEXEC`, and the stdlib's
+  `file_open` passes 0. In PID 1 that changes nothing. The open, the read and the close are
+  one synchronous call, in a single-threaded process with no signal handlers, so no fork
+  can run while the descriptor exists.
+
+### Tests
+
+The suite goes from 882 / 877 to **890 / 885**. All eight new assertions are
+arch-neutral, so both floors rise together (standing rule 49).
+
+- **`test_read_whole`** runs on the stdlib reader (+3). Its ceilings moved to 16 KiB so that
+  growth from the 4 KiB start is exercised: 4,096 → 8,192 → 16,384, every byte kept.
+  - On `-EFBIG` the buffer holds the first `ceiling` bytes, with `cap` at the ceiling.
+  - The /dev/zero cost has a lower bound now (the control) as well as an upper one.
+- **`test_cfg_read_class`** (+1): `-EFBIG` classifies TOO_BIG, and its three real-reader
+  assertions go through `file_read_whole_into`.
+- **`test_mount_table`** (+4):
+  - a 1 MiB+ table is scanned to the ceiling;
+  - an entry inside it is found;
+  - the byte past the data is a NUL that kybernet wrote;
+  - the real table is read again afterwards.
+  The table is loaded twice, with that byte dirtied in between. A first load grows the
+  buffer from zeroed memory, so the byte is 0 whoever writes it; without the second load,
+  that assertion could not fail.
+
+Checked by putting each defect back, each in its own copy of the tree:
+
+| Defect | Unit suite |
+|---|---|
+| the mount reload allocates a new buffer every time | red, 1 failure (4,104 bytes per reload) |
+| `cfg_read_class` loses the `-EFBIG` arm | red, 3 |
+| `mount.cyr` loses the `-EFBIG` arm (an oversized table scans as empty) | red, 3 |
+| `mount.cyr` keeps the prefix but writes no NUL | red, 1 |
+| the config limit drops back to 16 KiB | red, 3 |
+
+### Bench
+
+The gate flagged twice, and an A/B showed the code is not the cause. Another workload was
+holding all 16 cores (load 9 to 20) throughout.
+
+- **First run:** 15 benchmarks, mostly the allocation-heavy ones at about twice their
+  1.7.10 cost (`alloc(4 sizes burst)` 38 → 81 ns, `hashmap` 1,085 → 2,333). Calibration did
+  not move (131 → 130), because it measures CPU speed and this was memory contention.
+- **Second run:** those 15 came back to within noise of 1.7.10, and a disjoint 5 flagged
+  (`memcpy(128 bytes)`, `restart_queue_has_miss8`, `sandbox_basic_service`,
+  `seccomp_basic_service+build`, `str_builder(3 segments)`). None of them touches code this
+  release changed.
+- **The A/B:** the 1.7.10 tree's bench and this one's, run alternately, best of three. Every
+  flagged benchmark agreed within 5%: `alloc(4 sizes burst)` 42 / 40, `hashmap` 1,138 /
+  1,109, `memcpy` 233 / 232, `seccomp_basic_service+build` 2,722 / 2,743,
+  `str_builder(3 segments)` 311 / 319. The largest difference across all 56 was
+  `is_mounted` at +3.3%.
+- A second A/B, run while the load climbed to 20, swung its own calibration from 181 to
+  550 ns inside one side, and is discarded.
+- **Third run, once the load fell to about 7:** the gate passed, with no regression of 15%
+  or more against the previous run. Against 1.7.10's release run, the calibration-scaled
+  deltas have a median of +13% across all 41 comparable benchmarks, uniformly, including
+  `memcpy`, which runs stdlib code identical in both releases. That is the calibration loop
+  running 11% faster relative to everything else on a host still near load 7 to 17. The
+  raw numbers barely moved: `memcpy` 210 → 245, `sandbox_basic_service` 216 → 226,
+  `str_builder(3 segments)` 282 → 294.
+- **A last interleaved A/B at that load**, best of three, settles it: the median difference
+  across 42 benchmarks is **0.0%**, none is 15% slower, and the worst is `is_root` at +9%,
+  a bare syscall.
+
+That the gate cannot hold on a saturated host is one roadmap line.
+
+### Release gates
+
+| Gate | Result |
+|---|---|
+| `scripts/verify-lock.sh` | lock verified against HEAD (`df93cbe`): four manifest tags match, and a fresh resolve is byte-identical (82 lines). This release does not touch the lock |
+| `rm -rf lib && cyrius deps && cyrius deps --verify` | 76 verified, 0 failed, 5 commit pins |
+| builds, `CYRIUS_DCE=1` | kybernet x86_64 **751,544 B**, aarch64 **1,975,920 B** (both the 1.7.10 sizes, different bytes); agnos-init 1,574,640 B and 1,840,648 B, byte-identical to 1.7.10 |
+| `cyrius fmt --check` / `cyrius lint` / `cyrius vet` | clean / 0 warnings, 0 untracked deferrals / 21 deps, 0 untrusted, 0 missing |
+| `cyrius test src/test.cyr` | **890 passed, 0 failed** |
+| `scripts/aarch64-exec-gate.sh` | **885** assertions, 0 failed (floor 885); 5 syscall probes ok; declared-broken list empty |
+| `scripts/bench-history.sh` | flagged on two runs on a saturated host, then **no regression ≥ 15%** on the third. Interleaved A/B against the 1.7.10 tree: median 0.0%, none ≥ 15% (Bench, above). All three runs are recorded in `benches/history.csv` |
+| `qemu/boot-test.sh` (KVM, `HARNESS_STRICT=1`) | **OK**, 121 properties across the five passes. kybernet span 888 ms against the 1,200 ms budget at load 20 to 25 (478 ms on a quiet host at 1.7.10); reactor wakeups 24. The `/dev` node staging step reported SKIPPED locally (no `CAP_MKNOD` without sudo) |
+| `qemu/boot-test-aarch64.sh` (TCG, `HARNESS_STRICT=1`) | **OK**, 175 properties, all five passes; the 18,290-byte config loads through the stdlib reader; kybernet span 2,277 ms against the 4,000 ms budget at load 20 (1,636 ms at 1.7.10); CRNG seeded at 3.93 s, after phase 1 at 2.90 s |
+| sibling-free reproduction | from an archive of the tagged commit plus this entry, with no `../<dep>` siblings: a byte-identical lock, byte-identical binaries on both arches (agnos-init included), and 890 passed |
+
 ## [1.7.10] — 2026-10-15
 
 **cyrius 6.6.6 → 6.6.20, and argonaut 1.15.6 / libro 2.10.8 / agnostik 1.7.1 / sigil 3.13.10.**
