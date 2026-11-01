@@ -3,7 +3,7 @@
 Forward work only. What shipped is in [CHANGELOG.md](../../CHANGELOG.md), and what is true
 right now, gate counts included, is in [state.md](state.md).
 
-**Current release: 1.8.1** (cyrius 6.7.18, argonaut 1.18.0, libro 2.11.3, agnostik 2.0.0,
+**Current release: 1.8.2** (cyrius 6.7.18, argonaut 1.18.0, libro 2.11.3, agnostik 2.0.0,
 sigil 3.13.15).
 
 **Every open item has a target release.** The order is the dependency order: a later release
@@ -13,7 +13,7 @@ under a release or under Gated, never in a list of its own. A finished item is d
 a finished release's section goes with it. A version is for code: docs and roadmap changes
 never take one, and a comment-only item ships with a release that has code in it.
 
-**Open: 23** (`grep -c '^- \[ \]'` against this file).
+**Open: 20** (`grep -c '^- \[ \]'` against this file).
 
 ---
 
@@ -21,8 +21,7 @@ never take one, and a comment-only item ships with a release that has code in it
 
 | Release | Theme | Items | Waits on |
 |---|---|---:|---|
-| [1.8.2](#182--warnings-and-stale-comments) | Warnings and stale comments | 4 | nothing |
-| [1.8.3](#183--gates-that-measure-the-code) | Gates that measure the code | 3 | nothing |
+| [1.8.3](#183--gates-that-measure-the-code) | Gates that measure the code | 4 | nothing |
 | [1.9.0](#190--what-pid-1-pays) | What PID 1 pays: memory, size, boot wait | 4 | a sigil tag, a libro tag, and argonaut carrying both |
 | [1.10.0](#1100--service-config-surface) | Service config surface | 3 | 1.9.0's reload path |
 | [1.11.0](#1110--edge-boot-under-emulation) | Edge boot under emulation | 3 | `swtpm` in the harness and in CI |
@@ -38,33 +37,6 @@ what already-compiling code computes, diff the DCE list knowing it cannot see a
 compiler-emitted call, and replay `ci.yml` in the runner's image (CHANGELOG [1.8.0], [1.8.1]).
 
 ---
-
-## 1.8.2 — Warnings and stale comments
-
-No behaviour change, and the binaries should barely move. The build's known warnings go, so
-that a new one stands out.
-
-- [ ] **Use the stdlib's `sys_ioctl` in `src/lib/termios.cyr`.** cyrius 6.5.36 added it
-      (the resolved `2026-08-24-sys-ioctl-wrapper-missing.md` filing). `termios.cyr` still
-      calls `syscall(SYS_IOCTL, …)` and says no wrapper exists, and so does standing
-      rule 21.
-- [ ] **`json_v_obj_get` is deprecated in the bayan that cyrius 6.6.20 folds.** 21 call
-      sites (20 in `src/lib/svc_config.cyr`, 1 in `src/main.cyr`) warn on every build. The
-      alias forwards to `bayan_json_v_obj_get_by_cstr`; every key kybernet passes is a
-      literal, so the rename is mechanical.
-- [ ] **cyrius 6.6.20 flags `streq(str_data(…), …)`**: a `Str`'s bytes are not
-      NUL-terminated at its length. Four sites in `src/main.cyr` compare service names
-      that way (two in the default-service merge, two in dependency checks) and four in
-      `src/test.cyr`. Find out whether every name reaching them is NUL-terminated (bayan's
-      string values, argonaut's defaults) or compare as `Str`.
-- [ ] **Source comments that point at roadmap entries that no longer exist.** The
-      sd_notify policy block above `handle_notify_msg` (`src/main.cyr`) says `WATCHDOG=1`
-      and `MAINPID=` are refused and "roadmapped"; the code below it has handled both since
-      1.6.8 and 1.6.10. `src/lib/edge_boot.cyr` sends readers to a "Blocked on hardware"
-      section (the `veritysetup open`, LUKS and TPM work is release 1.11.0) and still
-      describes the unbounded `tpm_read_pcr` path, dead since 1.6.16. `src/lib/seccomp.cyr`
-      cites "roadmap v1.6.0" and a hardware section for the aarch64 numbers, which the
-      aarch64 boot gate executes. Comments only.
 
 ## 1.8.3 — Gates that measure the code
 
@@ -88,6 +60,11 @@ rule 37). They come before 1.9.0, whose changes need a benchmark gate that can b
       container started without a TTY: `stage: device_mgr skips` gets STAGE_FAIL, on both
       arches, from a machine property (standing rule 37). Found at 1.8.0 by replaying CI in
       `ubuntu:26.04`. Give the stage a path to check, or test it against a fixture.
+- [ ] **No gate reaches the built-in collision check in `load_config`.** A config service
+      named like a built-in is ignored, but the harnesses boot `recovery`, which has no
+      built-ins, and `src/test.cyr` cannot include `src/main.cyr` (standing rule 34). 1.8.2
+      changed that comparison to `str_eq` and nothing executed it. Move the merge's collision
+      and dependency checks into `src/lib/svc_config.cyr`, where the suite can run them.
 
 ## 1.9.0 — What PID 1 pays
 

@@ -7,6 +7,74 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.8.2] — 2026-11-01
+
+**The build's known warnings are gone, and no behaviour was meant to change.** The roadmap's four
+1.8.2 items. Suite 902 / 897. Harness 126, aarch64 boot gate 180. kybernet is the same size on
+x86_64 and 8 bytes smaller on aarch64.
+
+### Changed
+
+- **`json_v_obj_get` → `bayan_json_v_obj_get_by_cstr`,** 21 call sites. The alias was a one-line
+  forward to that function, and all 54 calls of the `_cfg_*` helpers that take a key pass a
+  literal, so it is the same lookup. The deprecation warnings go with it.
+- **Four `streq(str_data(…))` sites in `src/main.cyr` compare as `Str`,** and the four in
+  `src/test.cyr` use `str_eq_cstr`. ⚠ **This was not a live bug.** bayan stores a NUL at every
+  value's length, argonaut's default names are literals, and `failed_names` holds the same boxed
+  `Str`s. The fix still stands: `str_eq` checks the length first, so these no longer rest on the
+  terminator. The one input that behaves differently is a `depends_on` entry with an embedded
+  NUL (`"a\u0000b"`), which used to match a service named `a` and is now an unknown dependency.
+- **`src/lib/termios.cyr` calls the stdlib's `sys_ioctl`** instead of its own `kyb_ioctl` wrapper,
+  which issued the same call. The request numbers and the struct layout stay here: the stdlib has
+  `sys_ioctl` but no termios constants. Standing rule 21 now says so.
+- **One log line:** `edge boot: reading PCRs` said a baseline compare needs real hardware. That
+  compare has run at every edge boot with a TPM since 1.5.7, and it now says a mismatch is
+  reported, not enforced.
+
+### Added
+
+- **`test_config_strings_are_cstrs`:** a parsed value is NUL-terminated at its length, plain,
+  escaped and empty, and so is every default service name. Every `str_data()` kybernet hands to a
+  cstr consumer rests on this: `klog2`, cgroup paths, argonaut's service map. Handed a
+  non-terminated view in a scratch copy, it fails. +7 assertions.
+
+### Fixed — comments that said false things
+
+Each was checked against the code before it was rewritten, and history that is true as history
+stayed.
+
+- **`handle_notify_msg`'s policy block** said `WATCHDOG=1` and `MAINPID=` are refused. Both have
+  been honoured since 1.6.8 and 1.6.10. It also said `READY=1` cannot change state and that there
+  is no notify service type; `init_notify_ready` promotes a `notify` service.
+- **`src/lib/edge_boot.cyr`** still said one unbounded exec remains. The PCR read has gone through
+  `tpm_read_pcr_timeout` since 1.6.16, bounded and status-checked. Its pointers at "Blocked on
+  hardware" and "Blocked upstream", sections that no longer exist, name release 1.11.0.
+- **`src/lib/seccomp.cyr`** said the aarch64 numbers have never been executed. The aarch64 boot
+  gate executes them under TCG.
+- **`src/lib/console_io.cyr`** said the stdlib has no poll wrapper; `sys_ppoll` shipped at 6.7.9.
+  **`src/lib/emergency_auth.cyr`** pointed at a roadmap item the bounds below it had closed.
+
+### Release gates
+
+| Gate | Result |
+|---|---|
+| `scripts/verify-lock.sh` | **OK on a scratch commit of this tree** |
+| `rm -rf lib cyrius.lock && cyrius deps && cyrius deps --verify` | 84 verified, 0 failed, 5 commit pins |
+| builds, `CYRIUS_DCE=1` | kybernet x86_64 **1,114,096 B**, aarch64 **2,662,000 B**; agnos-init **565,032 B** and **2,526,736 B** |
+| build warnings | **21 deprecations and 4 `streq` warnings gone.** Left: sigil's 24 byte-identical duplicate fns, the `ResourceLimits` struct twin, the `patra` fold notice |
+| `cyrius fmt --check` / `cyrius lint` / `cyrius vet` | clean / 0 warnings, 0 untracked deferrals / 0 untrusted, 0 missing |
+| `cyrius test src/test.cyr` | **902 passed, 0 failed** |
+| `scripts/aarch64-exec-gate.sh` | **897** assertions, 0 failed (floor 897); 5 syscall probes ok; declared-broken list empty |
+| `scripts/bench-history.sh` | 56 benchmarks, **no regression ≥ 15%**, on a loaded host (calibration 106 → 134 ns/op) |
+| `qemu/boot-test.sh` (KVM, `HARNESS_STRICT=1`) | **OK**, 126 properties; kybernet span 525 ms, reactor wakeups 24 |
+| `qemu/boot-test-aarch64.sh` (TCG, `HARNESS_STRICT=1`) | **OK**, 180 properties; kybernet span 1,738 ms; CRNG seeded at 2.19 s, after phase 1 at 1.24 s |
+| sibling-free reproduction | a copy with no siblings and an **empty dep cache** clones every tag and reproduces a byte-identical lock and byte-identical binaries on both arches, agnos-init included |
+| `ci.yml` replayed in `ubuntu:26.04` | **23 of 23 steps green**: x86 harness 126 on the 7.0 azure kernel (span 526 ms), aarch64 180 on QEMU 10.2, suite 902 / 897 |
+
+**Not reached by any gate:** the `str_eq` check for a config service colliding with a built-in. The
+harnesses boot `recovery`, which has no built-ins, and `src/test.cyr` cannot reach `load_config`
+(standing rule 34). The roadmap has it under 1.8.3.
+
 ## [1.8.1] — 2026-11-01
 
 **cyrius 6.7.9 → 6.7.18, and argonaut 1.18.0 / libro 2.11.3 / agnostik 2.0.0 / sigil 3.13.15,

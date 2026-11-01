@@ -86,21 +86,21 @@ fn cfg_read_class(n, cap) {
 # truthy because the key merely exists would enable a service the operator
 # disabled.
 fn _cfg_str(obj, key, fallback) {
-    var v = json_v_obj_get(obj, key);
+    var v = bayan_json_v_obj_get_by_cstr(obj, key);
     if (v == 0) { return fallback; }
     if (json_v_is_str(v) == 0) { return fallback; }
     return json_v_str(v);
 }
 
 fn _cfg_int(obj, key, fallback) {
-    var v = json_v_obj_get(obj, key);
+    var v = bayan_json_v_obj_get_by_cstr(obj, key);
     if (v == 0) { return fallback; }
     if (json_v_is_int(v) == 0) { return fallback; }
     return json_v_int(v);
 }
 
 fn _cfg_bool(obj, key, fallback) {
-    var v = json_v_obj_get(obj, key);
+    var v = bayan_json_v_obj_get_by_cstr(obj, key);
     if (v == 0) { return fallback; }
     if (json_v_is_bool(v) == 1) { return json_v_bool(v); }
     return fallback;
@@ -110,7 +110,7 @@ fn _cfg_bool(obj, key, fallback) {
 # Str). Non-string elements are skipped rather than aborting the whole
 # service — a stray number in an args list should not cost you the service.
 fn _cfg_str_array_into(obj, key, out) {
-    var v = json_v_obj_get(obj, key);
+    var v = bayan_json_v_obj_get_by_cstr(obj, key);
     if (v == 0) { return 0; }
     if (json_v_is_arr(v) == 0) { return 0; }
     var n = json_v_arr_len(v);
@@ -125,7 +125,7 @@ fn _cfg_str_array_into(obj, key, out) {
 # Returns 0-1 when present but malformed, so the caller can reject the
 # service instead of silently starting it unmonitored.
 fn _cfg_health_check(svc_obj) {
-    var hc = json_v_obj_get(svc_obj, "health_check");
+    var hc = bayan_json_v_obj_get_by_cstr(svc_obj, "health_check");
     if (hc == 0) { return 0; }
     if (json_v_is_obj(hc) == 0) { return 0 - 1; }
 
@@ -207,7 +207,7 @@ fn _cfg_health_check(svc_obj) {
 # `max_restarts` 0..1000 (0 = unlimited, argonaut's own sentinel),
 # `base_delay_ms` 1..3600000, `max_delay_ms` >= base_delay_ms and <= 3600000.
 fn _cfg_restart_config_into(obj, sd) {
-    var r = json_v_obj_get(obj, "restart_config");
+    var r = bayan_json_v_obj_get_by_cstr(obj, "restart_config");
     if (r == 0) { return 1; }
     if (json_v_is_obj(r) == 0) { return 0; }
 
@@ -286,7 +286,7 @@ fn _cfg_has_nul(p, n) {
 # entry may deliberately override PATH. Returns 1 on success or no block, 0 to
 # refuse the service. 1.7.5.
 fn _cfg_environment_into(obj, sd) {
-    var e = json_v_obj_get(obj, "environment");
+    var e = bayan_json_v_obj_get_by_cstr(obj, "environment");
     if (e == 0) { return 1; }
     if (json_v_is_obj(e) == 0) { return _cfg_refuse(sd, "config: environment is not an object - service REFUSED: "); }
     var env = svc_def_env(sd);
@@ -326,7 +326,7 @@ fn _cfg_environment_into(obj, sd) {
 # one started without part of its configured environment is one nobody configured.
 # An empty file is an empty environment, not an error. 1.7.5.
 fn _cfg_env_files_into(obj, sd) {
-    var a = json_v_obj_get(obj, "env_files");
+    var a = bayan_json_v_obj_get_by_cstr(obj, "env_files");
     if (a == 0) { return 1; }
     if (json_v_is_arr(a) == 0) { return _cfg_refuse(sd, "config: env_files is not an array - service REFUSED: "); }
     var env = svc_def_env(sd);
@@ -387,7 +387,7 @@ fn _cfg_env_files_into(obj, sd) {
 # kills the service and reports it as failing to start. Refused, never clamped
 # (standing rule 25). 1.7.5.
 fn _cfg_ready_check(svc_obj, sd) {
-    var rc = json_v_obj_get(svc_obj, "ready_check");
+    var rc = bayan_json_v_obj_get_by_cstr(svc_obj, "ready_check");
     if (rc == 0) { return 0; }
     if (json_v_is_obj(rc) == 0) {
         _cfg_refuse(sd, "config: ready_check is not an object - service REFUSED: ");
@@ -592,21 +592,21 @@ fn svc_def_from_json(obj) {
 var CFG_SEC_BADTYPE = 0 - 2;
 
 fn _cfg_sec_int(obj, key, absent) {
-    var v = json_v_obj_get(obj, key);
+    var v = bayan_json_v_obj_get_by_cstr(obj, key);
     if (v == 0) { return absent; }
     if (json_v_is_int(v) == 0) { return CFG_SEC_BADTYPE; }
     return json_v_int(v);
 }
 
 fn _cfg_sec_bool(obj, key, absent) {
-    var v = json_v_obj_get(obj, key);
+    var v = bayan_json_v_obj_get_by_cstr(obj, key);
     if (v == 0) { return absent; }
     if (json_v_is_bool(v) == 0) { return CFG_SEC_BADTYPE; }
     return json_v_bool(v);
 }
 
 fn _cfg_limit(obj, key) {
-    var v = json_v_obj_get(obj, key);
+    var v = bayan_json_v_obj_get_by_cstr(obj, key);
     if (v == 0) { return 0; }
     if (json_v_is_int(v) == 0) { return 0 - 1; }
     var n = json_v_int(v);
@@ -633,7 +633,7 @@ fn _cfg_limit(obj, key) {
 # cgroup_limits has no such twin, and all five of its fields are real cgroup
 # v2 control files. 1.5.5.
 fn svc_apply_resources_json(sd, obj) {
-    var lim = json_v_obj_get(obj, "limits");
+    var lim = bayan_json_v_obj_get_by_cstr(obj, "limits");
     if (lim == 0) { return 1; }
     if (json_v_is_obj(lim) == 0) { return 0; }
 
@@ -759,7 +759,7 @@ fn edge_config_from_json(root, ec) {
     # here, and re-committed at the single commit point at the end.
     edge_reset_devices();
 
-    var eb = json_v_obj_get(root, "edge");
+    var eb = bayan_json_v_obj_get_by_cstr(root, "edge");
     if (eb == 0) { return 1; }
     if (json_v_is_obj(eb) == 0) { return 0; }
 
@@ -853,7 +853,7 @@ fn edge_config_from_json(root, ec) {
     var pv = 0;
 
     # --- expected PCR baselines ---
-    var ex = json_v_obj_get(eb, "expected_pcrs");
+    var ex = bayan_json_v_obj_get_by_cstr(eb, "expected_pcrs");
     if (ex != 0) {
         if (json_v_is_arr(ex) == 0) { return 0; }
         pv = vec_new();
@@ -891,7 +891,7 @@ fn svc_defs_from_json(root) {
     if (root == 0) { return out; }
     if (json_v_is_obj(root) == 0) { return out; }
 
-    var arr = json_v_obj_get(root, "services");
+    var arr = bayan_json_v_obj_get_by_cstr(root, "services");
     if (arr == 0) { return out; }
     if (json_v_is_arr(arr) == 0) {
         klog("config: \"services\" is not an array — ignoring");
@@ -1000,12 +1000,12 @@ fn _seccomp_kind_from_name(s) {
 # service whose confinement could not be understood is the only safe
 # reading: the alternative is running it unconfined.
 fn svc_apply_security_json(sd, obj) {
-    var sec = json_v_obj_get(obj, "security");
+    var sec = bayan_json_v_obj_get_by_cstr(obj, "security");
     if (sec == 0) { return 1; }
     if (json_v_is_obj(sec) == 0) { return 0; }
 
     # --- capabilities (keep-list) ---
-    var capv = json_v_obj_get(sec, "capabilities");
+    var capv = bayan_json_v_obj_get_by_cstr(sec, "capabilities");
     if (capv != 0) {
         if (json_v_is_arr(capv) == 0) { return 0; }
         var caps = capability_set_new();
@@ -1076,7 +1076,7 @@ fn svc_apply_security_json(sd, obj) {
         return 0;
     }
     # --- landlock filesystem rules ---
-    var llv = json_v_obj_get(sec, "landlock");
+    var llv = bayan_json_v_obj_get_by_cstr(sec, "landlock");
     if (llv != 0) {
         if (json_v_is_arr(llv) == 0) { return 0; }
         var sbx = sandbox_config_new();
@@ -1131,7 +1131,7 @@ fn svc_apply_security_json(sd, obj) {
     # Strict, for the same reason as uid/gid: `"seccomp": true` or
     # `"seccomp": 1` silently fell back to NO profile — an unfiltered service on
     # a config that asked for a filter. 1.6.15 MEDIUM-5.
-    var sc_raw = json_v_obj_get(sec, "seccomp");
+    var sc_raw = bayan_json_v_obj_get_by_cstr(sec, "seccomp");
     if (sc_raw != 0 && json_v_is_str(sc_raw) == 0) {
         klog("config: security.seccomp must be a profile NAME string - service REFUSED");
         kmsg("kybernet: config: security.seccomp wrong type; service refused");

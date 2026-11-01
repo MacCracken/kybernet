@@ -40,9 +40,9 @@ fn _u64_str(n) {
 # no operator in front of it would sit at the prompt forever. Bounding it is
 # not a nicety — the alternative failure mode is a machine that looks dead.
 #
-# O_NONBLOCK plus a poll loop rather than a blocking read, because the cyrius
-# stdlib has no poll/select wrapper either (same gap as ioctl). 50 ms between
-# attempts is far below human typing latency and costs nothing.
+# O_NONBLOCK plus a sleeping loop rather than a blocking read. It predates the
+# stdlib's `sys_ppoll` (cyrius 6.7.9). 50 ms between attempts is far below human
+# typing latency and costs nothing.
 #
 # Returns the length, or -1 on error/timeout/EOF.
 fn _read_line_fd(fd, buf, cap, deadline_ms) {

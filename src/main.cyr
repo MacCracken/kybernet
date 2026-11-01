@@ -387,7 +387,7 @@ fn _load_config_inner(want_services) {
     # order to log "NOT applied" was 18,264 bytes of pure waste per SIGHUP.
     # Count what the JSON declared instead, so the operator still gets told.
     if (want_services == 0) {
-        var raw = json_v_obj_get(root, "services");
+        var raw = bayan_json_v_obj_get_by_cstr(root, "services");
         if (raw != 0 && json_v_is_arr(raw) == 1) { _cfg_saw_services = json_v_arr_len(raw); }
         return cfg;
     }
@@ -426,7 +426,7 @@ fn _load_config_inner(want_services) {
             var nm = str_data(svc_def_name(sd));
             var clash = 0;
             for (var d = 0; d < vec_len(defaults); d = d + 1) {
-                if (streq(str_data(svc_def_name(vec_get(defaults, d))), nm) == 1) {
+                if (str_eq(svc_def_name(vec_get(defaults, d)), svc_def_name(sd)) == 1) {
                     clash = 1;
                     break;
                 }
@@ -471,11 +471,11 @@ fn _load_config_inner(want_services) {
                 var dep_cs = str_data(vec_get(deps, di));
                 var found = 0;
                 for (var cj = 0; cj < vec_len(dst); cj = cj + 1) {
-                    if (streq(str_data(svc_def_name(vec_get(dst, cj))), dep_cs) == 1) { found = 1; break; }
+                    if (str_eq(svc_def_name(vec_get(dst, cj)), vec_get(deps, di)) == 1) { found = 1; break; }
                 }
                 if (found == 0) {
                     for (var dj = 0; dj < vec_len(defaults); dj = dj + 1) {
-                        if (streq(str_data(svc_def_name(vec_get(defaults, dj))), dep_cs) == 1) { found = 1; break; }
+                        if (str_eq(svc_def_name(vec_get(defaults, dj)), vec_get(deps, di)) == 1) { found = 1; break; }
                     }
                 }
                 if (found == 0) {
@@ -1375,7 +1375,7 @@ fn start_services() {
             for (var di = 0; di < vec_len(mydeps); di = di + 1) {
                 var dep_cs = str_data(vec_get(mydeps, di));
                 for (var fi = 0; fi < vec_len(failed_names); fi = fi + 1) {
-                    if (streq(str_data(vec_get(failed_names, fi)), dep_cs) == 1) {
+                    if (str_eq(vec_get(failed_names, fi), vec_get(mydeps, di)) == 1) {
                         blocked = 1;
                         blocker = dep_cs;
                         break;
@@ -1617,27 +1617,17 @@ fn kyb_notify_service_for_pid(pid) {
 #    sender monopolises the reactor and drives the wakeup count that the
 #    `kybernet.harness=loop` gate gets to bound at 500 (standing rule 23).
 #
-# What is honoured, and what is deliberately NOT:
-#   READY=1      logged, attributed, audited. At argonaut 1.13.3 it cannot
-#                change managed state — `init_start_simple` sets STATE_RUNNING
-#                synchronously before returning (init.cyr:466) and there is no
-#                notify service type, so no service is ever awaiting one.
+# What each key does:
+#   READY=1      logged and attributed. It promotes a `notify` service from
+#                STARTING to RUNNING, through `init_notify_ready`. A service of
+#                any other type is RUNNING already, so it changes nothing.
 #   STATUS=      sanitised, then logged attributed. Raw attacker bytes used to
 #                go straight to klog.
 #   RELOADING/STOPPING  logged attributed. No state sink exists.
-#   WATCHDOG=1   REFUSED. The only refreshable deadline is
-#                `managed_svc_last_hc`, which already means "the last health
-#                check PASSED". Refreshing it on a self-reported ping would let
-#                a wedged service silence a probe kybernet actually ran and saw
-#                fail. That is a safety inversion, and authentication does not
-#                cure it — auth proves the ping came from the service, not that
-#                the service is honest about its own health. Needs a separate
-#                last_notify field in argonaut; roadmapped.
-#   MAINPID=     REFUSED. `str_to_int` honours a leading '-' and silently skips
-#                non-digits ("MAINPID=-1" parses to -1), and `process_kill` has
-#                no internal pid > 0 guard — so honouring it could hand PID 1 a
-#                kill(-1, SIGKILL), i.e. every process on the machine. Needs a
-#                bounded parse plus cgroup-membership proof; roadmapped.
+#   WATCHDOG=1   honoured since 1.6.8. It refreshes only `last_notify`, never
+#                `last_health_check`: see the WATCHDOG arm below for why.
+#   MAINPID=     honoured since 1.6.10, after a bounded parse and proof that the
+#                pid is in the service's own cgroup: see the MAINPID arm below.
 fn handle_notify_msg() {
     var buf = notify_buf_ptr();
     for (var d = 0; d < NOTIFY_DRAIN_MAX; d = d + 1) {

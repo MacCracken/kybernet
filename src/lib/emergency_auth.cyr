@@ -72,7 +72,7 @@ var EMERG_CRED_INVALID = 3;   # present but unparseable — always denies
 # `t >= 1`, `m >= 8p`, `saltlen >= 8`, `outlen >= 4` (argon2.cyr:395-399) — and
 # no ceiling whatsoever. Every one of those floors is satisfiable by a
 # credential that is worthless (see the notes on each constant below), and the
-# missing ceiling is the roadmap item.
+# missing ceiling is what the bounds below add.
 #
 # WHY REJECT AND NOT CLAMP. The parameters live inside the stored credential,
 # not in a policy knob: kybernet only ever verifies, the provisioning tool

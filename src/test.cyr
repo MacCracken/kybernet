@@ -2949,14 +2949,14 @@ fn test_desktop_agnos_init_contract() {
     var comp = 0;
     for (var i = 0; i < vec_len(dsk); i = i + 1) {
         var sd = vec_get(dsk, i);
-        if (streq(str_data(svc_def_name(sd)), "agnos-init") == 1) { ainit = sd; }
-        if (streq(str_data(svc_def_name(sd)), "aethersafha") == 1) { comp = sd; }
+        if (str_eq_cstr(svc_def_name(sd), "agnos-init") == 1) { ainit = sd; }
+        if (str_eq_cstr(svc_def_name(sd), "aethersafha") == 1) { comp = sd; }
     }
     assert(ainit != 0, "desktop: the built-in set has agnos-init");
     assert(comp != 0, "desktop: the built-in set has aethersafha");
     if (ainit != 0) {
         # The path the kybernet package installs agnos-init to, and the harness runs.
-        assert(streq(str_data(svc_def_binary(ainit)), "/usr/lib/agnos/agnos-init") == 1,
+        assert(str_eq_cstr(svc_def_binary(ainit), "/usr/lib/agnos/agnos-init") == 1,
           "desktop: agnos-init names /usr/lib/agnos/agnos-init");
         assert(svc_def_service_type(ainit) == SVC_ONESHOT, "desktop: agnos-init is a oneshot");
     }
@@ -2964,7 +2964,7 @@ fn test_desktop_agnos_init_contract() {
     if (comp != 0) {
         var deps = svc_def_deps(comp);
         for (var j = 0; j < vec_len(deps); j = j + 1) {
-            if (streq(str_data(vec_get(deps, j)), "agnos-init") == 1) { dep = 1; }
+            if (str_eq_cstr(vec_get(deps, j), "agnos-init") == 1) { dep = 1; }
         }
     }
     assert(dep == 1, "desktop: aethersafha depends_on agnos-init");
@@ -3046,6 +3046,33 @@ fn test_config_json_strictness() {
     assert_eq(json_v_parse_buf(lz, strlen(lz)), 0, "config json: a leading zero refuses the document");
     var good = "{\"boot_mode\":\"edge\",\"boot_timeout_ms\":30000}";
     assert_eq(json_v_parse_buf(good, strlen(good)) != 0, 1, "config json: a clean document still parses");
+    return 0;
+}
+
+# kybernet hands `str_data()` to every cstr consumer it has (klog2, cgroup paths,
+# argonaut's service map), so all of them assume a name is NUL-terminated at its
+# length. bayan's parser stores that NUL and argonaut's defaults are literals.
+# Nothing else holds that assumption up, so it is pinned here.
+fn test_config_strings_are_cstrs() {
+    println("--- config strings are cstrs (1.8.2) ---");
+    var doc = "{\"plain\":\"kyb-a\",\"esc\":\"a\\nb\",\"empty\":\"\"}";
+    var root = json_v_parse_buf(doc, strlen(doc));
+    assert_eq(root != 0, 1, "config str: the document parses");
+    var plain = _cfg_str(root, "plain", 0);
+    assert_eq(load8(str_data(plain) + str_len(plain)), 0, "config str: a plain value ends in NUL");
+    var esc = _cfg_str(root, "esc", 0);
+    assert_eq(str_len(esc), 3, "config str: an escape shortens the value");
+    assert_eq(load8(str_data(esc) + str_len(esc)), 0, "config str: an escaped value ends in NUL");
+    var empty = _cfg_str(root, "empty", 0);
+    assert_eq(load8(str_data(empty) + str_len(empty)), 0, "config str: an empty value ends in NUL");
+    var defs = default_services(BOOT_DESKTOP);
+    assert_eq(vec_len(defs) > 0, 1, "config str: the desktop defaults exist");
+    var bad = 0;
+    for (var i = 0; i < vec_len(defs); i = i + 1) {
+        var nm = svc_def_name(vec_get(defs, i));
+        if (load8(str_data(nm) + str_len(nm)) != 0) { bad = bad + 1; }
+    }
+    assert_eq(bad, 0, "config str: every default service name ends in NUL");
     return 0;
 }
 
@@ -3811,6 +3838,7 @@ fn main() {
     test_landlock_abi_mask();
     test_sandbox_rules();
     test_config_json_strictness();
+    test_config_strings_are_cstrs();
     return assert_summary();
 }
 var exit_code = main();

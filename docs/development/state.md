@@ -6,6 +6,15 @@
 
 ## Version
 
+**1.8.2**: the build's known warnings are gone and no behaviour was meant to change. The 21
+`json_v_obj_get` calls are `bayan_json_v_obj_get_by_cstr`, which that alias forwarded to, and the
+four `streq(str_data(…))` sites compare as `Str`. Those strings were never a live bug: bayan
+stores a NUL at every value's length and argonaut's defaults are literals, and
+`test_config_strings_are_cstrs` now pins that, since every `str_data()` handed to a cstr consumer
+rests on it. `termios.cyr` calls the stdlib's `sys_ioctl`, and the comments that described refused
+sd_notify keys, a dead PCR path and roadmap sections that no longer exist say what is true. Suite
+902 / 897. Harness 126, aarch64 boot gate 180.
+
 **1.8.1**: cyrius 6.7.9 → 6.7.18, with every dep at its latest tag: argonaut 1.18.0, libro
 2.11.3, agnostik 2.0.0 and sigil 3.13.15. The toolchain needed no source change; agnostik 2.0.0's
 `<Struct>_<field>` accessor renames touched seven files. Three things reach PID 1. argonaut now
@@ -217,9 +226,10 @@ What 6.6.7–6.6.20 changed that kybernet can see:
   1,500-global `CAPX` probe warns on 6.6.20.
 - **x86 DCE compaction was capped at 4,096 dead-code runs** until 6.7.14
   (`2026-10-15-kybernet-dce-compaction-cap-agnos-init.md`).
-- **New warnings left in the build, roadmapped:** 21 calls of the deprecated
-  `json_v_obj_get`, and four `streq(str_data(…))` sites in `main.cyr` (four more in
-  `test.cyr`) that 6.6.20 flags because a `Str` is not NUL-terminated at its length.
+- **New warnings:** 21 calls of the deprecated `json_v_obj_get`, and four `streq(str_data(…))`
+  sites in `main.cyr` (four more in `test.cyr`). Both were cleared at 1.8.2. What the build
+  still warns about is structural: sigil's 24 byte-identical duplicates, the `ResourceLimits`
+  twin and the `patra` fold notice.
 - Rule 2's sizing (global `[4]`/`[16]` 32/128 B apart, local 8/16) re-measured on both
   arches: unchanged.
 - The four kybernet filings from 2026-09-23 (`file_read_whole`, the hash seed, `fl_alloc`,
@@ -271,7 +281,7 @@ and byte-identical, and the warning still fires.
 | Arch | Bytes | `e_machine` |
 |---|---|---|
 | x86_64 (`CYRIUS_DCE=1`) | 1,114,096 | `0x3e` |
-| aarch64 (`CYRIUS_DCE=1`) | 2,662,008 | `0xb7` |
+| aarch64 (`CYRIUS_DCE=1`) | 2,662,000 | `0xb7` |
 | agnos-init x86_64 (`CYRIUS_DCE=1`) | 565,032 | `0x3e` |
 | agnos-init aarch64 (`CYRIUS_DCE=1`) | 2,526,736 | `0xb7` |
 
@@ -292,8 +302,8 @@ the build; that is standing rule 32.
 
 | Gate | Count | Enforcement |
 |---|---|---|
-| `cyrius test src/test.cyr` | **895** assertions | floor read from CLAUDE.md; a shrinking suite fails |
-| `bash scripts/aarch64-exec-gate.sh` | **890** assertions + 5 syscall probes | executes aarch64 under `qemu-user`; its own declared floor |
+| `cyrius test src/test.cyr` | **902** assertions | floor read from CLAUDE.md; a shrinking suite fails |
+| `bash scripts/aarch64-exec-gate.sh` | **897** assertions + 5 syscall probes | executes aarch64 under `qemu-user`; its own declared floor |
 | `bash qemu/boot-test-aarch64.sh` | **180** properties, all 5 passes, 25 services | boots `kybernet-aarch64` as PID 1 (TCG), entropy-starved; needs host `veritysetup` |
 | `bash qemu/boot-test.sh` | **126** properties, 5 passes | `HARNESS_STRICT=1` in CI makes a skip a failure |
 | `bash scripts/verify-lock.sh` | 2 halves, 5 commit pins | the committed lock (HEAD's, not the working tree's) vs a fresh resolve |
@@ -301,7 +311,7 @@ the build; that is standing rule 32.
 | `cyrius lint` | 0 warnings, **0 untracked deferrals** | HARD GATE, both halves |
 | `cyrius fmt --check` | clean | non-mutating; never `diff <(cyrius fmt …)` |
 
-⚠ **895 and 890 are both correct, and neither floor gates the other.** Six assertions are
+⚠ **902 and 897 are both correct, and neither floor gates the other.** Six assertions are
 x86-only (`BS_OPEN`/`BS_STAT`/`BS_LSTAT`/`BS_PIPE`/`BS_POLL`/`BS_NANOSLEEP`) and one is
 aarch64-only (`BS_PPOLL`). Both floors are declared in CLAUDE.md and must be bumped
 together. **Do not pad the short arch to equalise them.**
@@ -337,16 +347,16 @@ stricter bar on the next sweep.**
 
 ## In flight
 
-Nothing. 1.8.1 is tagged and on the remote.
+1.8.2 is cut in the working tree, not yet committed or tagged. 1.8.1 is tagged and on the
+remote.
 
 ## Next
 
-**1.8.2, warnings and stale comments**, then the rest of the release plan in
-[roadmap.md](roadmap.md), where every one of the 23 open items has a target release.
+**1.8.3, gates that measure the code**, then the rest of the release plan in
+[roadmap.md](roadmap.md), where every one of the 20 open items has a target release.
 
 | Release | Theme |
 |---|---|
-| 1.8.2 | Warnings and stale comments |
 | 1.8.3 | Gates that measure the code |
 | 1.9.0 | What PID 1 pays: memory, size, boot wait |
 | 1.10.0 | Service config surface |

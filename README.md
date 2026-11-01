@@ -46,7 +46,7 @@ Requires Cyrius 6.7.18 (`cyriusly install 6.7.18 && cyriusly use 6.7.18`).
 cyrius deps                                # Resolve deps from cyrius.cyml into lib/
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet   # Build (DCE recommended)
 CYRIUS_DCE=1 cyrius build src/agnos_init.cyr build/agnos-init   # agnos-init (see below)
-cyrius test src/test.cyr                   # Run 895 tests
+cyrius test src/test.cyr                   # Run 902 tests
 cyrius bench src/bench.cyr                 # Run benchmarks
 ```
 
@@ -143,7 +143,7 @@ services expect at boot: `/run` is a fresh tmpfs every boot, so `/run/agnos/agen
 - **Data-driven mount table** — not hardcoded per-mount calls
 - **sd_notify compatible** — READY, STOPPING, WATCHDOG, STATUS, RELOADING messages via epoll
 - **String builder** for path construction and logging
-- **895 tests** (890 on aarch64 — the seccomp allowlist is arch-specific), 56 benchmarks
+- **902 tests** (897 on aarch64 — the seccomp allowlist is arch-specific), 56 benchmarks
 
 ## Dependencies
 
@@ -182,7 +182,7 @@ boot. With the working lane moved onto the caller's arena it costs +25 KB.
 ## Testing
 
 ```sh
-cyrius test src/test.cyr            # 895 assertions (890 on aarch64)
+cyrius test src/test.cyr            # 902 assertions (897 on aarch64)
 bash scripts/bench-history.sh       # 56 benchmarks, load-tolerant regression gate
 bash qemu/boot-test.sh              # PID-1 boot harness, x86_64 (needs KVM)
 bash qemu/boot-test-aarch64.sh      # PID-1 boot harness, aarch64 (TCG, no KVM)
