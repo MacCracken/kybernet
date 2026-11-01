@@ -657,9 +657,10 @@ fn drop_to_emergency() {
     var esc = emergency_shell_default();
 
     # Overlay the operator's auth policy onto argonaut's default config.
-    # emergency_shell_default() hard-codes require_auth = 0 / hash = 0, so
-    # without this the gate could never engage no matter what config.json
-    # said. Rust read the same two fields off EmergencyShellConfig.
+    # emergency_shell_default() fixes both fields (since argonaut 1.16.2 to
+    # require_auth = 1 with no credential, which denies everything), so
+    # without this config.json would have no say and no shell could ever be
+    # granted. Rust read the same two fields off EmergencyShellConfig.
     # 1.5.4 — closes the last rust-old port gap.
     #
     # ⚠ On an EDGE board authentication is required whatever the config says,

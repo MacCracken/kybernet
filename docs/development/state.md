@@ -6,6 +6,15 @@
 
 ## Version
 
+**1.8.0**: cyrius 6.6.20 → 6.7.9, with argonaut 1.16.2, libro 2.11.0 and agnostik 1.12.0 (the
+latest tags that pin 6.7.9) and sigil 3.13.12 (libro's and argonaut's own pin; 3.13.13–15 pin
+6.7.9 too and were not taken). The toolchain needed no source change. argonaut's 1.16.x
+behaviour changes were read against every call site: the ordered `init_stop_all` arrives with
+no code change, starts of a live service are refused, oneshot and forking starts time out at
+90 s, and `emergency_shell_default()` is closed, which `drop_to_emergency` overrides. Only two
+unit assertions and one comment changed. Suite 892 / 887. Harness 121, aarch64 boot gate 175.
+kybernet is +35,792 B on x86_64 and +134,040 B on aarch64, nearly all of it the deps.
+
 **1.7.11**: `src/lib/read_whole.cyr` is gone. config.json and the mount table are read
 with the stdlib's `file_read_whole_into` (cyrius 6.6.7 fixed the filing the stopgap was
 for), which keeps the same `{ptr, cap}` contract: one buffer per call site, nothing
@@ -126,15 +135,32 @@ was fixed in place under 1.7.0.
 
 ## Toolchain
 
-**cyrius 6.6.20**, via `~/.cyrius/bin/cyrius` (`cyriusly use 6.6.20`). The user asked for
-it. The pack-wide lockstep is retired, so a dep's own pin governs only that dep's CI.
-**Do not move any pin without being told to.** (6.7.x is installed too and is the default
-`current`; the manifest pin selects 6.6.20.)
+**cyrius 6.7.9**, via `~/.cyrius/bin/cyrius` (`cyriusly use 6.7.9`). The user asked for it.
+The pack-wide lockstep is retired, so a dep's own pin governs only that dep's CI. **Do not
+move any pin without being told to.** (6.7.18 is installed too and is the default `current`;
+the manifest pin selects 6.7.9.)
 
 **Provenance was checked, not assumed.** The install carries `tree-matches-tag: yes`, and
-every file in `~/.cyrius/versions/6.6.20/lib/` matches `lib/` at the cyrius `6.6.20` tag
+every file in `~/.cyrius/versions/6.7.9/lib/` matches `lib/` at the cyrius `6.7.9` tag
 byte for byte. A stdlib file whose hash differs from the lock aborts `cyrius build`
 (since 6.6.4), so a locally patched install breaks the build itself.
+
+What 6.7.0–6.7.9 changed that kybernet can see:
+
+- **Nothing needed a source change.** kybernet compiled unchanged, with the warnings 6.6.20
+  printed, under the new reserved words (`trait`, `const`, `true`, `false`, `do`, `dyn`), the
+  `bool` write check, struct-argument checks and forward-call arity checks.
+- **Some changes alter what already-compiling code computes, so they were audited, not
+  tested.** With comments and strings stripped, `src/` and `qemu/` hold no lone `!` (a real
+  operator since 6.7.3, silently dropped before), no typed pointer, no slice, no `f32`, no
+  `println` of a name and no exec-family call. The two `~` sites are parenthesised, so the
+  unary-fold bug 6.7.9 fixed (`-K + 10` was 15 from 6.6.10) has nothing to reach. **Repeat
+  this scan at every toolchain bump.** CHANGELOG [1.8.0] has the table.
+- **Rule 1, rule 2 and the enum probe were re-run on 6.7.9.** 113, 26 and 7 as a literal and
+  as a variable, variable 90/91, 444–446, 1 and 60 land on the intended call under
+  `qemu-aarch64 -strace`. qemu-user reports `inotify_init1(0x30)` as succeeding because it
+  drops unknown flag bits; a real kernel refuses it, which is what `main.cyr` relies on.
+- **The toolchain alone moves kybernet +3,568 B on x86_64 and −552 B on aarch64.**
 
 What 6.6.7–6.6.20 changed that kybernet can see:
 
@@ -161,10 +187,9 @@ What 6.6.7–6.6.20 changed that kybernet can see:
 - **A reachable undefined call refuses to emit the binary** (6.6.9), on every target.
 - **The conflicting-enum warning works past 1,024 globals again** (6.6.8): 1.7.0's
   1,500-global `CAPX` probe warns on 6.6.20.
-- **x86 DCE compaction is capped at 4,096 dead-code runs.** kybernet has 3,351 and
-  compacts. agnos-init has 4,180 and does not: 1,574,640 B, NOP-filled
-  (`2026-10-15-kybernet-dce-compaction-cap-agnos-init.md`, untracked in the cyrius repo
-  for the user to commit). 6.6.20 alone, with 1.7.9's deps, gives 4,170.
+- **x86 DCE compaction is capped at 4,096 dead-code runs**, still so at 6.7.9. kybernet has
+  3,561 unreachable fns and compacts. agnos-init has 4,484 and does not: 1,663,680 B,
+  NOP-filled (`2026-10-15-kybernet-dce-compaction-cap-agnos-init.md`).
 - **New warnings left in the build, roadmapped:** 21 calls of the deprecated
   `json_v_obj_get`, and four `streq(str_data(…))` sites in `main.cyr` (four more in
   `test.cyr`) that 6.6.20 flags because a `Str` is not NUL-terminated at its length.
@@ -186,29 +211,25 @@ gitignored: **the contract is the lock file, not the bytes on disk.**
 
 | Dep | Tag | Commit | Shape |
 |---|---|---|---|
-| sigil | 3.13.10 | `6d065da` | THIN surface: mldsa + sha_ni + sha256 + hex + tpm + argon2. **Never the monolith.** libro 2.10.8's own pin |
-| agnostik | 1.7.1 | `9c9c8b3` | `dist/agnostik.cyr` full bundle |
-| libro | 2.10.8 | `53401e7` | `dist/libro.cyr` full bundle |
-| argonaut | 1.15.6 | `63df6c6` | **12 selective modules**, no dist bundle |
-| patra | 1.15.2 | `2bc1925` | stdlib fold, and libro's pin (byte-identical); kybernet calls no `patra_*` |
+| sigil | 3.13.12 | `cf03996` | THIN surface: mldsa + sha_ni + sha256 + hex + tpm + argon2. **Never the monolith.** libro 2.11.0's and argonaut 1.16.2's own pin |
+| agnostik | 1.12.0 | `f03f086` | `dist/agnostik.cyr` full bundle |
+| libro | 2.11.0 | `53f00ce` | `dist/libro.cyr` full bundle |
+| argonaut | 1.16.2 | `422f739` | **12 selective modules**, no dist bundle |
+| patra | 1.16.0 | `00cf574` | stdlib fold, and libro's pin (byte-identical); kybernet calls no `patra_*` |
 
-`cyrius deps --verify`: **76 verified, 0 failed**, 5 commit pins. Every tag was confirmed
-on the remote, and each remote commit matches the local tag. The folded sakshi is 2.5.7.
-argonaut, libro and agnostik are at the latest tags pinning cyrius 6.6.20. No sigil tag pins
-6.6.20 (3.13.10 pins 6.6.18, 3.13.11 pins 6.7.5), so sigil follows libro 2.10.8's own pin,
-which it must: 3.13.0 changed private `_mldsa_sv_*` arities, so two sigil 3.x minors cannot
-share one unit.
+`cyrius deps --verify`: **76 verified, 0 failed**, 5 commit pins, each compared with the
+remote through the GitHub API. The folded sakshi is 2.5.8. argonaut, libro and agnostik are
+at the latest tags pinning cyrius 6.7.9. sigil 3.13.12 to 3.13.15 all pin 6.7.9, and sigil
+stays on libro's and argonaut's own pin: both were verified against it, 3.13.13–15 fix
+nothing PID 1 reaches, and 3.13.14's lane-pool `cbank()` sits inside the Argon2 path.
 
 ⚠ **Every dep change was checked against the DCE list** (`CYRIUS_DCE_VERBOSE=1`), not
 against a reading of the call graph. agnostik's `_stik_fill_random` (renamed at 1.7.0)
-exits 70 when `getrandom` fails, and it is **dead** in PID 1. At 1.7.10 the DCE list was
-diffed against 1.7.9's. Of 23 functions newly live, mostly argonaut's wave sort (`vec_sort_by`)
-and small wrappers, the one exit is `sys_exit_group(86)` in the stdlib's poison core, armed
-only under the `CYRIUS_POISON` compile flag. sigil's duplicated `crypto_scratch` names (`_sigil_random_fill`, `crypto_bank_set`, …)
-drop off the dead list under 6.6.20 although every caller of `_sigil_random_fill` is dead
-(`tpm_random`, `ed25519_generate_keypair`, `mldsa65_keypair`); 6.6.20 binds a duplicate to its
-last definition, and the list does not report it the same way. `mldsa65_sign`/`_verify` and
-`ed25519_verify` are dead. libro's `uuid_v4` calls
+exits 70 when `getrandom` fails, and it is **dead** in PID 1. At 1.8.0 the DCE list was
+diffed against 1.7.11's. Of 100 functions newly live, none can exit, panic or wait on entropy;
+the only new signal paths are argonaut's ordered stop and start timeout. 17 are patra's,
+link-time reachability from the persist-aware audit path, which runs only under
+`audit_persist`. `mldsa65_sign`/`_verify` and `ed25519_verify` are dead. libro's `uuid_v4` calls
 `getrandom(…, 0)` and is **live**, since every audit record calls it. That is better than
 2.10.0's `/dev/urandom` open, which exited 74 without the device node, a panic in init.
 It waits for the CRNG, and since cyrius 6.6.7 it is the FIRST thing in PID 1 that does: the
@@ -216,28 +237,28 @@ stdlib hash seed no longer blocks. The aarch64 gate boots with no entropy seed a
 wait at the first service start (standing rule 51).
 
 `refusing to overwrite stdlib leaf 'patra'` is structural and expected. 1.6.20 explained
-it as a stale libro pin, which was wrong: at 6.6.20 the pin and the fold are both 1.15.2
+it as a stale libro pin, which was wrong: at 6.7.9 the pin and the fold are both 1.16.0
 and byte-identical, and the warning still fires.
 
 ## Binary
 
 | Arch | Bytes | `e_machine` |
 |---|---|---|
-| x86_64 (`CYRIUS_DCE=1`) | 751,544 | `0x3e` |
-| aarch64 (`CYRIUS_DCE=1`) | 1,975,920 | `0xb7` |
-| agnos-init x86_64 (`CYRIUS_DCE=1`) | 1,574,640 | `0x3e` |
-| agnos-init aarch64 (`CYRIUS_DCE=1`) | 1,840,648 | `0xb7` |
+| x86_64 (`CYRIUS_DCE=1`) | 787,336 | `0x3e` |
+| aarch64 (`CYRIUS_DCE=1`) | 2,109,960 | `0xb7` |
+| agnos-init x86_64 (`CYRIUS_DCE=1`) | 1,663,680 | `0x3e` |
+| agnos-init aarch64 (`CYRIUS_DCE=1`) | 1,974,688 | `0xb7` |
 
-1.7.11 (the reader swap) left both kybernet binaries the same size, with different bytes, and agnos-init byte-identical. 1.7.10 moved the toolchain, so most of the change is cyrius's. The unchanged 1.7.9 source and
-deps built under 6.6.20 give 738,488 B on x86_64 (+18,736) and 1,975,152 on aarch64
-(−194,272, the compile-time ladder fold); the dep moves and the `privdrop.cyr` change add
-+13,056 and +768. agnos-init x86_64 went 248,440 → 1,574,640 because it crossed DCE's
-4,096-run compaction cap (Toolchain above): its dead code is NOP-filled and kept. Static
-data is 145,312 B on x86_64. The sibling-free reproduction produced byte-identical binaries
-on both arches, agnos-init included, and a byte-identical lock.
+1.8.0 is mostly the deps. The unchanged 1.7.11 source and deps built under 6.7.9 give 755,112 B
+on x86_64 (+3,568) and 1,975,368 on aarch64 (−552); the dep moves add +32,224 and +134,592.
+aarch64 DCE fills dead code with NOPs instead of removing it, so everything agnostik added shows
+there in full. agnos-init is still over DCE's 4,096-run compaction cap (Toolchain above), its
+dead code NOP-filled and kept. Static data is 145,904 B on x86_64. The sibling-free reproduction
+cloned every tag from an empty dep cache and produced byte-identical binaries on both arches,
+agnos-init included, and a byte-identical lock.
 
-⚠ Binary layout is a benchmark input. `strlen(52 chars)` moved +38% at the 1.7.0 bump, and it
-is one of the two benchmarks declared layout-sensitive (reported, not gated).
+⚠ Binary layout is a benchmark input. `strlen(52 chars)` moved +42% at the 1.8.0 bump (+38% at
+1.7.0), and it is one of the two benchmarks declared layout-sensitive (reported, not gated).
 
 ## Gate counts
 
@@ -246,8 +267,8 @@ the build; that is standing rule 32.
 
 | Gate | Count | Enforcement |
 |---|---|---|
-| `cyrius test src/test.cyr` | **890** assertions | floor read from CLAUDE.md; a shrinking suite fails |
-| `bash scripts/aarch64-exec-gate.sh` | **885** assertions + 5 syscall probes | executes aarch64 under `qemu-user`; its own declared floor |
+| `cyrius test src/test.cyr` | **892** assertions | floor read from CLAUDE.md; a shrinking suite fails |
+| `bash scripts/aarch64-exec-gate.sh` | **887** assertions + 5 syscall probes | executes aarch64 under `qemu-user`; its own declared floor |
 | `bash qemu/boot-test-aarch64.sh` | **175** properties, all 5 passes, 24 services | boots `kybernet-aarch64` as PID 1 (TCG), entropy-starved; needs host `veritysetup` |
 | `bash qemu/boot-test.sh` | **121** properties, 5 passes | `HARNESS_STRICT=1` in CI makes a skip a failure |
 | `bash scripts/verify-lock.sh` | 2 halves, 5 commit pins | the committed lock (HEAD's, not the working tree's) vs a fresh resolve |
@@ -255,7 +276,7 @@ the build; that is standing rule 32.
 | `cyrius lint` | 0 warnings, **0 untracked deferrals** | HARD GATE, both halves |
 | `cyrius fmt --check` | clean | non-mutating; never `diff <(cyrius fmt …)` |
 
-⚠ **890 and 885 are both correct, and neither floor gates the other.** Six assertions are
+⚠ **892 and 887 are both correct, and neither floor gates the other.** Six assertions are
 x86-only (`BS_OPEN`/`BS_STAT`/`BS_LSTAT`/`BS_PIPE`/`BS_POLL`/`BS_NANOSLEEP`) and one is
 aarch64-only (`BS_PPOLL`). Both floors are declared in CLAUDE.md and must be bumped
 together. **Do not pad the short arch to equalise them.**
@@ -291,26 +312,25 @@ stricter bar on the next sweep.**
 
 ## In flight
 
-1.7.10 and 1.7.11 are cut in the working tree, not yet committed or tagged. One cyrius
-issue was filed on 2026-10-15 and is listed under "Waiting on cyrius" in
-[roadmap.md](roadmap.md); the file is untracked in the cyrius repo for the user to commit. The four 2026-09-23 filings are
-resolved. When kybernet next takes agnostik (1.9.0 or later, which adds
-`restart_policy_name` / `_parse`; 1.7.1 does not), the agnostik sweep should show no
-duplicate here, since argonaut's parser no longer shares the name.
+1.8.0 is cut in the working tree, not yet committed or tagged. `scripts/verify-lock.sh` reads
+HEAD's lock, so it fails until this release is committed; it passed on a scratch commit of the
+tree. One cyrius issue was filed on 2026-10-15 and is listed under "Waiting on cyrius" in
+[roadmap.md](roadmap.md). The agnostik sweep the last release left open is done: taking 1.12.0
+adds `restart_policy_name` / `_parse` and the build shows no duplicate.
 
 ## Next
 
-The "Next" section of [roadmap.md](roadmap.md), in order; 18 open items in all.
+The "Next" section of [roadmap.md](roadmap.md), in order; 21 open items in all.
 
 1. **Every config load, SIGHUP included, costs ~4 bytes of arena per config byte.** It is
    PID 1 memory that never comes back, so it goes first.
 2. **`hashmap` / `agent_config` measure string-literal layout**: make them
    layout-insensitive, or exempt them with the experiment. 1.7.8 moved both back down
    without touching their code.
-3. **agnostik's `_hex_nibble` rename**, released in agnostik and then consumed.
-4. **`sys_ioctl` in `termios.cyr`** (in the stdlib since cyrius 6.5.36).
-5. **Source comments pointing at roadmap entries that no longer exist**, among them a
+3. **`sys_ioctl` in `termios.cyr`** (in the stdlib since cyrius 6.5.36).
+4. **Source comments pointing at roadmap entries that no longer exist**, among them a
    stale sd_notify policy comment in `main.cyr`.
+5. **The bench gate on a saturated host**, then the `json_v_obj_get` and `streq` warnings.
 
 ## Release order (cross-repo)
 

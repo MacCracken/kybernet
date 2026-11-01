@@ -4,7 +4,7 @@ What is still to do. What shipped is in [CHANGELOG.md](../../CHANGELOG.md), and 
 true right now, gate counts included, is in [state.md](state.md). A finished item is
 deleted from here, not ticked.
 
-**Open: 18** (`grep -c '^- \[ \]'` against this file).
+**Open: 21** (`grep -c '^- \[ \]'` against this file).
 
 ---
 
@@ -66,14 +66,24 @@ In the order they would be taken.
 - [ ] **PID 1 waits about 0.9 s for entropy at the first service start on an RNG-less
       board.** cyrius 6.6.7 stopped the stdlib hash seed blocking at phase 6, and the wait
       moved to libro's `uuid_v4` (`getrandom(…, 0)`), reached from argonaut's
-      `audit_log_record` on the first `init_start_service`: 914 ms under TCG at 1.7.10
-      (standing rule 51). libro also exits 74 there if `getrandom` fails, which in PID 1 is
+      `audit_log_record` on the first `init_start_service`: 914 ms under TCG at 1.7.10,
+      about 870 ms at 1.8.0 (standing rule 51). libro also exits 74 there if `getrandom` fails, which in PID 1 is
       a panic. Decide in libro whether an audit record's id needs a seeded CRNG, or whether
       it can draw with `GRND_INSECURE` as the hash seed does.
 - [ ] **A dynamic memory ceiling for the KDF.** `m_cost` is capped statically at
       64 MiB. `system_free_memory()` exists (`~/.cyrius/lib/sys.cyr:458`), but a bound
       that depends on free RAM at boot makes a credential valid on one board and invalid
       on another. Revisit if a board under 512 MB appears.
+- [ ] **A config key for argonaut's 90 s start timeout.** argonaut 1.16.1 kills a
+      oneshot or forking start after 90 s, which bounds what was an unbounded wait in
+      PID 1. A oneshot that legitimately runs longer now fails, and kybernet has no key
+      for `argonaut_set_start_timeout_ms`. Decide whether one is wanted, and its bounds.
+- [ ] **kybernet and argonaut now carry the same Argon2id verifier.** argonaut 1.16.2's
+      `verify_emergency_auth` verifies the `v1$` record with kybernet's bounds, on a
+      private `mmap` it unmaps before the verdict, so a verification grows the arena by
+      0 bytes. kybernet's `_emerg_verify_argon2id` still uses `alloc()`, which PID 1 never
+      gets back, and both are linked. Decide whether to delegate; standing rules 24 to 26
+      are written around kybernet's copy.
 - [ ] **Config keys for `socket_activation`, `log_config` and `required_for_modes`**, the
       three `ServiceDefinition` fields with none. Socket activation is a listening-socket
       protocol, not a scalar, and argonaut's defaults for the other two fit every shape
@@ -85,6 +95,11 @@ In the order they would be taken.
       `tpm-tis` and `tpm-crb`, and `swtpm` and `tpm2-tools` are in Arch `extra`: a real
       TPM 2.0 with real PCRs and sealing, enough to exercise `tpm_detect`, the PCR read
       and compare, and a sealed LUKS2 token end to end. No harness pass covers them.
+- [ ] **Measure the verified root hash before the LUKS unlock, and cap it after.**
+      argonaut's architecture note 005 (CVE-2026-32606 class) leaves this to kybernet:
+      a key sealed only to PCR 7 + 11 is released to any root that boots under the same
+      signed kernel. Extend the verified hash into PCR 15 before `unlock_luks`, extend a
+      fixed marker after it, and enrol tokens to PCR 7 + 15. Needs the `swtpm` pass above.
 - [ ] **`veritysetup open` and a read-only mount of the verified target.** The edge
       passes prove `veritysetup verify` only. The host has `dm-verity.ko.zst` and
       `dm-mod`; the blocker is that Arch's initcpio busybox has no `insmod`/`modprobe`.
@@ -103,10 +118,11 @@ Filed in the cyrius repo's `docs/development/issues/`.
 
 - [ ] **x86 DCE stops compacting past 4,096 dead-code runs, and agnos-init crossed it at
       1.7.10** (`2026-10-15-kybernet-dce-compaction-cap-agnos-init.md`). agnos-init links
-      the whole dependency set and uses little of it: 4,180 unreachable fns, so the dead
-      code is NOP-filled but kept, and the x86_64 binary went from 248,440 to 1,574,640
-      bytes. kybernet itself has 3,351 and still compacts. Nothing to do here when it is
-      fixed beyond recording the size.
+      the whole dependency set and uses little of it: 4,484 unreachable fns at 1.8.0, so
+      the dead code is NOP-filled but kept, and the x86_64 binary is 1,663,680 bytes
+      (248,440 at 1.7.9). kybernet itself has 3,561, up 215 at 1.8.0 almost entirely from
+      agnostik's bundle, and still compacts. The cap counts runs, not fns, so kybernet's
+      margin is at least 535. Nothing to do here when it is fixed beyond recording the size.
 
 ## Waiting on a consumer
 

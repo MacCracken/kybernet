@@ -7,6 +7,150 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.8.0] — 2026-11-01
+
+**cyrius 6.6.20 → 6.7.9, and argonaut 1.16.2 / libro 2.11.0 / agnostik 1.12.0 / sigil 3.13.12.**
+The toolchain bump needed no source change. argonaut 1.16.x changes behaviour on kybernet's
+start, restart, health and shutdown paths, each read against the new semantics below, and
+the two assertions that pinned its old open emergency-shell default are rewritten. Suite
+892 / 887. Harness 121, aarch64 boot gate 175. kybernet is +35,792 B on x86_64 and +134,040 B
+on aarch64, nearly all of it the deps.
+
+### Pins
+
+The user asked for cyrius 6.7.9 and for the deps at the versions that pin it. argonaut 1.16.2,
+libro 2.11.0 and agnostik 1.12.0 are the latest tags that do. Four sigil tags pin 6.7.9
+(3.13.12 to 3.13.15), and sigil moves to **3.13.12**, not the newest of them:
+
+- It is libro 2.11.0's pin and argonaut 1.16.2's, and cyrius dedups both blocks onto
+  kybernet's, so 3.13.12 is the sigil both were verified against. argonaut compared its 14
+  duplicated `crypto_scratch` functions body by body at that tag.
+- 3.13.13 to 3.13.15 fix ChaCha20-Poly1305 and ECDSA on a shared crypto lane and X.509
+  nameConstraints, none of which is in kybernet's thin surface, and a subprocess redirect
+  when the caller has a std fd closed, which `setup_console` rules out in PID 1.
+- 3.13.14 also rewrites `cbank()` into a lane pool, inside the Argon2 path, and nothing here
+  has been verified against that.
+
+The folded patra is 1.16.0, libro 2.11.0's pin, and the two files are byte-identical. The
+folded sakshi is 2.5.8. agnostik pins nothing kybernet shares.
+
+### Changed
+
+- **`cyrius.cyml`:** `cyrius` `6.6.20` → **`6.7.9`**; `[deps.sigil]` `3.13.10` → **`3.13.12`**,
+  `[deps.agnostik]` `1.7.1` → **`1.12.0`**, `[deps.libro]` `2.10.8` → **`2.11.0`**,
+  `[deps.argonaut]` `1.15.6` → **`1.16.2`**. The module lists are unchanged.
+- **`cyrius.lock`:** regenerated from scratch, because 6.6.20's resolver keeps an old tag's
+  `commit` row: 76 entries, 5 commit pins, a `cyrius	6.7.9` trailer. Local `git fetch` could not
+  reach the remotes (SSH), so every commit in the lock was compared with the tag's commit
+  through the GitHub API, and the reproduction below cloned each tag over HTTPS from an empty
+  dep cache.
+- **`test_emergency_auth`:** two assertions pinned `emergency_shell_default()` as open, and
+  argonaut 1.16.2 closed it, as its release notes said would happen. They now assert the closed
+  default (require_auth 1, no credential, every password denied), and the explicit
+  `require_auth = 0` arm, which argonaut still grants, keeps its coverage. +2 assertions.
+- **`drop_to_emergency`'s header comment** said the default hard-codes `require_auth = 0`. The
+  code needed no change: it overwrites both fields from kybernet's own policy.
+
+### What the toolchain changed underneath
+
+- **The 6.7.x language minor compiled kybernet unchanged.** It reserves `trait`, `const`, `true`,
+  `false`, `do` and `dyn`, checks every write into a `bool`, type-checks struct arguments,
+  arity-checks forward calls, refuses a `: stack` pair stored into one slot, an unmatched `}` at
+  module scope and a `for` step assigning an undeclared name. The build prints exactly the
+  warnings it printed under 6.6.20, with only the counts and the patra path moved.
+- **The changes that alter what already-compiling code computes were audited, because a green
+  suite proves nothing about them.** `src/` and `qemu/` were scanned with comments and strings
+  stripped:
+
+  | Change | Before | kybernet |
+  |---|---|---|
+  | A lone `!` (6.7.3) | Silently dropped: `if (!ok)` ran as `if (ok)` | none |
+  | Unary `-` / `~` on a constant before an operator and a literal (6.7.9) | `-K + 10` was 15, from 6.6.10 | none. The two `~` sites are `(~TERMIOS_ECHO)`, closed by the parenthesis |
+  | `*p` through a narrow `*T` reads and writes the element (6.7.8); a pointer step dies with its operator (6.7.9) | A word, or a leaked step | no typed pointers |
+  | A signed slice element reads negative (6.7.8) | Read unsigned | no slices |
+  | Writes into `f32` round (6.7.6) | Stored the f64 bits | no `f32` |
+  | `println(n)` on an integer name (6.7.6) | Crashed | no `println` of a name |
+  | By-value struct arguments are copied where written (6.7.7, 6.7.9) | A later argument's write reached the callee | no struct-typed parameters |
+  | The exec family starts children with default signals and an empty mask (6.7.9) | Inherited them | no exec-family call; rule 17 forbids them |
+
+  The deps made the same audit at their own 6.7.9 bumps (libro 2.11.0, argonaut 1.16.0).
+- Standing rule 1 was re-run under `qemu-aarch64 -strace`: 113, 26 and 7 as a literal and as a
+  variable, variable 90/91, 444–446, 1 and 60 each land on the intended call. Rule 2's sizing
+  (global `[4]`/`[16]` 32/128 B apart, local 8/16) is unchanged on both arches, and the
+  conflicting-enum probe behind 1,500 globals still warns.
+- **x86 DCE compaction is still capped at 4,096 dead-code runs.** kybernet has 3,561 unreachable
+  fns (3,346 at 1.7.11) and compacts. agnos-init has 4,484 and does not.
+- The toolchain alone moves kybernet +3,568 B on x86_64 and −552 B on aarch64, measured by
+  building 1.7.11's source and deps under 6.7.9.
+
+### What the deps changed underneath
+
+- **argonaut 1.16.x**, whose Breaking list was read against every call site:
+  - **`init_stop_all` is now an ordered stop**: dependents first, wave by wave, one shared
+    budget, worst case `timeout_ms` + 500 ms per wave that needed SIGKILL. `do_shutdown` gets it
+    with no code change.
+  - **`init_start_service` refuses a STARTING, RUNNING or STOPPING service** instead of forking a
+    second copy. Phase 8 starts each service once, and restarts go through
+    `init_restart_service`, which stops a live service first.
+  - **Oneshot and forking starts time out after 90 s**, which bounds what was an unbounded wait
+    in PID 1. A oneshot that needs longer now fails, and kybernet has no key for the override
+    (roadmap). No harness fixture reaches the timeout; argonaut's own suite covers it.
+  - **Restart counts reset after a 10 s stable run**, so a monthly crash no longer spends a
+    lifetime budget.
+  - **`last_hc`, `last_notify` and `started_at` are monotonic ms.** kybernet neither reads nor
+    writes them: `WATCHDOG=1` goes through argonaut, which stamps its own clock.
+  - **`init_poll_health`'s vec is reused until the next call**, and `handle_health_tick` consumes
+    it at once.
+  - **`run_safe_cmd_timeout` children lead their own process group**, so a timed-out
+    `veritysetup` takes its children with it. A key a service defines now suppresses argonaut's
+    default or extra-env entry for that key, `NOTIFY_SOCKET` included.
+  - **`verify_emergency_auth` gained a v1 Argon2id arm and a strict classifier**: its legacy arm
+    takes exactly 64 lowercase hex digits. `_emerg_hex_lower` normalises before the call, so
+    kybernet's accepted uppercase digest still verifies. The two verifiers now duplicate each
+    other (roadmap).
+  - The order around `kyb_pre_exec` in `fork_exec_service` is unchanged.
+- **agnostik 1.12.0** is additive here: telemetry and OTLP encoders, +229 dead functions in
+  PID 1's link, which is the whole rise in the unreachable count. Two sort comparators went
+  live because their address is taken. Its exit-70 `_stik_fill_random` stays dead. 1.9.0 adds
+  the bare `restart_policy_parse`, and `svc_config.cyr` already calls
+  `argonaut_restart_policy_parse`; the build shows no duplicate. `test_restart_and_seccomp_values_agree`
+  and `test_capability_numbers_are_kernel` pass against the values the link uses.
+- **libro 2.11.0** changes no libro source. **patra 1.16.0** adds a WAL probe per statement,
+  reached only under `audit_persist`.
+- **sigil 3.13.12:** the 14 argon2 duplicates of `crypto_scratch` and `_sigil_random_fill` were
+  compared body by body in this link and all match, which matters because every call binds to
+  the last definition.
+- The DCE list was diffed against 1.7.11's. Of 100 newly live functions, none can exit, panic or
+  wait on entropy. The only new signal paths are `_sd_stop_wave` and `_init_kill_start_child`,
+  the ordered stop and the start timeout. `mldsa65_verify` and `ed25519_verify` stay dead. The
+  17 patra functions are link-time reachability from argonaut's persist-aware audit path.
+- **The entropy wait did not move.** On the starved aarch64 boot the first
+  `init_start_service` still waits about 870 ms: `starting: agnos-init` at about 1.27 s,
+  `crng init done` at 2.14 s, then that service's first audit record (standing rule 51).
+
+### Not changed, roadmapped
+
+The 21 `json_v_obj_get` deprecations and four `streq(str_data(…))` warnings stay, under their
+existing roadmap items. Three new items: a config key for the 90 s start timeout, the duplicated
+Argon2id verifier, and argonaut's architecture note 005, which leaves measuring the verified
+root hash into PCR 15 before the LUKS unlock, and capping it after, to kybernet.
+
+### Release gates
+
+| Gate | Result |
+|---|---|
+| `scripts/verify-lock.sh` | **OK on a scratch commit of this tree**, and a fresh resolve is byte-identical (82 lines). It reads HEAD's lock, so it fails in the working tree until this release is committed: that is the gate working |
+| `rm -rf lib cyrius.lock && cyrius deps && cyrius deps --verify` | 76 verified, 0 failed, 5 commit pins, all five matching the remote |
+| builds, `CYRIUS_DCE=1` | kybernet x86_64 **787,336 B**, aarch64 **2,109,960 B**; agnos-init **1,663,680 B** and **1,974,688 B**; `e_machine` `0x3e` / `0xb7` |
+| build warnings | sigil's 15 byte-identical duplicate fns; the `ResourceLimits` struct twin; the `patra` fold notice; the 21 deprecations and 4 `streq` warnings. Nothing new against 6.6.20 |
+| `cyrius fmt --check` / `cyrius lint` / `cyrius vet` | clean / 0 warnings, 0 untracked deferrals / 0 untrusted, 0 missing |
+| `cyrius test src/test.cyr` | **892 passed, 0 failed** |
+| `scripts/aarch64-exec-gate.sh` | **887** assertions, 0 failed (floor 887); 5 syscall probes ok; declared-broken list empty |
+| `scripts/bench-history.sh` | 56 benchmarks, **no regression ≥ 15%**. Calibration 117 → 119 ns/op. `strlen(52 chars)` moved +42%; it is declared layout-sensitive and not gated |
+| `qemu/boot-test.sh` (KVM, `HARNESS_STRICT=1`) | **OK**, 121 properties across the five passes; kybernet span 508 ms, reactor wakeups 24, 24 service cgroups removed. The `/dev` node staging step reported SKIPPED locally (no `CAP_MKNOD` without sudo) |
+| `qemu/boot-test-aarch64.sh` (TCG, `HARNESS_STRICT=1`) | **OK**, 175 properties, all five passes; kybernet span 1,694 ms; CRNG seeded at 2.14 s, after phase 1 at 1.20 s |
+| sibling-free reproduction | a copy with no siblings and an **empty dep cache** clones every tag over HTTPS and reproduces a byte-identical lock and byte-identical binaries on both arches, agnos-init included |
+
 ## [1.7.11] — 2026-10-15
 
 **`src/lib/read_whole.cyr` is retired. config.json and the mount table are read with the

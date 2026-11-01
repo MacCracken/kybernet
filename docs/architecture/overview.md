@@ -29,8 +29,8 @@ the 1.5.6 aarch64 syscall repairs and the 1.5.7 fail-open exec fix were both
 argonaut-side defects reachable from kybernet's boot path.
 
 What the split actually buys is that the service-management logic is
-independently tested (1,016 assertions in argonaut's own suite at 1.15.6, against
-kybernet's 890) and independently versioned, so a change there is reviewed and
+independently tested (1,662 assertions in argonaut's own suite at 1.16.2, against
+kybernet's 892) and independently versioned, so a change there is reviewed and
 gated on its own before kybernet pins the tag. That is real value — it is just
 not fault isolation.
 
@@ -93,13 +93,13 @@ All under `src/lib/`, included by `src/main.cyr`.
 Resolved by `cyrius deps` from `cyrius.cyml` and sha256-pinned in `cyrius.lock`;
 `lib/` is gitignored, so the contract is the lock file rather than the bytes on disk.
 
-- **argonaut 1.15.6** — service lifecycle, boot sequencing, health checks, crash
+- **argonaut 1.16.2** — service lifecycle, boot sequencing, health checks, crash
   recovery, audit. Imported as **12 selective modules**, not a dist bundle
   (`src/tmpfiles.cyr` was dropped at 1.6.2: it had no call site in the link set).
-- **agnostik 1.7.1** — shared AGNOS types (`security_context`, `capability_set`,
+- **agnostik 1.12.0** — shared AGNOS types (`security_context`, `capability_set`,
   `cgroup_limits`, `agent_config`)
-- **libro 2.10.8** — cryptographic audit logging (SHA-256 hash-linked chain)
-- **sigil 3.13.10** — a deliberately **thin** surface: ML-DSA, SHA-256, hex, the TPM
+- **libro 2.11.0** — cryptographic audit logging (SHA-256 hash-linked chain)
+- **sigil 3.13.12** — a deliberately **thin** surface: ML-DSA, SHA-256, hex, the TPM
   profile, and (1.5.9) Argon2id. Never the monolith, whose x509/RSA banks add `.bss`
   that DCE cannot strip. The Argon2 profile had the same problem until 3.12.10 moved
   its 352 KB working lane onto the caller's arena — see CHANGELOG [1.5.9].

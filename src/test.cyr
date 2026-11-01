@@ -1385,9 +1385,15 @@ fn test_emergency_auth() {
     println("--- emergency shell auth (1.5.4) ---");
     var esc = emergency_shell_default();
 
-    # Default: no auth required, anything passes. This is the path every
-    # existing deployment takes, so it must stay open.
-    assert_eq(load64(esc + 24), 0, "emerg: default require_auth is off");
+    # argonaut's default has been CLOSED since 1.16.2: authentication required,
+    # no credential, so it denies every password. It does not decide anything
+    # at runtime, because drop_to_emergency overwrites both fields from
+    # kybernet's own policy. An open shell stays an explicit require_auth = 0.
+    assert_eq(load64(esc + 24), 1, "emerg: default require_auth is on");
+    assert_eq(load64(esc + 32), 0, "emerg: default has no credential");
+    assert_eq(verify_emergency_auth(esc, str_from("anything")), 0,
+      "emerg: default config -> DENIED");
+    store64(esc + 24, 0);
     assert_eq(verify_emergency_auth(esc, str_from("anything")), 1,
       "emerg: no auth required -> granted");
 
