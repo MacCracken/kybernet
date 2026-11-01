@@ -1,16 +1,99 @@
 # Kybernet Roadmap
 
-What is still to do. What shipped is in [CHANGELOG.md](../../CHANGELOG.md), and what is
-true right now, gate counts included, is in [state.md](state.md). A finished item is
-deleted from here, not ticked.
+Forward work only. What shipped is in [CHANGELOG.md](../../CHANGELOG.md), and what is true
+right now, gate counts included, is in [state.md](state.md).
+
+**Current release: 1.8.1** (cyrius 6.7.18, argonaut 1.18.0, libro 2.11.3, agnostik 2.0.0,
+sigil 3.13.15).
+
+**Every open item has a target release.** The order is the dependency order: a later release
+may assume everything above it. An item whose start depends on something outside these repos
+is in [Gated](#gated), names its gate, and gets a number when the gate opens. A new item goes
+under a release or under Gated, never in a list of its own. A finished item is deleted, and
+a finished release's section goes with it. A version is for code: docs and roadmap changes
+never take one, and a comment-only item ships with a release that has code in it.
 
 **Open: 23** (`grep -c '^- \[ \]'` against this file).
 
 ---
 
-## Next
+## Release plan
 
-In the order they would be taken.
+| Release | Theme | Items | Waits on |
+|---|---|---:|---|
+| [1.8.2](#182--warnings-and-stale-comments) | Warnings and stale comments | 4 | nothing |
+| [1.8.3](#183--gates-that-measure-the-code) | Gates that measure the code | 3 | nothing |
+| [1.9.0](#190--what-pid-1-pays) | What PID 1 pays: memory, size, boot wait | 4 | a sigil tag, a libro tag, and argonaut carrying both |
+| [1.10.0](#1100--service-config-surface) | Service config surface | 3 | 1.9.0's reload path |
+| [1.11.0](#1110--edge-boot-under-emulation) | Edge boot under emulation | 3 | `swtpm` in the harness and in CI |
+| [1.12.0](#1120--non-root-default-services) | Non-root default services | 1 | agnosticos' config, argonaut's `default_services` |
+| [Gated](#gated) | Unnumbered until the gate opens | 5 | hardware, or a consumer |
+
+**Every release:** the full release gates in CLAUDE.md, including the benchmark gate, then the
+sibling-free reproduction.
+
+**A cyrius pin move** has no number until one is wanted, because 6.7.18 is the latest release.
+It ships as its own patch, or with whatever release is next. Scan for the changes that alter
+what already-compiling code computes, diff the DCE list knowing it cannot see a
+compiler-emitted call, and replay `ci.yml` in the runner's image (CHANGELOG [1.8.0], [1.8.1]).
+
+---
+
+## 1.8.2 — Warnings and stale comments
+
+No behaviour change, and the binaries should barely move. The build's known warnings go, so
+that a new one stands out.
+
+- [ ] **Use the stdlib's `sys_ioctl` in `src/lib/termios.cyr`.** cyrius 6.5.36 added it
+      (the resolved `2026-08-24-sys-ioctl-wrapper-missing.md` filing). `termios.cyr` still
+      calls `syscall(SYS_IOCTL, …)` and says no wrapper exists, and so does standing
+      rule 21.
+- [ ] **`json_v_obj_get` is deprecated in the bayan that cyrius 6.6.20 folds.** 21 call
+      sites (20 in `src/lib/svc_config.cyr`, 1 in `src/main.cyr`) warn on every build. The
+      alias forwards to `bayan_json_v_obj_get_by_cstr`; every key kybernet passes is a
+      literal, so the rename is mechanical.
+- [ ] **cyrius 6.6.20 flags `streq(str_data(…), …)`**: a `Str`'s bytes are not
+      NUL-terminated at its length. Four sites in `src/main.cyr` compare service names
+      that way (two in the default-service merge, two in dependency checks) and four in
+      `src/test.cyr`. Find out whether every name reaching them is NUL-terminated (bayan's
+      string values, argonaut's defaults) or compare as `Str`.
+- [ ] **Source comments that point at roadmap entries that no longer exist.** The
+      sd_notify policy block above `handle_notify_msg` (`src/main.cyr`) says `WATCHDOG=1`
+      and `MAINPID=` are refused and "roadmapped"; the code below it has handled both since
+      1.6.8 and 1.6.10. `src/lib/edge_boot.cyr` sends readers to a "Blocked on hardware"
+      section (the `veritysetup open`, LUKS and TPM work is release 1.11.0) and still
+      describes the unbounded `tpm_read_pcr` path, dead since 1.6.16. `src/lib/seccomp.cyr`
+      cites "roadmap v1.6.0" and a hardware section for the aarch64 numbers, which the
+      aarch64 boot gate executes. Comments only.
+
+## 1.8.3 — Gates that measure the code
+
+Each of these makes a gate fail for kybernet's reasons and not the machine's (standing
+rule 37). They come before 1.9.0, whose changes need a benchmark gate that can be believed.
+
+- [ ] **`hashmap(3 set+4 get/has)` and `agent_config(new+get+set)` measure string-literal
+      layout.** An unused string literal in `src/bench.cyr` moves `agent_config` from 110
+      to 131–134 ns/op and `hashmap` from about 1,000 to 1,199 (CHANGELOG [1.7.7] has the
+      experiment). Make them layout-insensitive, or exempt them in `LAYOUT_SENSITIVE` with
+      the experiment in the same commit, as `strlen(52 chars)` is.
+- [ ] **The bench gate cannot hold on a saturated host.** At 1.7.11, with another
+      workload keeping all 16 cores busy (load 9 to 20), two consecutive runs flagged 15
+      and then 5 benchmarks, disjoint sets, and the first set came back about 50% faster on
+      the second run. The calibration loop normalises CPU speed, not memory contention. An
+      interleaved A/B against the previous release's tree, best of three, showed parity
+      within 5% on every flagged benchmark. At 1.8.0 the same tree flagged 0, 36, 0 and 28
+      across four runs beside another workload. Consider making that A/B the gate's own
+      fallback when the history comparison flags.
+- [ ] **`test_boot_stage_results` reads the host's `/dev/console`.** The suite goes red in a
+      container started without a TTY: `stage: device_mgr skips` gets STAGE_FAIL, on both
+      arches, from a machine property (standing rule 37). Found at 1.8.0 by replaying CI in
+      `ubuntu:26.04`. Give the stage a path to check, or test it against a fixture.
+
+## 1.9.0 — What PID 1 pays
+
+The memory, file size and boot time PID 1 spends and never gets back. A minor, because the
+reload path changes. The Unicode and entropy items are dep-first: the dep's fix, then **the
+user tags it**, then kybernet takes the tag.
 
 - [ ] **Every config load, SIGHUP included, costs about 4 bytes of arena per config
       byte.** `json_v_parse_buf` allocates 35,904 bytes to parse an 8,983-byte config
@@ -25,88 +108,44 @@ In the order they would be taken.
       initializers, so kybernet went 787,336 → 1,095,824 B from the toolchain alone, the
       data segment 209 → 493 KB. libro and argonaut measured the same. Fix it in sigil:
       require `bayan-bigint` and call `bayan_u256_*`. Or have DCE drop unread initializers.
-- [ ] **`hashmap(3 set+4 get/has)` and `agent_config(new+get+set)` measure string-literal
-      layout.** An unused string literal in `src/bench.cyr` moves `agent_config` from 110
-      to 131–134 ns/op and `hashmap` from about 1,000 to 1,199 (CHANGELOG [1.7.7] has the
-      experiment). Make them layout-insensitive, or exempt them in `LAYOUT_SENSITIVE` with
-      the experiment in the same commit, as `strlen(52 chars)` is.
-- [ ] **Use the stdlib's `sys_ioctl` in `src/lib/termios.cyr`.** cyrius 6.5.36 added it
-      (the resolved `2026-08-24-sys-ioctl-wrapper-missing.md` filing). `termios.cyr` still
-      calls `syscall(SYS_IOCTL, …)` and says no wrapper exists, and so does standing
-      rule 21.
-- [ ] **Source comments that point at roadmap entries that no longer exist.** The
-      sd_notify policy block above `handle_notify_msg` (`src/main.cyr`) says `WATCHDOG=1`
-      and `MAINPID=` are refused and "roadmapped"; the code below it has handled both since
-      1.6.8 and 1.6.10. `src/lib/edge_boot.cyr` sends readers to a "Blocked on hardware"
-      section (the `veritysetup open`, LUKS and TPM work is under Harness work below) and
-      still describes the unbounded `tpm_read_pcr` path, dead since 1.6.16.
-      `src/lib/seccomp.cyr` cites "roadmap v1.6.0" and a hardware section for the aarch64
-      numbers, which the aarch64 boot gate executes. Comments only.
-- [ ] **The bench gate cannot hold on a saturated host.** At 1.7.11, with another
-      workload keeping all 16 cores busy (load 9 to 20), two consecutive runs flagged 15
-      and then 5 benchmarks, disjoint sets, and the first set came back about 50% faster on
-      the second run. The calibration loop normalises CPU speed, not memory contention. An
-      interleaved A/B against the previous release's tree, best of three, showed parity
-      within 5% on every flagged benchmark. At 1.8.0 the same tree flagged 0, 36, 0 and 28
-      across four runs beside another workload. Consider making that A/B the gate's own
-      fallback when the history comparison flags.
-- [ ] **`test_boot_stage_results` reads the host's `/dev/console`.** The suite goes red in a
-      container started without a TTY: `stage: device_mgr skips` gets STAGE_FAIL, on both
-      arches, from a machine property (standing rule 37). Found at 1.8.0 by replaying CI in
-      `ubuntu:26.04`. Give the stage a path to check, or test it against a fixture.
-- [ ] **`json_v_obj_get` is deprecated in the bayan that cyrius 6.6.20 folds.** 21 call
-      sites (20 in `src/lib/svc_config.cyr`, 1 in `src/main.cyr`) warn on every build. The
-      alias forwards to `bayan_json_v_obj_get_by_cstr`; every key kybernet passes is a
-      literal, so the rename is mechanical.
-- [ ] **cyrius 6.6.20 flags `streq(str_data(…), …)`**: a `Str`'s bytes are not
-      NUL-terminated at its length. Four sites in `src/main.cyr` compare service names
-      that way (two in the default-service merge, two in dependency checks) and four in
-      `src/test.cyr`. Find out whether every name reaching them is NUL-terminated (bayan's
-      string values, argonaut's defaults) or compare as `Str`.
-
-## Needs a decision
-
-- [ ] **Give the AGNOS default services a non-root uid.** `security.uid` /
-      `security.gid` work end to end (1.6.9), and agnos-init makes the runtime
-      directories (1.7.6), but nothing in the shipped config or in argonaut's
-      `default_services` sets a uid, so every real service runs as root. Needs a uid per
-      service (aethersafha, daimon, agnoshi, ...), agnos-init owning each service's
-      runtime paths to match (`/run/agnos/agents` and `/run/agnos/plugins` are root-owned
-      today), and the numeric ids in agnosticos' config. A service with
-      `"seccomp": "basic"` and a uid works only because the drop precedes the filter:
-      none of setuid/setgid/setgroups/setresuid are in that allowlist.
-- [ ] **PID 1 waits about 0.9 s for entropy at the first service start on an RNG-less
-      board.** cyrius 6.6.7 stopped the stdlib hash seed blocking at phase 6, and the wait
-      moved to libro's `uuid_v4` (`getrandom(…, 0)`), reached from argonaut's
-      `audit_log_record` on the first `init_start_service`: 914 ms under TCG at 1.7.10,
-      about 870 ms at 1.8.0 and 1.8.1 (standing rule 51). libro also exits 74 there if `getrandom` fails, which in PID 1 is
-      a panic. Decide in libro whether an audit record's id needs a seeded CRNG, or whether
-      it can draw with `GRND_INSECURE` as the hash seed does.
-- [ ] **A dynamic memory ceiling for the KDF.** `m_cost` is capped statically at
-      64 MiB. `system_free_memory()` exists (`~/.cyrius/lib/sys.cyr:458`), but a bound
-      that depends on free RAM at boot makes a credential valid on one board and invalid
-      on another. Revisit if a board under 512 MB appears.
-- [ ] **Move `env_files` onto argonaut's loader.** argonaut 1.17.0 reads a service's env
-      files at spawn (`svc_def_set_env_files`), refusing FIFOs and non-regular files.
-      kybernet still reads them itself at config load and merges them into `environment`, so
-      a file changed after load is not seen until a reload. Decide which time is the right one.
-- [ ] **A config key for argonaut's 90 s start timeout.** argonaut 1.16.1 kills a
-      oneshot or forking start after 90 s, which bounds what was an unbounded wait in
-      PID 1. A oneshot that legitimately runs longer now fails, and kybernet has no key
-      for `argonaut_set_start_timeout_ms`. Decide whether one is wanted, and its bounds.
 - [ ] **kybernet and argonaut now carry the same Argon2id verifier.** argonaut 1.16.2's
       `verify_emergency_auth` verifies the `v1$` record with kybernet's bounds, on a
       private `mmap` it unmaps before the verdict, so a verification grows the arena by
       0 bytes. kybernet's `_emerg_verify_argon2id` still uses `alloc()`, which PID 1 never
       gets back, and both are linked. Decide whether to delegate; standing rules 24 to 26
       are written around kybernet's copy.
+- [ ] **PID 1 waits about 0.9 s for entropy at the first service start on an RNG-less
+      board.** cyrius 6.6.7 stopped the stdlib hash seed blocking at phase 6, and the wait
+      moved to libro's `uuid_v4` (`getrandom(…, 0)`), reached from argonaut's
+      `audit_log_record` on the first `init_start_service`: 914 ms under TCG at 1.7.10,
+      about 870 ms at 1.8.0 and 1.8.1 (standing rule 51). libro also exits 74 there if
+      `getrandom` fails, which in PID 1 is a panic. Decide in libro whether an audit
+      record's id needs a seeded CRNG, or whether it can draw with `GRND_INSECURE` as the
+      hash seed does.
+
+## 1.10.0 — Service config surface
+
+What argonaut now offers and config.json cannot reach. It follows 1.9.0 because new keys go
+through the reload path that release changes.
+
+- [ ] **A config key for argonaut's 90 s start timeout.** argonaut 1.16.1 kills a
+      oneshot or forking start after 90 s, which bounds what was an unbounded wait in
+      PID 1. A oneshot that legitimately runs longer now fails, and kybernet has no key
+      for `argonaut_set_start_timeout_ms`. Decide whether one is wanted, and its bounds.
+- [ ] **Move `env_files` onto argonaut's loader.** argonaut 1.17.0 reads a service's env
+      files at spawn (`svc_def_set_env_files`), refusing FIFOs and non-regular files.
+      kybernet still reads them itself at config load and merges them into `environment`, so
+      a file changed after load is not seen until a reload. Decide which time is the right one.
 - [ ] **Config keys for `socket_activation`, `log_config` and `required_for_modes`**, the
       three `ServiceDefinition` fields with none. Socket activation is a listening-socket
       protocol, not a scalar, and argonaut's defaults for the other two fit every shape
       kybernet ships. `resource_limits` stays unexposed on purpose (standing rule 14), though
       argonaut has applied it at spawn since 1.17.0.
 
-## Harness work
+## 1.11.0 — Edge boot under emulation
+
+The edge paths no gate executes, in this order: the `swtpm` pass is what the other two run on.
+`swtpm` and `tpm2-tools` have to be CI installs, not host capabilities (standing rule 39).
 
 - [ ] **TPM attestation, PCR read and LUKS2 token unlock under `swtpm`.** QEMU exposes
       `tpm-tis` and `tpm-crb`, and `swtpm` and `tpm2-tools` are in Arch `extra`: a real
@@ -123,15 +162,44 @@ In the order they would be taken.
       Stage a static loader or the modules, or boot a kernel with DM built in. Never a
       module loader inside PID 1.
 
-## Needs real hardware
+## 1.12.0 — Non-root default services
+
+Last, because it changes what every real service runs as, and it is the one release that
+spans the distribution: argonaut's `default_services` and agnosticos' config move with it.
+
+- [ ] **Give the AGNOS default services a non-root uid.** `security.uid` /
+      `security.gid` work end to end (1.6.9), and agnos-init makes the runtime
+      directories (1.7.6), but nothing in the shipped config or in argonaut's
+      `default_services` sets a uid, so every real service runs as root. Needs a uid per
+      service (aethersafha, daimon, agnoshi, ...), agnos-init owning each service's
+      runtime paths to match (`/run/agnos/agents` and `/run/agnos/plugins` are root-owned
+      today), and the numeric ids in agnosticos' config. A service with
+      `"seccomp": "basic"` and a uid works only because the drop precedes the filter:
+      none of setuid/setgid/setgroups/setresuid are in that allowlist.
+
+---
+
+## Gated
+
+Each takes the next free number when its gate opens.
+
+**Gate: real hardware on the bench.**
 
 - [ ] **RPi4 / NUC boot validation.**
 - [ ] **Argon2 cost measured on real ARM.** TCG runs it (about 2.7 s at phase 6c), but
       its timings mean nothing, and the work cap is about time.
 
-## Waiting on a consumer
+**Gate: a board under 512 MB.**
 
-- [ ] **Control socket for agnoshi runtime commands**, once an agnoshi consumer drives
-      the protocol shape.
-- [ ] **Binary signing on release**, once libro signing and timestamping are driven from
-      outside kybernet.
+- [ ] **A dynamic memory ceiling for the KDF.** `m_cost` is capped statically at
+      64 MiB. `system_free_memory()` exists (`~/.cyrius/lib/sys.cyr:458`), but a bound
+      that depends on free RAM at boot makes a credential valid on one board and invalid
+      on another. Revisit if a board under 512 MB appears.
+
+**Gate: an agnoshi consumer that drives the protocol shape.**
+
+- [ ] **Control socket for agnoshi runtime commands.**
+
+**Gate: libro signing and timestamping driven from outside kybernet.**
+
+- [ ] **Binary signing on release.**

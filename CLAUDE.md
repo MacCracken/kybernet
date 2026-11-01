@@ -85,7 +85,7 @@ kybernet/
 │   ├── audit/             # P(-1) audit reports (1.1.5+)
 │   ├── benchmarks-rust-v-cyrius.md  # historical v1.0.0 snapshot, not maintained
 │   └── development/
-│       ├── roadmap.md    # what is NOT done; open items only
+│       ├── roadmap.md    # what is NOT done, by target release
 │       └── state.md      # what IS true right now (volatile) - START HERE on handoff
 ├── lib/                   # gitignored; populated by `cyrius deps`
 └── build/                 # Generated binaries (gitignored)
@@ -260,6 +260,8 @@ Plus a **sibling-free reproduction** — the only gate that catches a tag which 
 
 ## DO NOT
 
+- **Do not bump VERSION for docs or roadmap changes.** A version is for code
+- **Do not add a roadmap item without a target release.** Put it under a numbered release in dependency order, or under Gated with its gate named. Keep the plan table and the `Open:` count right
 - **Do not commit or push** — the user handles all git operations
 - **NEVER use `gh` CLI** — use `curl` to GitHub API only
 - Do not modify Cyrius stdlib — changes go via `~/.cyrius/`

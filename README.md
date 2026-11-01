@@ -174,7 +174,7 @@ boot. With the working lane moved onto the caller's arena it costs +25 KB.
 |-----|------|
 | [CHANGELOG.md](CHANGELOG.md) | What each release actually did, and why |
 | [docs/architecture/overview.md](docs/architecture/overview.md) | Two-layer model, boot phases, modules, event-loop tokens |
-| [docs/development/roadmap.md](docs/development/roadmap.md) | Active work first; shipped releases one line each |
+| [docs/development/roadmap.md](docs/development/roadmap.md) | The release plan: every open item has a target release |
 | [docs/audit/](docs/audit/) | P(-1) audit reports (2026-05-11, 2026-08-24) |
 | [docs/benchmarks-rust-v-cyrius.md](docs/benchmarks-rust-v-cyrius.md) | Historical v1.0.0 port comparison — not maintained |
 | [CLAUDE.md](CLAUDE.md) | Build/release gates and the standing audit rules |

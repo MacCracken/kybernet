@@ -337,23 +337,21 @@ stricter bar on the next sweep.**
 
 ## In flight
 
-1.8.1 is cut in the working tree, not yet committed or tagged. `scripts/verify-lock.sh` reads
-HEAD's lock, so it fails until this release is committed; it passed on a scratch commit of the
-tree. 1.8.0 is tagged and on the remote.
+Nothing. 1.8.1 is tagged and on the remote.
 
 ## Next
 
-The "Next" section of [roadmap.md](roadmap.md), in order; 23 open items in all.
+**1.8.2, warnings and stale comments**, then the rest of the release plan in
+[roadmap.md](roadmap.md), where every one of the 23 open items has a target release.
 
-1. **Every config load, SIGHUP included, costs ~4 bytes of arena per config byte.** It is
-   PID 1 memory that never comes back, so it goes first.
-2. **bayan's Unicode tables**: about 284 KB in PID 1's data segment that nothing reads.
-3. **`hashmap` / `agent_config` measure string-literal layout**: make them
-   layout-insensitive, or exempt them with the experiment. 1.7.8 moved both back down
-   without touching their code.
-4. **`sys_ioctl` in `termios.cyr`** (in the stdlib since cyrius 6.5.36).
-5. **Source comments pointing at roadmap entries that no longer exist**, among them a
-   stale sd_notify policy comment in `main.cyr`.
+| Release | Theme |
+|---|---|
+| 1.8.2 | Warnings and stale comments |
+| 1.8.3 | Gates that measure the code |
+| 1.9.0 | What PID 1 pays: memory, size, boot wait |
+| 1.10.0 | Service config surface |
+| 1.11.0 | Edge boot under emulation |
+| 1.12.0 | Non-root default services |
 
 ## Release order (cross-repo)
 
