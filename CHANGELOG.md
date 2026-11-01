@@ -7,6 +7,135 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.8.1] — 2026-11-01
+
+**cyrius 6.7.9 → 6.7.18, and argonaut 1.18.0 / libro 2.11.3 / agnostik 2.0.0 / sigil 3.13.15,
+every dep at its latest tag.** The toolchain needed no source change. agnostik 2.0.0's accessor
+renames touched seven files. argonaut 1.18.0 now runs `kyb_pre_exec` for command health and
+ready checks, and `kyb-hc-conf` is the first fixture to exercise that path. Suite 895 / 890.
+Harness 126, aarch64 boot gate 180. ⚠ kybernet is +326,760 B on x86_64, 308 KB of it read-only
+Unicode data that DCE cannot remove (roadmap). agnos-init is −1,098,648 B: compaction is back.
+
+### Pins
+
+The user asked for cyrius 6.7.18 and the deps at their latest versions. Unlike 1.8.0 nothing
+needed a judgement call: argonaut 1.18.0, libro 2.11.3 and agnostik 2.0.0 all pin 6.7.18, and
+libro, argonaut and the fold all carry sigil 3.13.15, the latest tag (which itself pins 6.7.9).
+The fold's patra 1.16.6 is libro's pin, byte-identical, and sakshi is 2.5.10.
+
+### Changed
+
+- **`cyrius.cyml`:** `cyrius` `6.7.9` → **`6.7.18`**; `[deps.sigil]` `3.13.12` → **`3.13.15`**,
+  `[deps.agnostik]` `1.12.0` → **`2.0.0`**, `[deps.libro]` `2.11.0` → **`2.11.3`**,
+  `[deps.argonaut]` `1.16.2` → **`1.18.0`**. The module lists are unchanged.
+- **`cyrius.lock`:** regenerated from scratch: 84 entries, 5 commit pins, each matching the
+  remote through the GitHub API. `lib/math.cyr` and the seven `lib/unicode/` files are new,
+  through bayan's `# Requires`.
+- **Accessor renames:** 39 agnostik names at 102 sites in seven `src/` files, by agnostik's
+  `scripts/migrate-2.0.0.sh`. Before running it, every old name was checked to be defined only
+  by agnostik, and every new name to clash with nothing. Four comments used wildcards the
+  whole-word script cannot match (`rlim_*`, `cglim_*`) and were fixed by hand. Both binaries are
+  byte-identical across the comment edits.
+- **`kyb-hc-conf` (both harnesses):** a sleeping service under `seccomp: basic`, no_new_privs and
+  an empty capability set, whose `command` health check is `kyb-svc-fixture status`. Its report
+  can come only from the check, and its label is the check's own cgroup, so the gate reads
+  confinement and placement from inside the check, and that the check still passes. No fixture
+  had used a `command` check before, and argonaut's suite tests a hook of its own, so this is the
+  first time `kyb_pre_exec` has run one. With the hook skipping `EXEC_HEALTH_CHECK`, the gate goes
+  red on exactly those four assertions.
+- **`test_config_json_strictness`:** pins that a duplicate key or a leading-zero number refuses
+  the document, with a control. +3 assertions.
+
+### What the toolchain changed underneath
+
+- **⚠ bayan 1.11.1 refuses a duplicate JSON key and a leading-zero number.** Both used to load.
+  `/etc/kybernet/config.json` holding either is now "present but unusable" (standing rule 30):
+  defaults at boot, loudly, and the running config kept on SIGHUP. **Check a deployed config
+  before taking this release.** The log line says `not valid JSON`.
+- **⚠ bayan's JSON parser reads through bounds-checked slices.** An index past the input would be
+  `exit 134`, a kernel panic in PID 1, where the same input used to fall back to defaults, and the
+  compiler emits that call, so no source grep finds it. The real parser was fuzzed on both arches
+  with 77,661 documents: every truncation of a config-shaped document, every byte position with 22
+  hostile values, 60,000 random corruptions, broken escapes, and nesting at the 256 KiB config
+  limit. No trap, no crash, and the same 4,164 accepted on both arches.
+- **⚠ The toolchain alone adds 308,488 B.** 1.8.0's source and deps under 6.7.18 measure
+  1,095,824 B, the data segment 209 → 493 KB. bayan's markdown parser pulls seven `lib/unicode/`
+  table files, bayan reaches this link through sigil-mldsa's `# Requires`, and DCE removes
+  functions, not global initializers. libro and argonaut measured the same. The fix is in sigil
+  (roadmap).
+- **6.7.14 lifted x86 DCE's 4,096-run compaction cap.** agnos-init has 5,124 unreachable fns and
+  compacts: 1,663,680 → 565,032 B. That closes the roadmap's last "Waiting on cyrius" item.
+- **The changes that alter what already-compiling code computes were audited.** libro and
+  argonaut each audited 6.7.10–6.7.18, argonaut against the full migration notes. This tree was
+  scanned for every shape they list, with comments and strings stripped, and the 1,554 migration
+  bullets were filtered against the 122 stdlib fns kybernet calls directly:
+
+  | Change | Before | kybernet |
+  |---|---|---|
+  | Narrow fields packed at their width (6.7.10); narrow values narrowed (6.7.13, 6.7.16) | Every value a word | no narrow annotation |
+  | `Str` methods on a literal (6.7.14) | Read garbage | no method-call syntax |
+  | A constant global no longer re-stored after `var r = f();` (6.7.14) | `f` could overwrite it | `var r = main();` ends each file |
+  | Redeclared top-level `var`s warn, then fold (6.7.12, 6.7.16) | Silent | none |
+  | A value builtin as a statement is an error (6.7.17) | Compiled | none |
+  | aarch64 `sys_dup2(fd, fd)` returns `fd` (6.7.15) | `-EINVAL` | `console.cyr` tests `< 0` |
+
+  Every 1.8.0 shape is still absent too: a lone `!`, typed pointers, slices, `f32`, the exec family.
+- Standing rule 1 was re-run under `qemu-aarch64 -strace`: 113, 26 and 7 as a literal and as a
+  variable, variable 90/91, 444–446, 1, 60, `SYS_PRCTL`, `sys_setsid`, `SYS_FCNTL` and `SYS_IOCTL`
+  each land on the intended call. Rule 2's sizing is unchanged on both arches, and the
+  conflicting-enum probe behind 1,500 globals still warns.
+
+### What the deps changed underneath
+
+- **argonaut 1.16.3–1.18.0**, read against every call site:
+  - **`kyb_pre_exec` runs for a service's command checks** (1.18.0). A check joins the service's
+    cgroup, so it counts against `pids.max`, and takes its policy. ⚠ **A check the policy forbids
+    now fails, reads as unhealthy and can trip the watchdog.** It used to run unconfined as root.
+  - **Every signal goes through a pidfd** (1.18.0), opened `O_CLOEXEC` per tracked process, so a pid
+    reaped elsewhere is never signalled.
+  - **`fork_exec_service` applies `svc_def_rlimits` and loads `env_files`** (1.17.0). Neither
+    reaches kybernet: it never sets `svc_def_rlimits` (default 0), and its `env_files` key merges
+    into `environment` at config load, leaving argonaut's field empty. Rule 14's twin is still
+    safe, because `_apply_rlimits` reads by offset.
+  - **`fork_exec_service` no longer closes a service's own std fd** (1.16.3, MEDIUM).
+  - `notify_try_recv` and `notify_drain` are gone (1.17.0). kybernet never called them.
+- **agnostik 2.0.0:** beyond the renames, `SandboxConfig`, `FilesystemRule`, `SecurityContext` and
+  `CgroupLimits` grew; kybernet uses their constructors. `_stik_fill_random` stays dead.
+  `_stik_alloc_fail` exits 71 and is live from config load, reached only by exhausting the arena,
+  which already crashed PID 1.
+- **libro 2.11.1–2.11.3 and patra 1.16.1–1.16.6** change only `audit_persist` paths.
+- **sigil 3.13.15** is what 1.8.0 deferred. Its `crypto_lane_*` pool adds nine scaffolding fns to
+  the argon2 and mldsa profiles; all 23 duplicates and `_sigil_random_fill` were compared body by
+  body and match. `_crypto_lane_refuse` exits 70 when every lane is held. It is linked, no kybernet
+  path reaches it, and PID 1 is one thread.
+- **The DCE list was diffed against 1.8.0's.** The newly live exits are those above, plus
+  `_vec_abort`, a refactor of `vec_get`'s existing abort. `_tls_refuse` (`CYRIUS_TARGET_MACOS`) is
+  not compiled here.
+- **The entropy wait did not move.** The first `init_start_service` on the starved aarch64 boot
+  waits about 870 ms (standing rule 51).
+
+### Not changed, roadmapped
+
+`json_v_obj_get` (21) and `streq(str_data(…))` (4) still warn, under their existing items. Two new
+items: bayan's Unicode tables, and whether `env_files` should move onto argonaut's loader.
+
+### Release gates
+
+| Gate | Result |
+|---|---|
+| `scripts/verify-lock.sh` | **OK on a scratch commit of this tree**; it reads HEAD's lock, so it fails in the working tree until this release is committed |
+| `rm -rf lib cyrius.lock && cyrius deps && cyrius deps --verify` | 84 verified, 0 failed, 5 commit pins, all matching the remote |
+| builds, `CYRIUS_DCE=1` | kybernet x86_64 **1,114,096 B**, aarch64 **2,662,008 B**; agnos-init **565,032 B** and **2,526,736 B** |
+| build warnings | sigil's 24 byte-identical duplicate fns; the `ResourceLimits` struct twin; the `patra` fold notice; the 21 deprecations and 4 `streq` warnings. Nothing else new against 6.7.9 |
+| `cyrius fmt --check` / `cyrius lint` / `cyrius vet` | clean / 0 warnings, 0 untracked deferrals / 0 untrusted, 0 missing |
+| `cyrius test src/test.cyr` | **895 passed, 0 failed** |
+| `scripts/aarch64-exec-gate.sh` | **890** assertions, 0 failed (floor 890); 5 syscall probes ok; declared-broken list empty |
+| `scripts/bench-history.sh` | 56 benchmarks, **1 flagged, explained**: `cgroup_limits(new+2set+2get)` 41 → 48 ns (+17%). Interleaved over 5 rounds, 37-39 ns on 1.8.0 and on 1.8.0's deps under 6.7.18, 49-52 ns here, so it is agnostik 2.0.0's presence bit and 8 larger bytes, not the toolchain. It runs at config load |
+| `qemu/boot-test.sh` (KVM, `HARNESS_STRICT=1`) | **OK**, 126 properties, 26 services; kybernet span 537 ms, reactor wakeups 24 |
+| `qemu/boot-test-aarch64.sh` (TCG, `HARNESS_STRICT=1`) | **OK**, 180 properties, 25 services; kybernet span 1,700 ms; CRNG seeded at 2.17 s, after phase 1 at 1.22 s |
+| sibling-free reproduction | a copy with no siblings and an **empty dep cache** clones every tag over HTTPS and reproduces a byte-identical lock and byte-identical binaries on both arches, agnos-init included |
+| `ci.yml` replayed in `ubuntu:26.04` | **23 of 23 steps green**: x86 harness 126 on the 7.0 azure kernel (span 543 ms), aarch64 180 on QEMU 10.2, suite 895 / 890, bench no regression |
+
 ## [1.8.0] — 2026-11-01
 
 **cyrius 6.6.20 → 6.7.9, and argonaut 1.16.2 / libro 2.11.0 / agnostik 1.12.0 / sigil 3.13.12.**

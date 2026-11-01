@@ -12,6 +12,12 @@
 # service never runs — the sandbox failing is not a reason to launch the
 # service unconfined.
 #
+# ⚠ SINCE argonaut 1.18.0 IT ALSO RUNS FOR THE SERVICE'S COMMAND HEALTH AND READY
+# CHECKS, with the same definition: a check joins the cgroup and takes the policy
+# as the service does, so it counts against the service's pids.max, and a check
+# the policy does not allow fails and reads as unhealthy. argonaut_exec_kind()
+# says which image is about to exec. qemu's kyb-hc-conf asserts this from inside.
+#
 # ORDER IS LOAD-BEARING:
 #   0. cgroup placement — FIRST, before any confinement (1.5.5). It needs
 #                       open(2)+write(2) on /sys/fs/cgroup, and every step

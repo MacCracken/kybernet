@@ -483,7 +483,7 @@ fn svc_def_from_json(obj) {
     #   - `resource_limits` — ⚠ NEVER. `struct ResourceLimits` is defined TWICE
     #     with incompatible layouts (argonaut's 32 B vs agnostik's 48 B) and cyrius
     #     does not warn; agnostik's wins, so reading argonaut's fill with an
-    #     `rlim_*` accessor returns the wrong field entirely. Standing rule 14.
+    #     `ResourceLimits_*` accessor returns the wrong field entirely. Standing rule 14.
     #     Per-service limits go through `cgroup_limits`, which has no twin.
     #   - `socket_activation` — a listening-socket protocol, not a scalar. It wants
     #     a design, not a config key.
@@ -624,10 +624,10 @@ fn _cfg_limit(obj, key) {
 # {nofile, address_space, nproc, core} while **agnostik independently
 # defines a different struct with the same name** —
 # {max_memory, max_cpu_time, max_fds, max_procs, max_disk, net_bw} — and
-# ships the only rlim_* accessors. kybernet links both. cyrius warns about
+# ships the only ResourceLimits_* accessors. kybernet links both. cyrius warns about
 # duplicate fns and symbols but NOT duplicate structs, so the collision is
 # silent; a probe on 6.5.35 confirms sizeof(ResourceLimits) == 48, agnostik's.
-# Reading an argonaut-built ResourceLimits through rlim_max_memory returns
+# Reading an argonaut-built ResourceLimits through ResourceLimits_max_memory returns
 # its `nofile` field, so a service configured for 1024 open files would have
 # had memory.max set to 1024 BYTES and been OOM-killed on its first page.
 # cgroup_limits has no such twin, and all five of its fields are real cgroup
@@ -684,11 +684,11 @@ fn svc_apply_resources_json(sd, obj) {
     # cgroup_limits_new is all-zero (verified in agnostik's suite), so every
     # field left unset stays 0 = "do not write this control file".
     var cl = cgroup_limits_new();
-    cglim_set_memory_max(cl, mem_max);
-    cglim_set_memory_high(cl, mem_high);
-    cglim_set_cpu_weight(cl, cpu_wt);
-    cglim_set_pids_max(cl, pids_max);
-    cglim_set_cpu_max(cl, cpu_max);
+    CgroupLimits_set_memory_max(cl, mem_max);
+    CgroupLimits_set_memory_high(cl, mem_high);
+    CgroupLimits_set_cpu_weight(cl, cpu_wt);
+    CgroupLimits_set_pids_max(cl, pids_max);
+    CgroupLimits_set_cpu_max(cl, cpu_max);
     svc_def_set_cgroup_limits(sd, cl);
     return 1;
 }
@@ -1009,7 +1009,7 @@ fn svc_apply_security_json(sd, obj) {
     if (capv != 0) {
         if (json_v_is_arr(capv) == 0) { return 0; }
         var caps = capability_set_new();
-        var keep = capset_bounding(caps);
+        var keep = CapabilitySet_bounding(caps);
         var cn = json_v_arr_len(capv);
         for (var ci = 0; ci < cn; ci = ci + 1) {
             var e = json_v_arr_get(capv, ci);
@@ -1080,7 +1080,7 @@ fn svc_apply_security_json(sd, obj) {
     if (llv != 0) {
         if (json_v_is_arr(llv) == 0) { return 0; }
         var sbx = sandbox_config_new();
-        var rules = sandbox_fs_rules(sbx);
+        var rules = SandboxConfig_fs_rules(sbx);
         var granting = 0;
         var ln = json_v_arr_len(llv);
         for (var li = 0; li < ln; li = li + 1) {

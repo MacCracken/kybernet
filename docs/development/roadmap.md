@@ -4,7 +4,7 @@ What is still to do. What shipped is in [CHANGELOG.md](../../CHANGELOG.md), and 
 true right now, gate counts included, is in [state.md](state.md). A finished item is
 deleted from here, not ticked.
 
-**Open: 22** (`grep -c '^- \[ \]'` against this file).
+**Open: 23** (`grep -c '^- \[ \]'` against this file).
 
 ---
 
@@ -18,6 +18,13 @@ In the order they would be taken.
       bounds one reload at about 1 MiB. Fix: parse into a region the reload can release,
       `bayan_json_v_parse_ctx_a` into an `arena_new` arena, reset once the scalars and
       the credential are copied out.
+- [ ] **bayan's Unicode tables cost PID 1 about 284 KB of file size it never reads.** cyrius
+      6.7.18's bayan added a markdown parser whose `# Requires` pulls seven `lib/unicode/`
+      files of top-level string `var`s, and bayan reaches kybernet through sigil-mldsa's
+      `# Requires`, for the legacy `u256_*` names only. DCE removes functions, not global
+      initializers, so kybernet went 787,336 → 1,095,824 B from the toolchain alone, the
+      data segment 209 → 493 KB. libro and argonaut measured the same. Fix it in sigil:
+      require `bayan-bigint` and call `bayan_u256_*`. Or have DCE drop unread initializers.
 - [ ] **`hashmap(3 set+4 get/has)` and `agent_config(new+get+set)` measure string-literal
       layout.** An unused string literal in `src/bench.cyr` moves `agent_config` from 110
       to 131–134 ns/op and `hashmap` from about 1,000 to 1,199 (CHANGELOG [1.7.7] has the
@@ -72,13 +79,17 @@ In the order they would be taken.
       board.** cyrius 6.6.7 stopped the stdlib hash seed blocking at phase 6, and the wait
       moved to libro's `uuid_v4` (`getrandom(…, 0)`), reached from argonaut's
       `audit_log_record` on the first `init_start_service`: 914 ms under TCG at 1.7.10,
-      about 870 ms at 1.8.0 (standing rule 51). libro also exits 74 there if `getrandom` fails, which in PID 1 is
+      about 870 ms at 1.8.0 and 1.8.1 (standing rule 51). libro also exits 74 there if `getrandom` fails, which in PID 1 is
       a panic. Decide in libro whether an audit record's id needs a seeded CRNG, or whether
       it can draw with `GRND_INSECURE` as the hash seed does.
 - [ ] **A dynamic memory ceiling for the KDF.** `m_cost` is capped statically at
       64 MiB. `system_free_memory()` exists (`~/.cyrius/lib/sys.cyr:458`), but a bound
       that depends on free RAM at boot makes a credential valid on one board and invalid
       on another. Revisit if a board under 512 MB appears.
+- [ ] **Move `env_files` onto argonaut's loader.** argonaut 1.17.0 reads a service's env
+      files at spawn (`svc_def_set_env_files`), refusing FIFOs and non-regular files.
+      kybernet still reads them itself at config load and merges them into `environment`, so
+      a file changed after load is not seen until a reload. Decide which time is the right one.
 - [ ] **A config key for argonaut's 90 s start timeout.** argonaut 1.16.1 kills a
       oneshot or forking start after 90 s, which bounds what was an unbounded wait in
       PID 1. A oneshot that legitimately runs longer now fails, and kybernet has no key
@@ -92,7 +103,8 @@ In the order they would be taken.
 - [ ] **Config keys for `socket_activation`, `log_config` and `required_for_modes`**, the
       three `ServiceDefinition` fields with none. Socket activation is a listening-socket
       protocol, not a scalar, and argonaut's defaults for the other two fit every shape
-      kybernet ships. `resource_limits` stays unexposed on purpose (standing rule 14).
+      kybernet ships. `resource_limits` stays unexposed on purpose (standing rule 14), though
+      argonaut has applied it at spawn since 1.17.0.
 
 ## Harness work
 
@@ -116,18 +128,6 @@ In the order they would be taken.
 - [ ] **RPi4 / NUC boot validation.**
 - [ ] **Argon2 cost measured on real ARM.** TCG runs it (about 2.7 s at phase 6c), but
       its timings mean nothing, and the work cap is about time.
-
-## Waiting on cyrius
-
-Filed in the cyrius repo's `docs/development/issues/`.
-
-- [ ] **x86 DCE stops compacting past 4,096 dead-code runs, and agnos-init crossed it at
-      1.7.10** (`2026-10-15-kybernet-dce-compaction-cap-agnos-init.md`). agnos-init links
-      the whole dependency set and uses little of it: 4,484 unreachable fns at 1.8.0, so
-      the dead code is NOP-filled but kept, and the x86_64 binary is 1,663,680 bytes
-      (248,440 at 1.7.9). kybernet itself has 3,561, up 215 at 1.8.0 almost entirely from
-      agnostik's bundle, and still compacts. The cap counts runs, not fns, so kybernet's
-      margin is at least 535. Nothing to do here when it is fixed beyond recording the size.
 
 ## Waiting on a consumer
 

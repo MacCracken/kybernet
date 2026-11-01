@@ -24,7 +24,7 @@
 #   "started: kyb-live"              — a LIVE service, so a cgroup is really
 #                                      created and the pid moved into it
 #                                      (a completed oneshot correctly gets none)
-#   "removed service cgroups: 24"    — the shutdown sweep killed and rmdir'd them
+#   "removed service cgroups: 25"    — the shutdown sweep killed and rmdir'd them
 #
 #     ⚠ NINE of NINE. This said EIGHT from 1.5.3 to 1.6.1, with a comment
 #     arguing the shortfall was correct: kyb-orphan backgrounds a child, this
@@ -382,12 +382,12 @@ for marker in \
     "kybernet: services started" \
     "kybernet: harness done" \
     "kybernet: shutdown" \
-    "kybernet: config: services parsed: 25" \
+    "kybernet: config: services parsed: 26" \
     "kybernet:   completed (oneshot): kyb-dep" \
     "kybernet:   completed (oneshot): kyb-svc" \
     "kybernet: boot: skipped (not applicable): Start udev device manager" \
     "kybernet:   started: kyb-live" \
-    "kybernet: removed service cgroups: 24"; do
+    "kybernet: removed service cgroups: 25"; do
     if echo "$RUNTIME_OUT" | grep -aqF "$marker"; then
         echo "  OK: $marker"
     else
@@ -1125,6 +1125,29 @@ else
     echo "        or init_last_orphan_count() is not being read (argonaut >= 1.13.8)"
     echo "$LOOP_OUT" | grep -aiE 'orphan|reaped' | head -5 || true
     fail=1
+fi
+
+# ⚠ A COMMAND CHECK RUNS UNDER ITS SERVICE'S CONFINEMENT (argonaut 1.18.0), through
+# kyb_pre_exec, which argonaut's own suite never runs: it tests a hook of its own. The
+# service only sleeps, so these lines can come only from its check, and the ST label is
+# the check's own cgroup: a check that was not placed reports under another name. A
+# check the policy broke would fail, so kyb-hc-conf must also stay healthy (standing
+# rules 27 and 41: reactor-driven, so this pass).
+for _want in "ST[kyb-hc-conf]-Seccomp=2" "ST[kyb-hc-conf]-NoNewPrivs=1" \
+    "ST[kyb-hc-conf]-CapEff=0000000000000000" "ST[kyb-hc-conf]-DONE=1"; do
+    if echo "$LOOP_OUT" | grep -aqF "$_want"; then
+        echo "  OK: the command check reported from inside its service: $_want"
+    else
+        echo "  FAIL: no confined report from the command check: $_want"
+        echo "$LOOP_OUT" | grep -aE 'kyb-hc-conf|pre-exec' | head -5 || true
+        fail=1
+    fi
+done
+if echo "$LOOP_OUT" | grep -aqF "health check failed: kyb-hc-conf"; then
+    echo "  FAIL: the confined command check failed, so the policy broke the check"
+    fail=1
+else
+    echo "  OK: the confined command check passed"
 fi
 
 if echo "$LOOP_OUT" | grep -aqF "health check failed: kyb-health"; then

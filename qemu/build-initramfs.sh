@@ -584,6 +584,22 @@ cat > "${INITRAMFS_DIR}/etc/kybernet/config.json" << 'CFGEOF'
       "env_files": ["/etc/kybernet/kyb-env.env"]
     },
     {
+      "name": "kyb-hc-conf",
+      "description": "a command health check, which runs under this service's confinement (1.8.1)",
+      "binary": "/usr/bin/kyb-svc-fixture",
+      "args": ["sleep", "600"],
+      "type": "simple",
+      "restart": "never",
+      "security": { "seccomp": "basic", "no_new_privs": true, "capabilities": [] },
+      "health_check": {
+        "type": "command",
+        "target": "/usr/bin/kyb-svc-fixture status",
+        "interval_ms": 1000,
+        "timeout_ms": 800,
+        "retries": 10
+      }
+    },
+    {
       "name": "kyb-ready-ok",
       "description": "a ready_check that passes, the control for kyb-ready-fail (1.7.5)",
       "binary": "/bin/sleep",

@@ -797,9 +797,9 @@ fn bench_timer_new() {
 fn bench_seccomp_from_profile() {
     var iters = 10000;
     var prof = seccomp_profile_new(SECCOMP_KILL_PROCESS);
-    var rules = scprof_syscalls(prof);
+    var rules = SeccompProfile_syscalls(prof);
     var rule = seccomp_rule_new(SECCOMP_ALLOW);
-    var names = scrule_names(rule);
+    var names = SeccompRule_names(rule);
     vec_push(names, 0);
     vec_push(names, 1);
     vec_push(names, 3);
@@ -942,10 +942,10 @@ fn bench_security_context() {
     var k = 0;
     while (k < iters) {
         var ctx = security_context_new("bench-svc");
-        secctx_run_as_user(ctx);
-        secctx_run_as_group(ctx);
-        secctx_no_new_privs(ctx);
-        secctx_sandbox(ctx);
+        SecurityContext_run_as_user(ctx);
+        SecurityContext_run_as_group(ctx);
+        SecurityContext_no_new_privs(ctx);
+        SecurityContext_sandbox(ctx);
         k = k + 1;
     }
     report("security_context(new+4 get)", now_ns() - start, iters);
@@ -958,13 +958,13 @@ fn bench_agent_config() {
     var k = 0;
     while (k < iters) {
         var ac = agent_config_new("bench-agent");
-        aconf_type(ac);
-        aconf_restart_policy(ac);
-        aconf_limits(ac);
+        AgentConfig_type(ac);
+        AgentConfig_restart_policy(ac);
+        AgentConfig_limits(ac);
         var sbox = sandbox_config_new();
-        sandbox_set_net_access(sbox, NET_LOCALHOST_ONLY);
-        aconf_set_sandbox(ac, sbox);
-        aconf_sandbox(ac);
+        SandboxConfig_set_net_access(sbox, NET_LOCALHOST_ONLY);
+        AgentConfig_set_sandbox(ac, sbox);
+        AgentConfig_sandbox(ac);
         k = k + 1;
     }
     report("agent_config(new+get+set)", now_ns() - start, iters);
@@ -977,10 +977,10 @@ fn bench_cgroup_limits() {
     var k = 0;
     while (k < iters) {
         var cg = cgroup_limits_new();
-        cglim_set_memory_max(cg, 268435456);
-        cglim_set_pids_max(cg, 64);
-        cglim_memory_max(cg);
-        cglim_pids_max(cg);
+        CgroupLimits_set_memory_max(cg, 268435456);
+        CgroupLimits_set_pids_max(cg, 64);
+        CgroupLimits_memory_max(cg);
+        CgroupLimits_pids_max(cg);
         k = k + 1;
     }
     report("cgroup_limits(new+2set+2get)", now_ns() - start, iters);
@@ -993,9 +993,9 @@ fn bench_resource_limits() {
     var k = 0;
     while (k < iters) {
         var rl = resource_limits_new();
-        rlim_max_memory(rl);
-        rlim_max_fds(rl);
-        rlim_max_procs(rl);
+        ResourceLimits_max_memory(rl);
+        ResourceLimits_max_fds(rl);
+        ResourceLimits_max_procs(rl);
         k = k + 1;
     }
     report("resource_limits(new+3get)", now_ns() - start, iters);
@@ -1008,7 +1008,7 @@ fn bench_capability_set() {
     var k = 0;
     while (k < iters) {
         var caps = capability_set_new();
-        var bounding = capset_bounding(caps);
+        var bounding = CapabilitySet_bounding(caps);
         vec_push(bounding, CAP_NET_BIND_SERVICE);
         vec_push(bounding, CAP_SYS_CHROOT);
         vec_push(bounding, CAP_SETUID);

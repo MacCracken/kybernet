@@ -215,7 +215,7 @@ fn test_sandbox_from_config_fail_closed() {
     # here was different: FS_NO_ACCESS used to `return 0` — a bare non-Result
     # that aborted the whole loop, so every LATER rule went unapplied.)
     var withnone = sandbox_config_new();
-    vec_push(sandbox_fs_rules(withnone), filesystem_rule_new("/etc", FS_NO_ACCESS));
+    vec_push(SandboxConfig_fs_rules(withnone), filesystem_rule_new("/etc", FS_NO_ACCESS));
     assert(is_err_result(sandbox_from_config(withnone)) == 1,
       "sbx: an all-NO_ACCESS rule set fails CLOSED");
 
@@ -223,8 +223,8 @@ fn test_sandbox_from_config_fail_closed() {
     # no-access entry is skipped (a path absent from the ruleset is denied for
     # every handled access) and the grant is applied.
     var mixed = sandbox_config_new();
-    vec_push(sandbox_fs_rules(mixed), filesystem_rule_new("/etc", FS_NO_ACCESS));
-    vec_push(sandbox_fs_rules(mixed), filesystem_rule_new("/usr", 1));
+    vec_push(SandboxConfig_fs_rules(mixed), filesystem_rule_new("/etc", FS_NO_ACCESS));
+    vec_push(SandboxConfig_fs_rules(mixed), filesystem_rule_new("/usr", 1));
     var r_mixed_t, r_mixed_v = sandbox_from_config(mixed);
     assert(is_ok(r_mixed_t) == 1 || is_err_result(r_mixed_t) == 1,
       "sbx: NO_ACCESS beside a real grant still returns a Result");
@@ -233,7 +233,7 @@ fn test_sandbox_from_config_fail_closed() {
     # that reads as success.
     var bogus = sandbox_config_new();
     var br = filesystem_rule_new("/etc", 99);
-    vec_push(sandbox_fs_rules(bogus), br);
+    vec_push(SandboxConfig_fs_rules(bogus), br);
     assert(is_err_result(sandbox_from_config(bogus)) == 1, "sbx: unknown access fails closed");
     return 0;
 }
@@ -353,10 +353,10 @@ fn test_svc_config_limits() {
     assert_eq(vec_len(f1), 1, "lim: limited service parses");
     var cl = svc_def_cgroup_limits(vec_get(f1, 0));
     assert(cl != 0, "lim: cgroup_limits attached");
-    assert_eq(cglim_memory_max(cl), 67108864, "lim: memory_max");
-    assert_eq(cglim_memory_high(cl), 50331648, "lim: memory_high");
-    assert_eq(cglim_cpu_weight(cl), 250, "lim: cpu_weight");
-    assert_eq(cglim_pids_max(cl), 32, "lim: pids_max");
+    assert_eq(CgroupLimits_memory_max(cl), 67108864, "lim: memory_max");
+    assert_eq(CgroupLimits_memory_high(cl), 50331648, "lim: memory_high");
+    assert_eq(CgroupLimits_cpu_weight(cl), 250, "lim: cpu_weight");
+    assert_eq(CgroupLimits_pids_max(cl), 32, "lim: pids_max");
     # cpu_max is deliberately NOT settable from config yet. A single integer
     # to cpu.max is accepted by the kernel (cpu_max_write keeps the cgroup's
     # existing period and sets only the quota), so this is a scope choice,
@@ -364,7 +364,7 @@ fn test_svc_config_limits() {
     # thing to expose, and the file also takes the literal "max", which
     # _cgroup_write_u64 cannot emit. cpu_weight covers proportional sharing,
     # which is what a service config usually wants.
-    assert_eq(cglim_cpu_max(cl), 0, "lim: cpu_max left unset");
+    assert_eq(CgroupLimits_cpu_max(cl), 0, "lim: cpu_max left unset");
 
     # An all-zero block carries no policy — leave the field null so the
     # start path sees "no limits" rather than "limits, none set".
@@ -393,7 +393,7 @@ fn test_svc_config_cpu_max() {
     assert_eq(vec_len(ok), 1, "cpu_max: 50000 (0.5 CPU) accepted");
     var cl = svc_def_cgroup_limits(vec_get(ok, 0));
     assert(cl != 0, "cpu_max: a limits block was attached");
-    assert_eq(cglim_cpu_max(cl), 50000, "cpu_max: the value reached cgroup_limits");
+    assert_eq(CgroupLimits_cpu_max(cl), 50000, "cpu_max: the value reached cgroup_limits");
 
     # Below the kernel's 1000 us floor the cgroup is throttled so hard it cannot
     # make progress — a config error, not a very small limit.
@@ -418,7 +418,7 @@ fn test_svc_config_cpu_max() {
           "{\"services\":[{\"name\":\"c\",\"binary\":\"/bin/c\",",
           "\"limits\":{\"cpu_max_us\":200000}}]}")));
     assert_eq(vec_len(only), 1, "cpu_max: a cpu-only limits block parses");
-    assert_eq(cglim_cpu_max(svc_def_cgroup_limits(vec_get(only, 0))), 200000,
+    assert_eq(CgroupLimits_cpu_max(svc_def_cgroup_limits(vec_get(only, 0))), 200000,
       "cpu_max: 2 CPUs, and the block was not discarded as empty");
     return 0;
 }
@@ -773,7 +773,7 @@ fn test_security_profile_parse() {
     # Capabilities are a KEEP-list, carried as an agnostik capability_set.
     var caps = svc_def_capabilities(sd);
     assert(caps != 0, "sec: capability set built");
-    var keep = capset_bounding(caps);
+    var keep = CapabilitySet_bounding(caps);
     assert_eq(vec_len(keep), 2, "sec: two capabilities kept");
     # The values must be KERNEL capability numbers — this is the assertion
     # that would have caught the pre-1.5.2 collision, where argonaut's
@@ -784,8 +784,8 @@ fn test_security_profile_parse() {
     # Landlock rules land in an agnostik sandbox_config.
     var ll = svc_def_landlock(sd);
     assert(ll != 0, "sec: sandbox config built");
-    assert_eq(vec_len(sandbox_fs_rules(ll)), 1, "sec: one fs rule");
-    assert_eq(fsrule_access(vec_get(sandbox_fs_rules(ll), 0)), 3, "sec: read-exec = 3");
+    assert_eq(vec_len(SandboxConfig_fs_rules(ll)), 1, "sec: one fs rule");
+    assert_eq(FilesystemRule_access(vec_get(SandboxConfig_fs_rules(ll), 0)), 3, "sec: read-exec = 3");
 
     # seccomp is a NAMED profile, not a hand-assembled syscall list.
     var pol = svc_def_seccomp(sd);
@@ -932,7 +932,7 @@ fn test_security_profile_defaults_and_rejection() {
     assert_eq(vec_len(dropall), 1, "sec: drop-all parses");
     var dcaps = svc_def_capabilities(vec_get(dropall, 0));
     assert(dcaps != 0, "sec: empty list still builds a set");
-    assert_eq(vec_len(capset_bounding(dcaps)), 0, "sec: keep-list empty = drop all");
+    assert_eq(vec_len(CapabilitySet_bounding(dcaps)), 0, "sec: keep-list empty = drop all");
     # no_new_privs defaults ON for anything that asked to be confined.
     assert_eq(kyb_policy_no_new_privs(svc_def_seccomp(vec_get(dropall, 0))), 1, "sec: nnp defaults on");
 
@@ -1074,7 +1074,7 @@ fn test_cgroup_controller_probe() {
 # dereference is a kernel panic rather than a crash report.
 fn test_cgroup_apply_null_guard() {
     println("--- cgroup apply null guard (1.5.5) ---");
-    # cglim_memory_max(0) would be a load64(0). The live call site guards,
+    # CgroupLimits_memory_max(0) would be a load64(0). The live call site guards,
     # but the function must not depend on that.
     var r_t, r_v = cgroup_apply_limits("kyb-null-t", 0);
     assert(is_err_result(r_t) == 0, "apply: null limits is Ok, not a fault");
@@ -2135,55 +2135,55 @@ fn test_agnostik_security() {
 
     # security_context_new
     var ctx = security_context_new("test-service");
-    assert_eq(secctx_run_as_user(ctx), 0, "ctx uid default 0");
-    assert_eq(secctx_run_as_group(ctx), 0, "ctx gid default 0");
-    assert_eq(secctx_no_new_privs(ctx), 1, "ctx no_new_privs default 1");
-    assert(secctx_sandbox(ctx) != 0, "ctx sandbox non-null");
+    assert_eq(SecurityContext_run_as_user(ctx), 0, "ctx uid default 0");
+    assert_eq(SecurityContext_run_as_group(ctx), 0, "ctx gid default 0");
+    assert_eq(SecurityContext_no_new_privs(ctx), 1, "ctx no_new_privs default 1");
+    assert(SecurityContext_sandbox(ctx) != 0, "ctx sandbox non-null");
 
     # sandbox_config_new
     var sbox = sandbox_config_new();
-    assert_eq(sandbox_net_access(sbox), NET_LOCALHOST_ONLY, "sandbox net default localhost_only");
-    assert_eq(sandbox_isolate_net(sbox), 1, "sandbox isolate_net default 1");
+    assert_eq(SandboxConfig_net_access(sbox), NET_LOCALHOST_ONLY, "sandbox net default localhost_only");
+    assert_eq(SandboxConfig_isolate_net(sbox), 1, "sandbox isolate_net default 1");
 
     # cgroup_limits_new
     var cg = cgroup_limits_new();
-    assert_eq(cglim_memory_max(cg), 0, "cglim mem default 0");
-    cglim_set_memory_max(cg, 268435456);
-    assert_eq(cglim_memory_max(cg), 268435456, "cglim mem set 256MB");
-    cglim_set_pids_max(cg, 64);
-    assert_eq(cglim_pids_max(cg), 64, "cglim pids set 64");
+    assert_eq(CgroupLimits_memory_max(cg), 0, "cglim mem default 0");
+    CgroupLimits_set_memory_max(cg, 268435456);
+    assert_eq(CgroupLimits_memory_max(cg), 268435456, "cglim mem set 256MB");
+    CgroupLimits_set_pids_max(cg, 64);
+    assert_eq(CgroupLimits_pids_max(cg), 64, "cglim pids set 64");
 
     # capability_set_new
     var caps = capability_set_new();
-    var bounding = capset_bounding(caps);
+    var bounding = CapabilitySet_bounding(caps);
     assert_eq(vec_len(bounding), 0, "capset empty");
     vec_push(bounding, CAP_NET_BIND_SERVICE);
     vec_push(bounding, CAP_SYS_CHROOT);
-    assert_eq(vec_len(capset_bounding(caps)), 2, "capset 2 caps");
+    assert_eq(vec_len(CapabilitySet_bounding(caps)), 2, "capset 2 caps");
 
     # namespace_config_new
     var ns = namespace_config_new();
-    assert_eq(ns_pid(ns), 0, "ns pid default 0");
-    ns_set_pid(ns, 1);
-    assert_eq(ns_pid(ns), 1, "ns pid set 1");
+    assert_eq(NamespaceConfig_pid(ns), 0, "ns pid default 0");
+    NamespaceConfig_set_pid(ns, 1);
+    assert_eq(NamespaceConfig_pid(ns), 1, "ns pid set 1");
 
     # resource_limits_new
     var rl = resource_limits_new();
-    assert_eq(rlim_max_memory(rl), 268435456, "rlim default 256MB");
-    assert_eq(rlim_max_fds(rl), 256, "rlim default 256 fds");
-    assert_eq(rlim_max_procs(rl), 64, "rlim default 64 procs");
+    assert_eq(ResourceLimits_max_memory(rl), 268435456, "rlim default 256MB");
+    assert_eq(ResourceLimits_max_fds(rl), 256, "rlim default 256 fds");
+    assert_eq(ResourceLimits_max_procs(rl), 64, "rlim default 64 procs");
 
     # seccomp_profile_new
     var prof = seccomp_profile_new(SECCOMP_KILL_PROCESS);
-    assert_eq(scprof_default_action(prof), SECCOMP_KILL_PROCESS, "scprof default kill");
-    var rules = scprof_syscalls(prof);
+    assert_eq(SeccompProfile_default_action(prof), SECCOMP_KILL_PROCESS, "scprof default kill");
+    var rules = SeccompProfile_syscalls(prof);
     var rule = seccomp_rule_new(SECCOMP_ALLOW);
-    var names = scrule_names(rule);
+    var names = SeccompRule_names(rule);
     vec_push(names, 0);
     vec_push(names, 1);
     vec_push(names, 3);
     vec_push(rules, rule);
-    assert_eq(vec_len(scprof_syscalls(prof)), 1, "scprof 1 rule");
+    assert_eq(vec_len(SeccompProfile_syscalls(prof)), 1, "scprof 1 rule");
 
     # seccomp_from_profile integration
     var b = seccomp_from_profile(prof);
@@ -2193,7 +2193,7 @@ fn test_agnostik_security() {
     var llrs = landlock_ruleset_new();
     var fs = llrs_fs_rules(llrs);
     var llr = landlock_fs_rule_new("/tmp");
-    var acc = llfsr_allowed_access(llr);
+    var acc = LandlockFsRule_allowed_access(llr);
     vec_push(acc, LL_READ_FILE);
     vec_push(acc, LL_READ_DIR);
     vec_push(fs, llr);
@@ -2201,8 +2201,8 @@ fn test_agnostik_security() {
 
     # filesystem_rule_new
     var fsr = filesystem_rule_new("/etc", FS_READ_ONLY);
-    assert_eq(fsrule_access(fsr), FS_READ_ONLY, "fsrule read-only");
-    assert_eq(fsrule_readonly(fsr), 0, "fsrule readonly default 0");
+    assert_eq(FilesystemRule_access(fsr), FS_READ_ONLY, "fsrule read-only");
+    assert_eq(FilesystemRule_readonly(fsr), 0, "fsrule readonly default 0");
 
     # agnostik error types. Use agnostik's namespaced STIK_ERR_* kinds, NOT the
     # bare ERR_* names: since the 1.4.0 dep graph those bare names collide with
@@ -2212,8 +2212,8 @@ fn test_agnostik_security() {
     # retriability). agnostik renamed its kinds to STIK_ERR_* to avoid exactly
     # this cross-lib clash. CODE_PERMISSION_DENIED stays — it is unique to agnostik.
     var err = agnostik_err_new(STIK_ERR_PERMISSION_DENIED, str_from("test"));
-    assert_eq(agnostik_err_kind(err), STIK_ERR_PERMISSION_DENIED, "err kind");
-    assert_eq(agnostik_err_code(err), CODE_PERMISSION_DENIED, "err code 1002");
+    assert_eq(AgnostikError_kind(err), STIK_ERR_PERMISSION_DENIED, "err kind");
+    assert_eq(AgnostikError_code(err), CODE_PERMISSION_DENIED, "err code 1002");
     assert_eq(agnostik_err_is_retriable(err), 0, "perm denied not retriable");
 
     var terr = agnostik_err_new(STIK_ERR_TIMEOUT, 0);
@@ -2227,19 +2227,19 @@ fn test_agnostik_agent() {
 
     # agent_config_new
     var ac = agent_config_new("test-agent");
-    assert_eq(aconf_type(ac), AGENT_TYPE_USER, "aconf default user type");
-    assert_eq(aconf_restart_policy(ac), RESTART_NEVER, "aconf default no restart");
-    assert(aconf_limits(ac) != 0, "aconf has limits");
+    assert_eq(AgentConfig_type(ac), AGENT_TYPE_USER, "aconf default user type");
+    assert_eq(AgentConfig_restart_policy(ac), RESTART_NEVER, "aconf default no restart");
+    assert(AgentConfig_limits(ac) != 0, "aconf has limits");
 
-    var limits = aconf_limits(ac);
-    assert_eq(rlim_max_memory(limits), 268435456, "aconf limits 256MB");
+    var limits = AgentConfig_limits(ac);
+    assert_eq(ResourceLimits_max_memory(limits), 268435456, "aconf limits 256MB");
 
     # Set sandbox
     var sbox = sandbox_config_new();
-    sandbox_set_net_access(sbox, NET_LOCALHOST_ONLY);
-    aconf_set_sandbox(ac, sbox);
-    var got_sbox = aconf_sandbox(ac);
-    assert_eq(sandbox_net_access(got_sbox), NET_LOCALHOST_ONLY, "aconf sandbox net");
+    SandboxConfig_set_net_access(sbox, NET_LOCALHOST_ONLY);
+    AgentConfig_set_sandbox(ac, sbox);
+    var got_sbox = AgentConfig_sandbox(ac);
+    assert_eq(SandboxConfig_net_access(got_sbox), NET_LOCALHOST_ONLY, "aconf sandbox net");
 
     # health_check_new (argonaut 6-param version overrides agnostik default)
     # argonaut layout: {check_type, target, port, interval_ms, timeout_ms, retries}
@@ -3034,6 +3034,21 @@ fn test_emerg_cred_resolve() {
 # returns (rule 46): file_read_all until 1.7.8, kybernet's read_whole_into until 1.7.10,
 # the stdlib's file_read_whole_into since 1.7.11. A reader that reported a failed read
 # as end-of-file would fail here rather than on a board.
+# bayan 1.11.1 (cyrius 6.7.18) refuses a duplicate key and a leading-zero number,
+# both of which it used to accept, so a config.json holding either now takes
+# load_config's "present but unusable" path: defaults at boot, the running config
+# kept on SIGHUP (standing rule 30). This is the call load_config makes.
+fn test_config_json_strictness() {
+    println("--- config json strictness (1.8.1) ---");
+    var dup = "{\"boot_mode\":\"edge\",\"boot_mode\":\"desktop\"}";
+    assert_eq(json_v_parse_buf(dup, strlen(dup)), 0, "config json: a duplicate key refuses the document");
+    var lz = "{\"boot_timeout_ms\":030000}";
+    assert_eq(json_v_parse_buf(lz, strlen(lz)), 0, "config json: a leading zero refuses the document");
+    var good = "{\"boot_mode\":\"edge\",\"boot_timeout_ms\":30000}";
+    assert_eq(json_v_parse_buf(good, strlen(good)) != 0, 1, "config json: a clean document still parses");
+    return 0;
+}
+
 fn test_cfg_read_class() {
     println("--- config read classification (1.7.0) ---");
     var cap = 16384;
@@ -3614,11 +3629,11 @@ fn test_seccomp_agnostik_bridge() {
     println("--- seccomp bridge ---");
     # Test seccomp_from_profile with multiple rules
     var prof = seccomp_profile_new(SECCOMP_KILL_PROCESS);
-    var rules = scprof_syscalls(prof);
+    var rules = SeccompProfile_syscalls(prof);
 
     # Rule 1: allow read/write/close
     var r1 = seccomp_rule_new(SECCOMP_ALLOW);
-    var n1 = scrule_names(r1);
+    var n1 = SeccompRule_names(r1);
     vec_push(n1, SYS_READ);
     vec_push(n1, SYS_WRITE);
     vec_push(n1, SYS_CLOSE);
@@ -3626,7 +3641,7 @@ fn test_seccomp_agnostik_bridge() {
 
     # Rule 2: allow exit
     var r2 = seccomp_rule_new(SECCOMP_ALLOW);
-    var n2 = scrule_names(r2);
+    var n2 = SeccompRule_names(r2);
     vec_push(n2, 60);
     vec_push(rules, r2);
 
@@ -3795,6 +3810,7 @@ fn main() {
     test_seccomp_agnostik_bridge();
     test_landlock_abi_mask();
     test_sandbox_rules();
+    test_config_json_strictness();
     return assert_summary();
 }
 var exit_code = main();

@@ -40,13 +40,13 @@
 
 ## Build
 
-Requires Cyrius 6.7.9 (`cyriusly install 6.7.9 && cyriusly use 6.7.9`).
+Requires Cyrius 6.7.18 (`cyriusly install 6.7.18 && cyriusly use 6.7.18`).
 
 ```sh
 cyrius deps                                # Resolve deps from cyrius.cyml into lib/
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet   # Build (DCE recommended)
 CYRIUS_DCE=1 cyrius build src/agnos_init.cyr build/agnos-init   # agnos-init (see below)
-cyrius test src/test.cyr                   # Run 892 tests
+cyrius test src/test.cyr                   # Run 895 tests
 cyrius bench src/bench.cyr                 # Run benchmarks
 ```
 
@@ -143,7 +143,7 @@ services expect at boot: `/run` is a fresh tmpfs every boot, so `/run/agnos/agen
 - **Data-driven mount table** — not hardcoded per-mount calls
 - **sd_notify compatible** — READY, STOPPING, WATCHDOG, STATUS, RELOADING messages via epoll
 - **String builder** for path construction and logging
-- **892 tests** (887 on aarch64 — the seccomp allowlist is arch-specific), 56 benchmarks
+- **895 tests** (890 on aarch64 — the seccomp allowlist is arch-specific), 56 benchmarks
 
 ## Dependencies
 
@@ -151,10 +151,10 @@ Resolved via `cyrius.cyml` (locked in `cyrius.lock`):
 
 | Dep | Version | What |
 |-----|---------|------|
-| sigil | 3.13.12 | TPM / crypto trust surface + Argon2id (thin sub-bundles only) |
-| agnostik | 1.12.0 | Shared AGNOS types (security, agent, error) |
-| libro | 2.11.0 | Cryptographic audit chain |
-| argonaut | 1.16.2 | Service lifecycle, boot stages, health, audit, pre-exec + extra-env hooks |
+| sigil | 3.13.15 | TPM / crypto trust surface + Argon2id (thin sub-bundles only) |
+| agnostik | 2.0.0 | Shared AGNOS types (security, agent, error) |
+| libro | 2.11.3 | Cryptographic audit chain |
+| argonaut | 1.18.0 | Service lifecycle, boot stages, health, audit, pre-exec + extra-env hooks |
 
 `patra` and `sakshi` are **not** declared as git deps — cyrius 6.5.20+ ships
 them in the stdlib snapshot, and a git pin would silently downgrade the
@@ -182,14 +182,14 @@ boot. With the working lane moved onto the caller's arena it costs +25 KB.
 ## Testing
 
 ```sh
-cyrius test src/test.cyr            # 892 assertions (887 on aarch64)
+cyrius test src/test.cyr            # 895 assertions (890 on aarch64)
 bash scripts/bench-history.sh       # 56 benchmarks, load-tolerant regression gate
 bash qemu/boot-test.sh              # PID-1 boot harness, x86_64 (needs KVM)
 bash qemu/boot-test-aarch64.sh      # PID-1 boot harness, aarch64 (TCG, no KVM)
 ```
 
 The QEMU harness is the gate that matters: it boots kybernet as real PID 1 and
-asserts 121 properties across five passes — the boot sequence, the reactor
+asserts 126 properties across five passes — the boot sequence, the reactor
 (that it sleeps rather than spins), dm-verity verification against a real
 image pair on virtio disks, and the emergency-auth prompt with a password fed
 over the serial line. Pass 4 runs against **both** credential formats: the
@@ -200,11 +200,11 @@ file leaves no credential, and the config key is never its fallback. After a
 correct password, the shell kybernet execs is a probe that reports its own
 descriptors, signal mask and environment, and the gate checks each one.
 
-The aarch64 harness asserts 175 properties and exists because **a cross-build
+The aarch64 harness asserts 180 properties and exists because **a cross-build
 exiting 0 is not evidence**. It boots `kybernet-aarch64` as PID 1 under TCG —
 an x86 host cannot accelerate aarch64 — against a pinned, sha256-checked kernel.
 Besides the boot sequence, cgroup controllers, a real reactor iteration and a
-clean power down, it runs 24 services built only from this repo's Cyrius fixtures,
+clean power down, it runs 25 services built only from this repo's Cyrius fixtures,
 and asserts on aarch64 what the x86 harness asserts about services: cgroup
 placement and limits, dropped and kept capabilities, the uid drop, seccomp
 `basic` with its control arm, Landlock, prerequisite blocking, restart backoff,
@@ -238,7 +238,7 @@ operator tool, and CI still exercises its parameter validation.
   `qemu/boot-test-aarch64.sh` boots aarch64 under TCG, each as real PID 1. Until
   1.6.19 the aarch64 artifact shipped on a cross-build exiting 0 — and could not
   boot at all, for ten releases, because of an upstream syscall mis-emission.
-- Cyrius 6.7.9 (`~/.cyrius/bin/cyrius`)
+- Cyrius 6.7.18 (`~/.cyrius/bin/cyrius`)
 - No C, no Rust, no libc
 - OpenSSL 3.2+ — **provisioning only**, for `scripts/mkcred.sh`. Nothing kybernet
   runs at boot depends on it; the verifier is sigil's own Argon2id.

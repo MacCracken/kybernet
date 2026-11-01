@@ -308,6 +308,11 @@ cat > "$ROOT/etc/kybernet/config.json" << 'CFGEOF'
       "type": "simple", "restart": "on-failure",
       "health_check": { "type": "tcp", "target": "127.0.0.1", "port": 9,
                         "interval_ms": 1000, "timeout_ms": 200, "retries": 1 } },
+    { "name": "kyb-hc-conf", "binary": "/usr/bin/kyb-svc-fixture", "args": ["sleep", "600"],
+      "type": "simple", "restart": "never",
+      "security": { "seccomp": "basic", "no_new_privs": true, "capabilities": [] },
+      "health_check": { "type": "command", "target": "/usr/bin/kyb-svc-fixture status",
+                        "interval_ms": 1000, "timeout_ms": 800, "retries": 10 } },
     { "name": "kyb-nonroot", "binary": "/usr/bin/kyb-svc-fixture", "args": ["status"],
       "type": "oneshot", "restart": "never",
       "security": { "uid": 65534, "gid": 65534, "no_new_privs": true } },
@@ -802,8 +807,8 @@ fi
 # Each assertion mirrors the x86 harness's assertion of the same name. The reasoning
 # behind each one lives there; what is new here is that it RUNS on aarch64, where
 # the syscall numbers, the seccomp allowlist and the struct layouts differ.
-_prop "config: services parsed: 24" \
-    'kybernet: config: services parsed: 24([^0-9]|$)' "$OUT1"
+_prop "config: services parsed: 25" \
+    'kybernet: config: services parsed: 25([^0-9]|$)' "$OUT1"
 # 1.7.8: the config above is padded past the old 16 KiB limit. Check the size kybernet
 # itself reports, so a fixture that shrank back under 16 KiB fails here rather than
 # proving nothing.
@@ -819,8 +824,8 @@ _prop "completed (oneshot): kyb-dep" 'completed \(oneshot\): kyb-dep' "$OUT1"
 _prop "completed (oneshot): kyb-svc, after its dependency" 'completed \(oneshot\): kyb-svc' "$OUT1"
 _prop "started: kyb-live" 'started: kyb-live' "$OUT1"
 # 23, not 24: kyb-prereq-dep is skipped, so no cgroup is ever made for it.
-_prop "removed service cgroups: 23 (every started service, torn down)" \
-    'kybernet: removed service cgroups: 23([^0-9]|$)' "$OUT1" 'removed service cgroups'
+_prop "removed service cgroups: 24 (every started service, torn down)" \
+    'kybernet: removed service cgroups: 24([^0-9]|$)' "$OUT1" 'removed service cgroups'
 
 # ⚠ THE LABEL IS THE PLACEMENT CHECK. svc-fixture labels its report with the leaf
 # of its OWN cgroup path, so a service whose child-side join failed (standing rule
@@ -983,6 +988,22 @@ _assert_no_panic "$OUT2" "reactor"
 _prop "crash restart scheduled (not run inline)" 'restart scheduled: kyb-crash' "$OUT2" 'kyb-crash'
 _prop "the restart tick performed the relaunch" 'restarted: kyb-crash' "$OUT2" 'kyb-crash'
 _prop "PID 1 reaped a child it did not start (orphan)" 'reaped orphans: [1-9]' "$OUT2" 'orphan|reaped'
+# A command check runs under its service's confinement (argonaut 1.18.0), through
+# kyb_pre_exec. The service only sleeps, so these can come only from its check, and the
+# ST label is the check's own cgroup. Same assertions as the x86 reactor gate.
+_prop "the command check ran confined, in its service's cgroup: Seccomp" \
+    'ST\[kyb-hc-conf\]-Seccomp=2' "$OUT2" 'kyb-hc-conf|pre-exec'
+_prop "the command check ran confined: NoNewPrivs" \
+    'ST\[kyb-hc-conf\]-NoNewPrivs=1' "$OUT2" 'kyb-hc-conf|pre-exec'
+_prop "the command check ran confined: CapEff" \
+    'ST\[kyb-hc-conf\]-CapEff=0000000000000000' "$OUT2" 'kyb-hc-conf|pre-exec'
+_prop "the command check's report finished" 'ST\[kyb-hc-conf\]-DONE=1' "$OUT2" 'kyb-hc-conf|pre-exec'
+if grep -aq 'health check failed: kyb-hc-conf' "$OUT2"; then
+    echo "  FAIL: the confined command check failed, so the policy broke the check"
+    fail=1
+else
+    echo "  OK: the confined command check passed"
+fi
 _prop "the health tick ran and reported a failing check" 'health check failed: kyb-health' "$OUT2" 'health'
 # Two services, not one: with one, the probe and the kill both land near the 2 s
 # mark and whichever timer epoll reports first wins, which TCG does not order the

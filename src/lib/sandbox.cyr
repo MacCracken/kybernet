@@ -275,7 +275,7 @@ fn sandbox_apply(builder) {
 # which is unaffected and is what `kyb_pre_exec` actually uses.
 
 fn sandbox_from_config(config) {
-    var fs_rules = sandbox_fs_rules(config);
+    var fs_rules = SandboxConfig_fs_rules(config);
     var rlen = vec_len(fs_rules);
     # ⚠ FAIL CLOSED, NOT Ok(0). 1.6.15 MEDIUM-1.
     #
@@ -296,8 +296,8 @@ fn sandbox_from_config(config) {
     var b = sandbox_builder_new();
     for (var ri = 0; ri < rlen; ri = ri + 1) {
         var rule = vec_get(fs_rules, ri);
-        var path = fsrule_path(rule);
-        var access = fsrule_access(rule);
+        var path = FilesystemRule_path(rule);
+        var access = FilesystemRule_access(rule);
         # Pre-1.4.3 this switch returned a BARE 0 — not a Result — for
         # `case 0` and for `default`, and `return` exits the whole function,
         # not the iteration. So a single FS_NO_ACCESS rule (0 is a legitimate
