@@ -22,11 +22,25 @@
 #
 #   2. NORMALISATION against `_calibration (reference loop)`, a fixed integer
 #      loop in src/bench.cyr that touches no kybernet code, no allocator and
-#      no syscall. Its cost moves only with machine conditions, so the ratio
-#      calibration_now / calibration_then is how much slower this box is than
-#      the one that recorded history. Every comparison is scaled by it, so a
-#      uniformly slower machine flags nothing and a genuine regression still
-#      does.
+#      no syscall. The ratio calibration_now / calibration_then estimates how
+#      much slower this box is than the one that recorded history. Every
+#      comparison is scaled by it, so a uniformly slower machine flags nothing
+#      and a genuine regression still does.
+#
+# ⚠ THAT IS ONLY AN ESTIMATE, SO THE HISTORY COMPARISON FLAGS AND A SAME-MACHINE
+# A/B DECIDES. 1.8.2. The history row usually came from another machine, and no
+# one figure scales every benchmark across machines: 1.8.2's first CI run had
+# syscalls 2x faster than the dev box and ALU work slower. The reference is not
+# even stable on one machine. Interleaved on one box, `_calibration` read 117-120
+# on the 1.8.1 binary and 133-137 on 1.8.2's, a 14% move from unrelated code
+# changing the layout. That run failed on two benchmarks that a direct comparison
+# showed unchanged (timerspec_new 17 vs 17, capability_set 224 vs 225).
+#
+# So a flag is a question, and `_ab_gate` below answers it: build the previous
+# tag, run it and this tree in turn on THIS machine, and compare the two directly.
+# No reference, no history row, nothing to scale. If that comparison cannot run,
+# the gate FAILS with the reason (standing rule 32): a flag is cleared only by
+# evidence. It needs tags in the checkout, so CI fetches them.
 #
 # Raw (unscaled) ns/op is what goes into the CSV — the history stays a record
 # of what was actually measured, and the scale is recomputed from the stored
@@ -38,11 +52,14 @@
 #   REGRESS_PCT=20 ./scripts/bench-history.sh   # custom threshold (default 15)
 #   RUNS=5 ./scripts/bench-history.sh           # more repetitions (default 3)
 #   NO_NORMALISE=1 ./scripts/bench-history.sh   # compare raw ns (old behaviour)
+#   AB_ROUNDS=8 ./scripts/bench-history.sh      # A/B rounds on a flag (default 5)
+#   BENCH_AB_BASE=1.8.1 ./scripts/bench-history.sh  # A/B base (default: previous tag)
 
 set -euo pipefail
 
 HISTORY_FILE="${1:-benches/history.csv}"
 REGRESS_PCT="${REGRESS_PCT:-15}"
+AB_ROUNDS="${AB_ROUNDS:-5}"
 # Minimum absolute ns/op change for a percentage regression to count.
 # See the noise-floor note at the comparison below. 1.5.1.
 MIN_DELTA_NS="${MIN_DELTA_NS:-3}"
@@ -167,7 +184,8 @@ _bench_once() {
 
 # Best of RUNS: contention only adds time, so the minimum is the closest
 # estimate of the true cost. Accumulate per-benchmark minima in a temp file.
-MINS=$(mktemp); trap 'rm -f "$MINS"' EXIT
+AB_DIR=""
+MINS=$(mktemp); trap 'rm -rf "$MINS" ${AB_DIR:+"$AB_DIR"}' EXIT
 echo "taking the best of ${RUNS} run(s) — contention only ever adds time"
 BENCH_OUTPUT=""
 for _r in $(seq 1 "$RUNS"); do
@@ -195,6 +213,7 @@ echo "------------------------------------------------------------"
 #   "  memeq (2 calls): 24 ns/op (1000000 iters, 24 ms total)"
 # capturing the benchmark label (before the colon) and the ns/op integer.
 REGRESSIONS=0
+FLAGGED=()
 RECORDED=0
 
 # Historical value for a benchmark name. Rejoins fields 4..NF-1 because two
@@ -363,6 +382,7 @@ while IFS="$(printf '\t')" read -r NS NAME; do
                 elif [ "$DELTA" -ge "$REGRESS_PCT" ]; then
                     echo "  REGRESSION  ${NAME}: ${PREV} -> ${NS} ns/op (expected ~${EXPECT} on this box, +${DELTA}%)"
                     REGRESSIONS=$((REGRESSIONS + 1))
+                    FLAGGED+=("$NAME")
                 elif [ "$DELTA" -le -5 ]; then
                     echo "  improved    ${NAME}: ${PREV} -> ${NS} ns/op (expected ~${EXPECT}, ${DELTA}%)"
                 fi
@@ -417,8 +437,85 @@ if [ -n "$PREV_TS" ]; then
         echo "note: suite grew ${PREV_COUNT} -> ${RECORDED} benchmarks"
     fi
 fi
+
+# --- the same-machine A/B ---------------------------------------------------
+# See the header. Every failure below returns non-zero with its reason, so a flag
+# stands unless both trees really ran here and agreed.
+_pin_of() { grep -m1 '^cyrius = ' "$1" || true; }
+
+# Per-benchmark minimum across every run in a log, as "<ns><TAB><name>".
+_mins_of() {
+    sed -nE 's/^[[:space:]]*(.+):[[:space:]]*([0-9]+) ns\/op.*$/\2\t\1/p' "$1" \
+        | sort -t"$(printf '\t')" -k2,2 -k1,1n \
+        | awk -F"\t" '!seen[$2]++ {print $1 "\t" $2}'
+}
+_fig() { printf '%s\n' "$1" | awk -F"\t" -v n="$2" '$2==n {print $1}'; }
+
+_ab_gate() {
+    local base self a_log b_log a_mins b_mins name a b abs pct
+    local confirmed=0
+    base="${BENCH_AB_BASE:-}"
+    if [ -z "$base" ]; then
+        self=$(tr -d '[:space:]' < VERSION 2>/dev/null || true)
+        base=$(git tag --merged HEAD --sort=-v:refname 2>/dev/null | grep -vxF "$self" | head -1 || true)
+    fi
+    if [ -z "$base" ]; then
+        echo "A/B: no previous tag in this checkout, so the flags stand (a shallow clone has none)"
+        return 1
+    fi
+    AB_DIR=$(mktemp -d)
+    if ! git archive "$base" 2>/dev/null | tar -x -C "$AB_DIR" 2>/dev/null; then
+        echo "A/B: could not unpack '${base}', so the flags stand"
+        return 1
+    fi
+    # Under another toolchain the two trees differ by compiler as well as by
+    # source, and only the installed one can build them both.
+    if [ "$(_pin_of cyrius.cyml)" != "$(_pin_of "$AB_DIR/cyrius.cyml")" ]; then
+        echo "A/B: ${base} pins another cyrius ($(_pin_of "$AB_DIR/cyrius.cyml")), so the flags stand"
+        return 1
+    fi
+    if ! (cd "$AB_DIR" && "$CYRB" deps >/dev/null 2>&1); then
+        echo "A/B: could not resolve ${base}'s deps, so the flags stand"
+        return 1
+    fi
+    echo "A/B: ${#FLAGGED[@]} flag(s), ${AB_ROUNDS} interleaved rounds against ${base} on this machine"
+    a_log="$AB_DIR/.ab-base.log"; b_log="$AB_DIR/.ab-head.log"
+    : > "$a_log"; : > "$b_log"
+    for _r in $(seq 1 "$AB_ROUNDS"); do
+        (cd "$AB_DIR" && _bench_once) >> "$a_log" 2>&1 || true
+        _bench_once >> "$b_log" 2>&1 || true
+    done
+    a_mins=$(_mins_of "$a_log"); b_mins=$(_mins_of "$b_log")
+    for name in "${FLAGGED[@]}"; do
+        a=$(_fig "$a_mins" "$name"); b=$(_fig "$b_mins" "$name")
+        if [ -z "$a" ] || [ -z "$b" ] || [ "$a" -le 0 ]; then
+            echo "  CONFIRMED   ${name}: no figure from both trees, so it cannot be cleared"
+            confirmed=$((confirmed + 1))
+            continue
+        fi
+        abs=$(( b - a ))
+        pct=$(( abs * 100 / a ))
+        # The same floors as the history comparison, so a flag cannot be
+        # confirmed by a wobble that comparison would have called noise.
+        if [ "$pct" -ge "$REGRESS_PCT" ] && [ "$abs" -ge "$MIN_DELTA_NS" ] \
+            && { [ "$a" -ge "$TINY_NS" ] || [ "$abs" -ge "$TINY_DELTA_NS" ]; }; then
+            echo "  CONFIRMED   ${name}: ${base} ${a} -> ${b} ns/op here (+${pct}%)"
+            confirmed=$((confirmed + 1))
+        else
+            echo "  cleared     ${name}: ${base} ${a} -> ${b} ns/op here (${pct}%)"
+        fi
+    done
+    CONFIRMED=$confirmed
+    [ "$confirmed" -eq 0 ]
+}
+
 if [ "$REGRESSIONS" -gt 0 ]; then
-    echo "${REGRESSIONS} regression(s) >= ${REGRESS_PCT}% vs previous run — REVIEW before release"
+    CONFIRMED=$REGRESSIONS
+    if _ab_gate; then
+        echo "no regressions: ${REGRESSIONS} flag(s) vs history, all cleared by the same-machine A/B"
+        exit 0
+    fi
+    echo "${CONFIRMED} regression(s) >= ${REGRESS_PCT}% vs previous run — REVIEW before release"
     exit 1
 fi
 echo "no regressions >= ${REGRESS_PCT}% vs previous run"

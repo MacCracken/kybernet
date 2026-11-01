@@ -17,6 +17,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Tags, for the bench gate's same-machine A/B against the previous
+          # release. Without them a flag cannot be cleared (scripts/bench-history.sh).
+          fetch-depth: 0
 
       - name: Install Cyrius toolchain
         run: |

@@ -11,7 +11,8 @@
 four `streq(str_data(…))` sites compare as `Str`. Those strings were never a live bug: bayan
 stores a NUL at every value's length and argonaut's defaults are literals, and
 `test_config_strings_are_cstrs` now pins that, since every `str_data()` handed to a cstr consumer
-rests on it. `termios.cyr` calls the stdlib's `sys_ioctl`, and the comments that described refused
+rests on it. Its first CI run failed the bench gate on two benchmarks that had not changed, so a
+flag against history is now decided by a same-machine A/B against the previous tag (rule 6). `termios.cyr` calls the stdlib's `sys_ioctl`, and the comments that described refused
 sd_notify keys, a dead PCR path and roadmap sections that no longer exist say what is true. Suite
 902 / 897. Harness 126, aarch64 boot gate 180.
 
@@ -307,7 +308,7 @@ the build; that is standing rule 32.
 | `bash qemu/boot-test-aarch64.sh` | **180** properties, all 5 passes, 25 services | boots `kybernet-aarch64` as PID 1 (TCG), entropy-starved; needs host `veritysetup` |
 | `bash qemu/boot-test.sh` | **126** properties, 5 passes | `HARNESS_STRICT=1` in CI makes a skip a failure |
 | `bash scripts/verify-lock.sh` | 2 halves, 5 commit pins | the committed lock (HEAD's, not the working tree's) vs a fresh resolve |
-| `bash scripts/bench-history.sh` | **56** benchmarks (2 reported-not-gated) | ≥15% regression gate; `LAYOUT_SENSITIVE` names the two exempt ones |
+| `bash scripts/bench-history.sh` | **56** benchmarks (2 reported-not-gated) | ≥15% flag against history, decided by a same-machine A/B against the previous tag; `LAYOUT_SENSITIVE` names the two exempt ones |
 | `cyrius lint` | 0 warnings, **0 untracked deferrals** | HARD GATE, both halves |
 | `cyrius fmt --check` | clean | non-mutating; never `diff <(cyrius fmt …)` |
 
@@ -347,7 +348,8 @@ stricter bar on the next sweep.**
 
 ## In flight
 
-1.8.2 is cut in the working tree, not yet committed or tagged. 1.8.1 is tagged and on the
+1.8.2 is committed (`401e8ea`) and not tagged, and its first CI run was red, so it has not
+shipped. The bench gate fix is in the working tree, not yet committed. 1.8.1 is tagged and on the
 remote.
 
 ## Next

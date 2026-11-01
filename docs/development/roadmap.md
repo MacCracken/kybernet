@@ -32,7 +32,8 @@ never take one, and a comment-only item ships with a release that has code in it
 sibling-free reproduction.
 
 **A cyrius pin move** has no number until one is wanted, because 6.7.18 is the latest release.
-It ships as its own patch, or with whatever release is next. Scan for the changes that alter
+It ships as its own patch, or with whatever release is next. The bench gate's A/B cannot span
+a pin change, so a flag on that run stays red until someone explains it (standing rule 6). Scan for the changes that alter
 what already-compiling code computes, diff the DCE list knowing it cannot see a
 compiler-emitted call, and replay `ci.yml` in the runner's image (CHANGELOG [1.8.0], [1.8.1]).
 
@@ -48,14 +49,11 @@ rule 37). They come before 1.9.0, whose changes need a benchmark gate that can b
       to 131–134 ns/op and `hashmap` from about 1,000 to 1,199 (CHANGELOG [1.7.7] has the
       experiment). Make them layout-insensitive, or exempt them in `LAYOUT_SENSITIVE` with
       the experiment in the same commit, as `strlen(52 chars)` is.
-- [ ] **The bench gate cannot hold on a saturated host.** At 1.7.11, with another
-      workload keeping all 16 cores busy (load 9 to 20), two consecutive runs flagged 15
-      and then 5 benchmarks, disjoint sets, and the first set came back about 50% faster on
-      the second run. The calibration loop normalises CPU speed, not memory contention. An
-      interleaved A/B against the previous release's tree, best of three, showed parity
-      within 5% on every flagged benchmark. At 1.8.0 the same tree flagged 0, 36, 0 and 28
-      across four runs beside another workload. Consider making that A/B the gate's own
-      fallback when the history comparison flags.
+- [ ] **`_calibration` moves with binary layout.** Interleaved on one machine it read 117-120
+      on 1.8.1's binary and 133-137 on 1.8.2's, so the reference every history comparison
+      divides by shifted 14% from unrelated code. The same-machine A/B decides a flag since
+      1.8.2, so this costs false flags and CI minutes, not false reds. Find what moved the
+      loop, and whether the history comparison still earns its place in CI.
 - [ ] **`test_boot_stage_results` reads the host's `/dev/console`.** The suite goes red in a
       container started without a TTY: `stage: device_mgr skips` gets STAGE_FAIL, on both
       arches, from a machine property (standing rule 37). Found at 1.8.0 by replaying CI in

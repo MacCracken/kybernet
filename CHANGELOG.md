@@ -54,6 +54,39 @@ stayed.
 - **`src/lib/console_io.cyr`** said the stdlib has no poll wrapper; `sys_ppoll` shipped at 6.7.9.
   **`src/lib/emergency_auth.cyr`** pointed at a roadmap item the bounds below it had closed.
 
+### Fixed — the bench gate
+
+1.8.2's first CI run failed the bench gate, so it did not ship, and this is part of 1.8.2. It
+flagged `timerspec_new` and `capability_set(new+3push)`, and **neither had changed**: interleaved
+against the 1.8.1 tag on one machine they read 17 vs 17 ns and 224 vs 225 ns. Two defects produced
+that, and re-recording a baseline fixes neither. Against 1.8.1's rows `timerspec_new` still flags.
+
+- **The history comparison crosses machines.** The rows come from the dev box and the gate ran on
+  a GitHub runner, where syscalls were twice as fast and ALU work slower. One scale cannot fit both.
+- **`_calibration` moves with binary layout.** The gate's reference was documented as moving only
+  with machine conditions. Interleaved on one machine it read 117-120 on 1.8.1's binary and 133-137
+  on 1.8.2's. The calibration of 134 in 1.8.2's history rows was mostly that, not the load on the
+  host when they were recorded.
+
+**`scripts/bench-history.sh`:** a flag against history is now a question. The gate unpacks the
+previous tag, runs both trees in turn on this machine (`AB_ROUNDS`, default 5), and compares them
+directly, under the same percent and absolute floors. That needs no reference and no history
+row, and a release with no flags pays nothing for it. If it cannot run, the flag stands and the
+reason is printed: no tags in the checkout, a base on another cyrius pin, or unresolvable deps.
+`ci.yml`'s build job now fetches tags (`fetch-depth: 0`). ⚠ **The A/B cannot span a pin change**, so
+a flag on a toolchain bump stays red until someone explains it (standing rule 6).
+
+| Case, in a clone with real tags | Result |
+|---|---|
+| A baseline row forced low, at CI-sized numbers | flagged, then cleared (229 → 230 ns), exit 0 |
+| A real slowdown injected, on a loaded host | history flagged 15; the A/B cleared 14 and confirmed `timerspec_new` at +205%, exit 1 |
+| No tags in the checkout | the flag stands, with the reason, exit 1 |
+| The base pins another cyrius | the flag stands, with the reason, exit 1 |
+| An unknown base tag | the flag stands, with the reason, exit 1 |
+| Forced both ways in `ubuntu:26.04`, unprivileged, under `mawk` | a false flag cleared, exit 0; a real slowdown confirmed at +200%, exit 1 |
+
+The history rows stay as recorded: they are a record of what was measured.
+
 ### Release gates
 
 | Gate | Result |
@@ -65,11 +98,11 @@ stayed.
 | `cyrius fmt --check` / `cyrius lint` / `cyrius vet` | clean / 0 warnings, 0 untracked deferrals / 0 untrusted, 0 missing |
 | `cyrius test src/test.cyr` | **902 passed, 0 failed** |
 | `scripts/aarch64-exec-gate.sh` | **897** assertions, 0 failed (floor 897); 5 syscall probes ok; declared-broken list empty |
-| `scripts/bench-history.sh` | 56 benchmarks, **no regression ≥ 15%**, on a loaded host (calibration 106 → 134 ns/op) |
+| `scripts/bench-history.sh` | 56 benchmarks, **no regression ≥ 15%** on the dev box. On CI it flagged two benchmarks, which is what the section above fixes |
 | `qemu/boot-test.sh` (KVM, `HARNESS_STRICT=1`) | **OK**, 126 properties; kybernet span 525 ms, reactor wakeups 24 |
 | `qemu/boot-test-aarch64.sh` (TCG, `HARNESS_STRICT=1`) | **OK**, 180 properties; kybernet span 1,738 ms; CRNG seeded at 2.19 s, after phase 1 at 1.24 s |
 | sibling-free reproduction | a copy with no siblings and an **empty dep cache** clones every tag and reproduces a byte-identical lock and byte-identical binaries on both arches, agnos-init included |
-| `ci.yml` replayed in `ubuntu:26.04` | **23 of 23 steps green**: x86 harness 126 on the 7.0 azure kernel (span 526 ms), aarch64 180 on QEMU 10.2, suite 902 / 897 |
+| `ci.yml` replayed in `ubuntu:26.04` | **23 of 23 steps green**, with tags in the checkout: x86 harness 126 on the 7.0 azure kernel, aarch64 180 on QEMU 10.2, suite 902 / 897. Nothing flagged in that run, so the A/B was forced separately, above |
 
 **Not reached by any gate:** the `str_eq` check for a config service colliding with a built-in. The
 harnesses boot `recovery`, which has no built-ins, and `src/test.cyr` cannot reach `load_config`

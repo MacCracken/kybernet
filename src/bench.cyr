@@ -55,11 +55,14 @@ fn report(name, total_ns, iterations) {
 #
 # It exists so the regression gate can tell "kybernet got slower" apart from
 # "this machine is busy". It is a fixed integer loop that touches no kybernet
-# code, no allocator and no syscall, so its cost moves ONLY with machine
-# conditions — CPU contention, frequency scaling, thermal state. scripts/
-# bench-history.sh divides every other benchmark by this one before comparing
-# against history, so a box under load scales every number together and
-# nothing is flagged.
+# code, no allocator and no syscall, so its cost moves with machine conditions
+# — CPU contention, frequency scaling, thermal state. scripts/bench-history.sh
+# divides every other benchmark by this one before comparing against history,
+# so a box under load scales every number together and nothing is flagged.
+#
+# ⚠ IT ALSO MOVES WITH BINARY LAYOUT, so it is an estimate. Interleaved on one
+# machine it read 117-120 on 1.8.1's binary and 133-137 on 1.8.2's, from code it
+# never touches. Since 1.8.2 a flag is decided by a same-machine A/B, not by this.
 #
 # Without it the gate was unusable on a working machine: three consecutive
 # runs at load average 24 reported 52, then 21, then 51 regressions, on
