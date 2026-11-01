@@ -7,6 +7,70 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.8.3] — 2026-11-01
+
+**The gates measure the code.** The roadmap's four 1.8.3 items. Three benchmarks that looked
+alike turned out to have three different causes, and one roadmap diagnosis was wrong. Suite
+910 / 905. Harness 126, aarch64 boot gate 180. The production binaries are the same size.
+
+### Fixed — what moved the benchmarks
+
+Each was measured by sweeping placement and by running one binary repeatedly, on one machine.
+
+| Benchmark | Cause, as measured | Fix | Spread before → after |
+|---|---|---|---:|
+| `_calibration` | Its code address. The same instructions, shifted only by NOPs, read about 114 or about 130 ns by the loop's offset in its cache line. 1.8.1's binary had it at offset 52 (116 ns) and 1.8.2's at 16 (130 ns) | Moved above `src/bench.cyr`'s module includes. Code is laid out in source order, so kybernet's changes can no longer shift it | moved between bands → one address across 8 padded builds |
+| `agent_config(new+get+set)` | Its name literal's alignment: 120-122 or 132-137 ns, period 8 bytes | `_bench_aligned` feeds it an 8-byte-aligned copy | 14% → 3% |
+| `hashmap(3 set+4 get/has)` | **Not layout.** The stdlib draws a hash seed per process, which decides which keys collide: 16 runs of one binary spanned 1,066-1,367 ns | The bench fixes `_hm_seed` before anything hashes | 28% → 2% across processes, 26% → 3% across literal placement |
+
+⚠ **The roadmap's diagnosis of `hashmap` was wrong.** The 1.7.7 experiment saw it move when an
+unused literal changed the build, and read that as layout; each run had simply drawn a new seed. Had
+it been exempted as the roadmap offered, the exemption would have rested on a false reason.
+
+The history comparison stays. On CI it is the cheap trigger for the same-machine A/B, and on the
+dev box it is a same-machine check. A dep or toolchain bump can still move `_calibration`.
+
+### Changed
+
+- **`test_boot_stage_results` no longer reads the host's `/dev/console`.** The stage is
+  `_stage_device_mgr_at(path)`, and the suite drives it with a path it controls, which also covers
+  its failure arm for the first time. The suite passes in a container started without a TTY, and the
+  harnesses still run the real path.
+- **The built-in collision check and the `depends_on` check moved from `load_config` to
+  `src/lib/svc_config.cyr`** as `cfg_merge_services` and `cfg_warn_missing_depends`, comments and log
+  strings verbatim. No gate reached the collision check: the harnesses boot `recovery`, which has no
+  built-ins, and `src/test.cyr` cannot reach `load_config` (standing rule 34). The new
+  `test_config_merge_services` runs both, and the embedded-NUL `depends_on` case 1.8.2 described.
+- **Tests:** +8 assertions.
+
+| Mutation | Result |
+|---|---|
+| The name check compares by cstr again | 1 assertion red: the embedded-NUL target |
+| Collisions ignored | 3 red |
+| `depends_on` stops checking built-ins | 1 red |
+| The stage ignores the console path | 1 red |
+
+### Roadmapped
+
+`strlen(52 chars)` has `agent_config`'s cause, as the sweep shows, so it can likely lose its
+`LAYOUT_SENSITIVE` exemption. That is under 1.9.0.
+
+### Release gates
+
+| Gate | Result |
+|---|---|
+| `scripts/verify-lock.sh` | **OK on a scratch commit of this tree** |
+| `rm -rf lib cyrius.lock && cyrius deps && cyrius deps --verify` | 84 verified, 0 failed, 5 commit pins |
+| builds, `CYRIUS_DCE=1` | kybernet x86_64 **1,114,096 B**, aarch64 **2,662,000 B**; agnos-init **565,032 B** and **2,526,736 B**, all unchanged in size |
+| `cyrius fmt --check` / `cyrius lint` / `cyrius vet` | clean / 0 warnings, 0 untracked deferrals / 0 untrusted, 0 missing |
+| `cyrius test src/test.cyr` | **910 passed, 0 failed**, and the same in `ubuntu:26.04` with no TTY and no `/dev/console` |
+| `scripts/aarch64-exec-gate.sh` | **905** assertions, 0 failed (floor 905); 5 syscall probes ok; declared-broken list empty |
+| `scripts/bench-history.sh` | 56 benchmarks, **no regression ≥ 15%**, nothing flagged. Calibration 134 → 126 ns/op, the one-time move to its new address |
+| `qemu/boot-test.sh` (KVM, `HARNESS_STRICT=1`) | **OK**, 126 properties; kybernet span 518 ms |
+| `qemu/boot-test-aarch64.sh` (TCG, `HARNESS_STRICT=1`) | **OK**, 180 properties; CRNG seeded at 2.16 s, after phase 1 at 1.21 s |
+| sibling-free reproduction | a copy with no siblings and an **empty dep cache** clones every tag and reproduces a byte-identical lock and byte-identical binaries on both arches, agnos-init included |
+| `ci.yml` replayed in `ubuntu:26.04` | **23 of 23 steps green**, with tags in the checkout: x86 harness 126 on the 7.0 azure kernel, aarch64 180 on QEMU 10.2, suite 910 / 905 |
+
 ## [1.8.2] — 2026-11-01
 
 **The build's known warnings are gone, and no behaviour was meant to change.** The roadmap's four

@@ -52,13 +52,15 @@ fn _stage_mount_fs() {
 # performed — but the *outcome* it exists to guarantee, a usable /dev, is
 # still checkable. Verify that, then report SKIP rather than claiming to
 # have started a device manager.
-fn _stage_device_mgr() {
+fn _stage_device_mgr_at(console_path) {
     if (is_mounted("/dev") == 0) { return STAGE_FAIL; }
     # /dev/console is what console.cyr redirected stdio to at phase 2; if
     # devtmpfs did not populate, this is absent.
-    if (sys_access("/dev/console", 0) != 0) { return STAGE_FAIL; }
+    if (sys_access(console_path, 0) != 0) { return STAGE_FAIL; }
     return STAGE_SKIP;
 }
+
+fn _stage_device_mgr() { return _stage_device_mgr_at("/dev/console"); }
 
 # Rootfs verification is edge-boot's job and already ran at phase 6c —
 # kybernet powers off there if a required prerequisite was missing (1.4.2

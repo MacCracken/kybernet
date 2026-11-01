@@ -667,7 +667,11 @@ fn test_boot_stage_results() {
 
     # udev is genuinely not performed by kybernet — devtmpfs covers /dev.
     # SKIP, not a false COMPLETE and not a failure.
-    assert_eq(execute_boot_stage_for(0, 0, STAGE_DEVICE_MGR), STAGE_SKIP, "stage: device_mgr skips");
+    # A path this suite controls, not the host's /dev/console, which a container
+    # started without a TTY does not have. The harnesses run the real one.
+    assert_eq(_stage_device_mgr_at("/proc/self/status"), STAGE_SKIP, "stage: device_mgr skips");
+    assert_eq(_stage_device_mgr_at("/proc/self/kyb-no-such-node"), STAGE_FAIL,
+      "stage: device_mgr fails with no console node");
 
     # Rootfs verification only applies to an edge boot that asked for it.
     var plain = argonaut_config_default();
@@ -3076,6 +3080,35 @@ fn test_config_strings_are_cstrs() {
     return 0;
 }
 
+# load_config's merge, which src/test.cyr cannot reach through main.cyr and the
+# harnesses cannot reach at all: they boot `recovery`, which has no built-ins.
+fn test_config_merge_services() {
+    println("--- config merge against built-ins (1.8.3) ---");
+    var root = json_v_parse(_doc3(
+        "{\"services\":[{\"name\":\"aethersafha\",\"binary\":\"/bin/true\"},",
+        "{\"name\":\"kyb-m1\",\"binary\":\"/bin/true\",\"depends_on\":[\"kyb-m2\",\"agnos-init\"]},",
+        "{\"name\":\"kyb-m2\",\"binary\":\"/bin/true\",\"depends_on\":[\"kyb-typo\",\"kyb-m1\\u0000x\"]}]}"));
+    var svcs = svc_defs_from_json(root);
+    assert_eq(vec_len(svcs), 3, "merge: all three services parse");
+
+    var defaults = default_services(BOOT_DESKTOP);
+    var dst = vec_new();
+    assert_eq(cfg_merge_services(svcs, defaults, dst), 2, "merge: a built-in's name is left out");
+    assert_eq(vec_len(dst), 2, "merge: two definitions reach the registry");
+    assert_eq(cfg_defs_have_name(dst, str_from("aethersafha")), 0, "merge: the collision is dropped");
+    assert_eq(cfg_defs_have_name(dst, str_from("kyb-m1")), 1, "merge: the others are kept");
+
+    # kyb-m2 is a forward reference and agnos-init is a built-in, so both exist.
+    # kyb-typo does not, and neither does a name with an embedded NUL, which
+    # stops being `kyb-m1` the moment a comparison honours its length.
+    assert_eq(cfg_warn_missing_depends(dst, defaults), 2, "merge: only the two bad targets are missing");
+
+    var dst2 = vec_new();
+    assert_eq(cfg_merge_services(svcs, default_services(BOOT_RECOVERY), dst2), 3,
+      "merge: recovery has no built-ins, so nothing collides");
+    return 0;
+}
+
 fn test_cfg_read_class() {
     println("--- config read classification (1.7.0) ---");
     var cap = 16384;
@@ -3839,6 +3872,7 @@ fn main() {
     test_sandbox_rules();
     test_config_json_strictness();
     test_config_strings_are_cstrs();
+    test_config_merge_services();
     return assert_summary();
 }
 var exit_code = main();

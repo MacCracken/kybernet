@@ -3,7 +3,7 @@
 Forward work only. What shipped is in [CHANGELOG.md](../../CHANGELOG.md), and what is true
 right now, gate counts included, is in [state.md](state.md).
 
-**Current release: 1.8.2** (cyrius 6.7.18, argonaut 1.18.0, libro 2.11.3, agnostik 2.0.0,
+**Current release: 1.8.3** (cyrius 6.7.18, argonaut 1.18.0, libro 2.11.3, agnostik 2.0.0,
 sigil 3.13.15).
 
 **Every open item has a target release.** The order is the dependency order: a later release
@@ -13,7 +13,7 @@ under a release or under Gated, never in a list of its own. A finished item is d
 a finished release's section goes with it. A version is for code: docs and roadmap changes
 never take one, and a comment-only item ships with a release that has code in it.
 
-**Open: 20** (`grep -c '^- \[ \]'` against this file).
+**Open: 17** (`grep -c '^- \[ \]'` against this file).
 
 ---
 
@@ -21,8 +21,7 @@ never take one, and a comment-only item ships with a release that has code in it
 
 | Release | Theme | Items | Waits on |
 |---|---|---:|---|
-| [1.8.3](#183--gates-that-measure-the-code) | Gates that measure the code | 4 | nothing |
-| [1.9.0](#190--what-pid-1-pays) | What PID 1 pays: memory, size, boot wait | 4 | a sigil tag, a libro tag, and argonaut carrying both |
+| [1.9.0](#190--what-pid-1-pays) | What PID 1 pays: memory, size, boot wait | 5 | a sigil tag, a libro tag, and argonaut carrying both |
 | [1.10.0](#1100--service-config-surface) | Service config surface | 3 | 1.9.0's reload path |
 | [1.11.0](#1110--edge-boot-under-emulation) | Edge boot under emulation | 3 | `swtpm` in the harness and in CI |
 | [1.12.0](#1120--non-root-default-services) | Non-root default services | 1 | agnosticos' config, argonaut's `default_services` |
@@ -39,37 +38,15 @@ compiler-emitted call, and replay `ci.yml` in the runner's image (CHANGELOG [1.8
 
 ---
 
-## 1.8.3 — Gates that measure the code
-
-Each of these makes a gate fail for kybernet's reasons and not the machine's (standing
-rule 37). They come before 1.9.0, whose changes need a benchmark gate that can be believed.
-
-- [ ] **`hashmap(3 set+4 get/has)` and `agent_config(new+get+set)` measure string-literal
-      layout.** An unused string literal in `src/bench.cyr` moves `agent_config` from 110
-      to 131–134 ns/op and `hashmap` from about 1,000 to 1,199 (CHANGELOG [1.7.7] has the
-      experiment). Make them layout-insensitive, or exempt them in `LAYOUT_SENSITIVE` with
-      the experiment in the same commit, as `strlen(52 chars)` is.
-- [ ] **`_calibration` moves with binary layout.** Interleaved on one machine it read 117-120
-      on 1.8.1's binary and 133-137 on 1.8.2's, so the reference every history comparison
-      divides by shifted 14% from unrelated code. The same-machine A/B decides a flag since
-      1.8.2, so this costs false flags and CI minutes, not false reds. Find what moved the
-      loop, and whether the history comparison still earns its place in CI.
-- [ ] **`test_boot_stage_results` reads the host's `/dev/console`.** The suite goes red in a
-      container started without a TTY: `stage: device_mgr skips` gets STAGE_FAIL, on both
-      arches, from a machine property (standing rule 37). Found at 1.8.0 by replaying CI in
-      `ubuntu:26.04`. Give the stage a path to check, or test it against a fixture.
-- [ ] **No gate reaches the built-in collision check in `load_config`.** A config service
-      named like a built-in is ignored, but the harnesses boot `recovery`, which has no
-      built-ins, and `src/test.cyr` cannot include `src/main.cyr` (standing rule 34). 1.8.2
-      changed that comparison to `str_eq` and nothing executed it. Move the merge's collision
-      and dependency checks into `src/lib/svc_config.cyr`, where the suite can run them.
-
 ## 1.9.0 — What PID 1 pays
 
 The memory, file size and boot time PID 1 spends and never gets back. A minor, because the
 reload path changes. The Unicode and entropy items are dep-first: the dep's fix, then **the
 user tags it**, then kybernet takes the tag.
 
+- [ ] **`strlen(52 chars)` can lose its layout exemption.** The sweep behind 1.8.3 shows the same
+      cause as `agent_config`: 36-38 or 25-26 ns by the literal's alignment, period 8 bytes.
+      `_bench_aligned` should make it gateable. Re-sweep, then drop it from `LAYOUT_SENSITIVE`.
 - [ ] **Every config load, SIGHUP included, costs about 4 bytes of arena per config
       byte.** `json_v_parse_buf` allocates 35,904 bytes to parse an 8,983-byte config
       (measured at 1.7.8), and PID 1's arena is never reset. The 256 KiB config limit

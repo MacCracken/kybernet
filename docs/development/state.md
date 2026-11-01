@@ -6,6 +6,14 @@
 
 ## Version
 
+**1.8.3**: the gates measure the code. Three benchmarks that looked alike had three causes, each
+now fixed in the bench: `_calibration` followed its own code address, so it sits above
+kybernet's modules, where kybernet's changes cannot move it; `agent_config` followed its literal's
+alignment, so it gets an aligned copy; and `hashmap` was never layout, it was the per-process hash
+seed, so the bench fixes the seed. `test_boot_stage_results` no longer reads the host's
+`/dev/console`, and the built-in collision and `depends_on` checks moved out of `load_config` into
+`svc_config.cyr`, where the suite runs them. Suite 910 / 905. Harness 126, aarch64 boot gate 180.
+
 **1.8.2**: the build's known warnings are gone and no behaviour was meant to change. The 21
 `json_v_obj_get` calls are `bayan_json_v_obj_get_by_cstr`, which that alias forwarded to, and the
 four `streq(str_data(…))` sites compare as `Str`. Those strings were never a live bug: bayan
@@ -303,8 +311,8 @@ the build; that is standing rule 32.
 
 | Gate | Count | Enforcement |
 |---|---|---|
-| `cyrius test src/test.cyr` | **902** assertions | floor read from CLAUDE.md; a shrinking suite fails |
-| `bash scripts/aarch64-exec-gate.sh` | **897** assertions + 5 syscall probes | executes aarch64 under `qemu-user`; its own declared floor |
+| `cyrius test src/test.cyr` | **910** assertions | floor read from CLAUDE.md; a shrinking suite fails |
+| `bash scripts/aarch64-exec-gate.sh` | **905** assertions + 5 syscall probes | executes aarch64 under `qemu-user`; its own declared floor |
 | `bash qemu/boot-test-aarch64.sh` | **180** properties, all 5 passes, 25 services | boots `kybernet-aarch64` as PID 1 (TCG), entropy-starved; needs host `veritysetup` |
 | `bash qemu/boot-test.sh` | **126** properties, 5 passes | `HARNESS_STRICT=1` in CI makes a skip a failure |
 | `bash scripts/verify-lock.sh` | 2 halves, 5 commit pins | the committed lock (HEAD's, not the working tree's) vs a fresh resolve |
@@ -312,7 +320,7 @@ the build; that is standing rule 32.
 | `cyrius lint` | 0 warnings, **0 untracked deferrals** | HARD GATE, both halves |
 | `cyrius fmt --check` | clean | non-mutating; never `diff <(cyrius fmt …)` |
 
-⚠ **902 and 897 are both correct, and neither floor gates the other.** Six assertions are
+⚠ **910 and 905 are both correct, and neither floor gates the other.** Six assertions are
 x86-only (`BS_OPEN`/`BS_STAT`/`BS_LSTAT`/`BS_PIPE`/`BS_POLL`/`BS_NANOSLEEP`) and one is
 aarch64-only (`BS_PPOLL`). Both floors are declared in CLAUDE.md and must be bumped
 together. **Do not pad the short arch to equalise them.**
@@ -348,18 +356,16 @@ stricter bar on the next sweep.**
 
 ## In flight
 
-1.8.2 is committed (`401e8ea`) and not tagged, and its first CI run was red, so it has not
-shipped. The bench gate fix is in the working tree, not yet committed. 1.8.1 is tagged and on the
+1.8.3 is cut in the working tree, not yet committed or tagged. 1.8.2 is tagged and on the
 remote.
 
 ## Next
 
-**1.8.3, gates that measure the code**, then the rest of the release plan in
-[roadmap.md](roadmap.md), where every one of the 20 open items has a target release.
+**1.9.0, what PID 1 pays**, then the rest of the release plan in
+[roadmap.md](roadmap.md), where every one of the 17 open items has a target release.
 
 | Release | Theme |
 |---|---|
-| 1.8.3 | Gates that measure the code |
 | 1.9.0 | What PID 1 pays: memory, size, boot wait |
 | 1.10.0 | Service config surface |
 | 1.11.0 | Edge boot under emulation |

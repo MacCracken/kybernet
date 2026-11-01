@@ -6,6 +6,57 @@
 # Kybernet modules (stdlib + deps auto-included via cyrius.cyml)
 # thread_local explicit include — see src/main.cyr for rationale (6.2.x).
 include "lib/thread_local.cyr"
+
+# ⚠ THE CALIBRATION REFERENCE. DO NOT "OPTIMIZE" OR REMOVE THIS.
+#
+# It exists so the regression gate can tell "kybernet got slower" apart from
+# "this machine is busy". It is a fixed integer loop that touches no kybernet
+# code, no allocator and no syscall, so its cost moves with machine conditions
+# — CPU contention, frequency scaling, thermal state. scripts/bench-history.sh
+# divides every other benchmark by this one before comparing against history,
+# so a box under load scales every number together and nothing is flagged.
+#
+# ⚠ IT MOVES WITH ITS OWN CODE ADDRESS, WHICH IS WHY IT SITS ABOVE THE MODULE
+# INCLUDES. The same instructions, shifted only by NOPs, land in two bands on one
+# machine, about 114 and about 130 ns, by the loop's offset in its cache line:
+# 1.8.1's binary had it at offset 52 (116 ns) and 1.8.2's at 16 (130 ns), so an
+# unrelated edit moved the gate's reference by 14%. Code is laid out in source
+# order, so ahead of src/lib/ no kybernet change can shift it. A dep or toolchain
+# bump still can, and a flag is decided by a same-machine A/B, not by this.
+#
+# Without it the gate was unusable on a working machine: three consecutive
+# runs at load average 24 reported 52, then 21, then 51 regressions, on
+# primitives the release never touched (strlen +144%, getpid +70%). A gate
+# that only passes on an idle box is not a gate. 1.6.1.
+#
+# The arithmetic is deliberately dependency-chained (each step feeds the
+# next) so the optimiser cannot vectorise or elide it, and the accumulator is
+# consumed by `report` so it cannot be dead-coded away.
+# Each reported "op" is 64 dependent rounds, which puts the figure in the
+# low hundreds of ns rather than the 3 ns a single round measures. That
+# matters: `cyrius bench` reports WHOLE nanoseconds, so a 3 ns reference
+# quantises the scale factor to +/-33% and is useless as a divisor.
+fn bench_calibration() {
+    var iters = 40000;
+    var start = now_ns();
+    var acc = 1;
+    var k = 0;
+    while (k < iters) {
+        var r = 0;
+        while (r < 64) {
+            acc = (acc * 1103515245 + 12345) & 0x7FFFFFFF;
+            acc = acc ^ (acc >> 7);
+            r = r + 1;
+        }
+        k = k + 1;
+    }
+    var elapsed = now_ns() - start;
+    # Fold acc into a value the compiler cannot prove unused.
+    if (acc == 0) { println(""); }
+    report("_calibration (reference loop)", elapsed, iters);
+    return 0;
+}
+
 include "src/lib/cmdline.cyr"
 include "src/lib/log.cyr"
 include "src/lib/console.cyr"
@@ -47,55 +98,20 @@ fn report(name, total_ns, iterations) {
     return 0;
 }
 
+# A copy of `s` at an 8-byte boundary, for a benchmark whose cost depends on where its
+# input sits. Standing rule 6: a benchmark feeds itself fixed input, and a string's
+# address is input. Sweeping one literal through the string pool moved
+# `agent_config` between 120 and 137 ns with a period of 8 bytes. alloc() is 8-aligned.
+fn _bench_aligned(s) {
+    var n = strlen(s);
+    var p = alloc(n + 1);
+    memcpy(p, s, n + 1);
+    return p;
+}
+
 # ================================================================
 # Syscall baselines (parity with agnosys bench_compare)
 # ================================================================
-
-# ⚠ THE CALIBRATION REFERENCE. DO NOT "OPTIMIZE" OR REMOVE THIS.
-#
-# It exists so the regression gate can tell "kybernet got slower" apart from
-# "this machine is busy". It is a fixed integer loop that touches no kybernet
-# code, no allocator and no syscall, so its cost moves with machine conditions
-# — CPU contention, frequency scaling, thermal state. scripts/bench-history.sh
-# divides every other benchmark by this one before comparing against history,
-# so a box under load scales every number together and nothing is flagged.
-#
-# ⚠ IT ALSO MOVES WITH BINARY LAYOUT, so it is an estimate. Interleaved on one
-# machine it read 117-120 on 1.8.1's binary and 133-137 on 1.8.2's, from code it
-# never touches. Since 1.8.2 a flag is decided by a same-machine A/B, not by this.
-#
-# Without it the gate was unusable on a working machine: three consecutive
-# runs at load average 24 reported 52, then 21, then 51 regressions, on
-# primitives the release never touched (strlen +144%, getpid +70%). A gate
-# that only passes on an idle box is not a gate. 1.6.1.
-#
-# The arithmetic is deliberately dependency-chained (each step feeds the
-# next) so the optimiser cannot vectorise or elide it, and the accumulator is
-# consumed by `report` so it cannot be dead-coded away.
-# Each reported "op" is 64 dependent rounds, which puts the figure in the
-# low hundreds of ns rather than the 3 ns a single round measures. That
-# matters: `cyrius bench` reports WHOLE nanoseconds, so a 3 ns reference
-# quantises the scale factor to +/-33% and is useless as a divisor.
-fn bench_calibration() {
-    var iters = 40000;
-    var start = now_ns();
-    var acc = 1;
-    var k = 0;
-    while (k < iters) {
-        var r = 0;
-        while (r < 64) {
-            acc = (acc * 1103515245 + 12345) & 0x7FFFFFFF;
-            acc = acc ^ (acc >> 7);
-            r = r + 1;
-        }
-        k = k + 1;
-    }
-    var elapsed = now_ns() - start;
-    # Fold acc into a value the compiler cannot prove unused.
-    if (acc == 0) { println(""); }
-    report("_calibration (reference loop)", elapsed, iters);
-    return 0;
-}
 
 fn bench_getpid() {
     var iters = 1000000;
@@ -677,17 +693,21 @@ fn bench_epoll_lifecycle() {
 
 fn bench_hashmap() {
     var iters = 10000;
+    var k1 = _bench_aligned("daimon");
+    var k2 = _bench_aligned("redis");
+    var k3 = _bench_aligned("postgres");
+    var k4 = _bench_aligned("missing");
     var start = now_ns();
     var k = 0;
     while (k < iters) {
         var m = map_new();
-        map_set(m, "daimon", 1234);
-        map_set(m, "redis", 1235);
-        map_set(m, "postgres", 1236);
-        map_get(m, "daimon");
-        map_get(m, "redis");
-        map_has(m, "postgres");
-        map_has(m, "missing");
+        map_set(m, k1, 1234);
+        map_set(m, k2, 1235);
+        map_set(m, k3, 1236);
+        map_get(m, k1);
+        map_get(m, k2);
+        map_has(m, k3);
+        map_has(m, k4);
         k = k + 1;
     }
     report("hashmap(3 set+4 get/has)", now_ns() - start, iters);
@@ -957,10 +977,11 @@ fn bench_security_context() {
 
 fn bench_agent_config() {
     var iters = 10000;
+    var name = _bench_aligned("bench-agent");
     var start = now_ns();
     var k = 0;
     while (k < iters) {
-        var ac = agent_config_new("bench-agent");
+        var ac = agent_config_new(str_from(name));
         AgentConfig_type(ac);
         AgentConfig_restart_policy(ac);
         AgentConfig_limits(ac);
@@ -1131,6 +1152,12 @@ fn arena_reset_clean() {
 
 fn main() {
     alloc_init();
+
+    # ⚠ A FIXED HASH SEED, BECAUSE THE SEED IS INPUT TOO (standing rule 6). The
+    # stdlib draws one per process, which decides which of a map's keys collide:
+    # 16 runs of ONE binary put `hashmap` anywhere from 1,066 to 1,367 ns. 1.7.7
+    # read that spread as string-literal layout. Set before anything hashes.
+    _hm_seed = 0x1F3D5B7997B5D3F1;
 
     println("===================================================");
     println("  kybernet benchmark — Cyrius");

@@ -1226,3 +1226,92 @@ fn health_interval_from_services(svcs) {
     return best;
 }
 
+# 1 if a ServiceDefinition in `defs` is named `name` (a Str). As a Str, so it neither
+# depends on a terminator nor stops at an embedded NUL.
+fn cfg_defs_have_name(defs, name) {
+    for (var i = 0; i < vec_len(defs); i = i + 1) {
+        if (str_eq(svc_def_name(vec_get(defs, i)), name) == 1) { return 1; }
+    }
+    return 0;
+}
+
+# ⚠ A NAME THAT COLLIDES WITH A BUILT-IN IS ANNOUNCED, NOT SWALLOWED.
+# 1.6.15 MEDIUM-2.
+#
+# `argonaut_init_new` registers `default_services(mode)` with an
+# unconditional map_set and only then adds config services, guarded by
+# `if (map_has(name) == 0)` (lib/argonaut_init.cyr:30-43). So a config
+# entry named `daimon` — or any of the other built-ins — loses to the
+# default and is dropped with no diagnostic at all: kybernet printed
+# `services parsed: 1`, started a service that was NOT the one in the
+# config, and discarded the operator's binary, args, restart policy,
+# cgroup limits and whole `security` block in silence.
+#
+# It is not a privilege escalation — the built-in was never confined, so
+# nothing gains privilege over the pre-existing baseline. What is lost is
+# the operator's intended hardening and their definition, and their
+# binary never executes.
+#
+# kybernet cannot make the override WORK from here; the precedence is
+# argonaut's, and inverting it (explicit config beats built-in, the
+# conventional reading) is filed for a later argonaut release. What it
+# can do is refuse to be silent, and keep `services parsed` honest by
+# counting only definitions that will actually reach the registry.
+#
+# Moves `svcs` into `dst`, leaving out any a built-in shadows, and returns how many moved.
+fn cfg_merge_services(svcs, defaults, dst) {
+    var registered = 0;
+    for (var i = 0; i < vec_len(svcs); i = i + 1) {
+        var sd = vec_get(svcs, i);
+        if (cfg_defs_have_name(defaults, svc_def_name(sd)) == 1) {
+            klog2("config: service collides with a built-in, definition IGNORED: ", str_data(svc_def_name(sd)));
+            kmsg("kybernet: config: a service name collides with a built-in; the built-in wins");
+        } else {
+            vec_push(dst, sd);
+            registered = registered + 1;
+        }
+    }
+    return registered;
+}
+
+# ⚠ EVERY `depends_on` TARGET MUST EXIST. 1.6.16 LOW-2.
+#
+# `resolve_service_waves` walks these edges, so a typo — or a name that
+# only exists in a different boot mode — becomes a phantom entry in the
+# startup waves: kybernet created a cgroup for a service that does not
+# exist, counted it FAILED, and logged a name the operator never wrote,
+# pointing the diagnostic away from the typo that caused it.
+#
+# Validated here, after the whole array is parsed, because a forward
+# reference to a service defined later in the file is perfectly legal —
+# the check needs the complete name set, which is the config services
+# plus this boot mode's built-ins.
+#
+# ⚠ THIS WARNS, IT DOES NOT REFUSE THE SERVICE, and that is a deliberate
+# departure from what the audit proposed. `depends_on` expresses ORDERING:
+# a service whose dependency does not exist still runs correctly, just
+# without that constraint. Refusing it would take a working service off a
+# board over a typo in an optional edge — a bigger outage than the defect,
+# and on an upgrade path where the operator may not be watching. The harm
+# the finding actually describes (a phantom cgroup, a bogus `failed`, and
+# a log line naming a service nobody configured) is closed in
+# `start_services` instead, where the phantom is skipped outright. What is
+# left is the diagnostic, said plainly at the one moment it is cheap to
+# act on.
+#
+# Returns how many targets name nothing, for the suite.
+fn cfg_warn_missing_depends(dst, defaults) {
+    var missing = 0;
+    for (var si = 0; si < vec_len(dst); si = si + 1) {
+        var deps = svc_def_deps(vec_get(dst, si));
+        for (var di = 0; di < vec_len(deps); di = di + 1) {
+            var dep = vec_get(deps, di);
+            if (cfg_defs_have_name(dst, dep) == 0 && cfg_defs_have_name(defaults, dep) == 0) {
+                missing = missing + 1;
+                klog2("config: depends_on names a service that does not exist: ", str_data(dep));
+                kmsg("kybernet: config: a depends_on target does not exist; check for a typo");
+            }
+        }
+    }
+    return missing;
+}

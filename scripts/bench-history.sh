@@ -33,7 +33,8 @@
 # syscalls 2x faster than the dev box and ALU work slower. The reference is not
 # even stable on one machine. Interleaved on one box, `_calibration` read 117-120
 # on the 1.8.1 binary and 133-137 on 1.8.2's, a 14% move from unrelated code
-# changing the layout. That run failed on two benchmarks that a direct comparison
+# changing its address (fixed at 1.8.3 for kybernet's own changes; a dep or
+# toolchain bump can still move it). That run failed on two benchmarks that a direct comparison
 # showed unchanged (timerspec_new 17 vs 17, capability_set 224 vs 225).
 #
 # So a flag is a question, and `_ab_gate` below answers it: build the previous
