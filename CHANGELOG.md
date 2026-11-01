@@ -135,6 +135,30 @@ existing roadmap items. Three new items: a config key for the 90 s start timeout
 Argon2id verifier, and argonaut's architecture note 005, which leaves measuring the verified
 root hash into PCR 15 before the LUKS unlock, and capping it after, to kybernet.
 
+### CI: `ubuntu-latest` moved to Ubuntu 26.04
+
+1.8.0's first CI run failed installing `qemu-user-static`, so it did not ship, and these fixes
+are part of 1.8.0. The move is what changed: this release touched no install line.
+
+- **`ci.yml`, `release.yml` and the exec gate's hint install `qemu-user`.** 26.04 has no
+  `qemu-user-static` package, only a virtual name, and `qemu-user` there is itself the static
+  binary, at the `qemu-aarch64` path the gate looks for first. The name exists on 24.04 too, so
+  the line no longer depends on what `ubuntu-latest` points at. `release.yml` had the same line
+  and would have failed at the tag.
+- **`qemu/boot-test.sh` stamps the serial stream with `$EPOCHREALTIME`.** Replaying CI on the new
+  image showed the boot budget measuring its own stamper: awk forked `date` once per line, so
+  over 203 lines it fell behind the stream. On the same boots the true span was 480-534 ms and the
+  gate read 753-863 ms, and on a loaded host up to 1,297 ms, over the 1,200 ms budget with kybernet
+  at under half of it. The 7.0 azure kernel is not the cause (821-832 ms against 826-838 ms on
+  the Arch kernel in the same container). With a stamp that does not fork, the gate equals the true
+  span to the millisecond on 8 of 8 boots. The budget is unchanged, so this is stricter in effect
+  (standing rule 37).
+- **`ci.yml` was replayed in `ubuntu:26.04`**, every `run:` step verbatim: as an unprivileged user
+  with sudo, from a fresh toolchain install and an empty kernel cache, with `/dev/kvm`, booting
+  Ubuntu's 7.0 azure kernel. That also exercised what no local gate can: QEMU 10.2, `mawk`, the
+  harness's `sudo mknod` staging, and `mkcred.sh`'s generator on OpenSSL 3.5, which the old image's
+  OpenSSL 3.0 had always skipped.
+
 ### Release gates
 
 | Gate | Result |
@@ -147,9 +171,10 @@ root hash into PCR 15 before the LUKS unlock, and capping it after, to kybernet.
 | `cyrius test src/test.cyr` | **892 passed, 0 failed** |
 | `scripts/aarch64-exec-gate.sh` | **887** assertions, 0 failed (floor 887); 5 syscall probes ok; declared-broken list empty |
 | `scripts/bench-history.sh` | 56 benchmarks, **no regression ≥ 15%**. Calibration 117 → 119 ns/op. `strlen(52 chars)` moved +42%; it is declared layout-sensitive and not gated |
-| `qemu/boot-test.sh` (KVM, `HARNESS_STRICT=1`) | **OK**, 121 properties across the five passes; kybernet span 508 ms, reactor wakeups 24, 24 service cgroups removed. The `/dev` node staging step reported SKIPPED locally (no `CAP_MKNOD` without sudo) |
+| `qemu/boot-test.sh` (KVM, `HARNESS_STRICT=1`) | **OK**, 121 properties across the five passes; kybernet span 508 ms under the old stamper, reactor wakeups 24, 24 service cgroups removed. The `/dev` node staging step reported SKIPPED locally (no `CAP_MKNOD` without sudo) |
 | `qemu/boot-test-aarch64.sh` (TCG, `HARNESS_STRICT=1`) | **OK**, 175 properties, all five passes; kybernet span 1,694 ms; CRNG seeded at 2.14 s, after phase 1 at 1.20 s |
 | sibling-free reproduction | a copy with no siblings and an **empty dep cache** clones every tag over HTTPS and reproduces a byte-identical lock and byte-identical binaries on both arches, agnos-init included |
+| `ci.yml` replayed in `ubuntu:26.04` | **22 of 23 steps green** on the fixed tree: x86 harness 121 on the 7.0 azure kernel (true span 578 ms), aarch64 175 on QEMU 10.2, suite 892 / 887. **The bench step flapped with the host, not the code:** the same tree flagged 0, 36, 0 and 28 benchmarks across four runs beside another workload (calibration 119 → 274 ns/op). That is the roadmap's saturated-host item. A hosted runner is not shared this way, so this replay says nothing about that step there |
 
 ## [1.7.11] — 2026-10-15
 

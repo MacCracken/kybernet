@@ -143,7 +143,7 @@ jobs:
         # from that list and state 1 starts publishing both arches again on its own.
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-user-static
+          sudo apt-get install -y --no-install-recommends qemu-user
 
           if AARCH64_KNOWN_BROKEN="" bash scripts/aarch64-exec-gate.sh; then
             echo "aarch64 boot-critical primitives are sound — publishing both arches"

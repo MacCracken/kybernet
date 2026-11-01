@@ -15,6 +15,11 @@ no code change, starts of a live service are refused, oneshot and forking starts
 unit assertions and one comment changed. Suite 892 / 887. Harness 121, aarch64 boot gate 175.
 kybernet is +35,792 B on x86_64 and +134,040 B on aarch64, nearly all of it the deps.
 
+Its first CI run failed: `ubuntu-latest` moved to Ubuntu 26.04, which has no `qemu-user-static`
+package. CI now installs `qemu-user`. Replaying `ci.yml` in `ubuntu:26.04` also showed the x86
+boot budget measuring its own stamper (true span about 490 ms, reported up to 1,297 ms), so
+`qemu/boot-test.sh` stamps with `$EPOCHREALTIME`. Both are part of 1.8.0 (standing rules 37, 39).
+
 **1.7.11**: `src/lib/read_whole.cyr` is gone. config.json and the mount table are read
 with the stdlib's `file_read_whole_into` (cyrius 6.6.7 fixed the filing the stopgap was
 for), which keeps the same `{ptr, cap}` contract: one buffer per call site, nothing
@@ -312,15 +317,14 @@ stricter bar on the next sweep.**
 
 ## In flight
 
-1.8.0 is cut in the working tree, not yet committed or tagged. `scripts/verify-lock.sh` reads
-HEAD's lock, so it fails until this release is committed; it passed on a scratch commit of the
-tree. One cyrius issue was filed on 2026-10-15 and is listed under "Waiting on cyrius" in
+1.8.0 is committed (`c59b675`) and not tagged, and its first CI run was red, so it has not
+shipped. The CI fixes are in the working tree, not yet committed. One cyrius issue was filed on 2026-10-15 and is listed under "Waiting on cyrius" in
 [roadmap.md](roadmap.md). The agnostik sweep the last release left open is done: taking 1.12.0
 adds `restart_policy_name` / `_parse` and the build shows no duplicate.
 
 ## Next
 
-The "Next" section of [roadmap.md](roadmap.md), in order; 21 open items in all.
+The "Next" section of [roadmap.md](roadmap.md), in order; 22 open items in all.
 
 1. **Every config load, SIGHUP included, costs ~4 bytes of arena per config byte.** It is
    PID 1 memory that never comes back, so it goes first.

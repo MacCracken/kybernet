@@ -80,7 +80,7 @@ if [ -z "$QEMU" ]; then
     echo "::error::no qemu-aarch64 user-mode emulator found"
     echo "  This is the ONLY gate that executes aarch64 code, and kybernet"
     echo "  publishes an aarch64 release artifact. Refusing to pass without it."
-    echo "  Debian/Ubuntu: apt-get install -y qemu-user-static"
+    echo "  Debian/Ubuntu: apt-get install -y qemu-user"
     echo "  Arch:          pacman -S qemu-user"
     echo "  Set ALLOW_AARCH64_EXEC_SKIP=1 to override on a host that cannot run it."
     if [ "${ALLOW_AARCH64_EXEC_SKIP:-0}" = "1" ]; then

@@ -4,7 +4,7 @@ What is still to do. What shipped is in [CHANGELOG.md](../../CHANGELOG.md), and 
 true right now, gate counts included, is in [state.md](state.md). A finished item is
 deleted from here, not ticked.
 
-**Open: 21** (`grep -c '^- \[ \]'` against this file).
+**Open: 22** (`grep -c '^- \[ \]'` against this file).
 
 ---
 
@@ -40,8 +40,13 @@ In the order they would be taken.
       and then 5 benchmarks, disjoint sets, and the first set came back about 50% faster on
       the second run. The calibration loop normalises CPU speed, not memory contention. An
       interleaved A/B against the previous release's tree, best of three, showed parity
-      within 5% on every flagged benchmark. Consider making that A/B the gate's own
+      within 5% on every flagged benchmark. At 1.8.0 the same tree flagged 0, 36, 0 and 28
+      across four runs beside another workload. Consider making that A/B the gate's own
       fallback when the history comparison flags.
+- [ ] **`test_boot_stage_results` reads the host's `/dev/console`.** The suite goes red in a
+      container started without a TTY: `stage: device_mgr skips` gets STAGE_FAIL, on both
+      arches, from a machine property (standing rule 37). Found at 1.8.0 by replaying CI in
+      `ubuntu:26.04`. Give the stage a path to check, or test it against a fixture.
 - [ ] **`json_v_obj_get` is deprecated in the bayan that cyrius 6.6.20 folds.** 21 call
       sites (20 in `src/lib/svc_config.cyr`, 1 in `src/main.cyr`) warn on every build. The
       alias forwards to `bayan_json_v_obj_get_by_cstr`; every key kybernet passes is a

@@ -213,14 +213,17 @@ jobs:
         # assertions in src/test.cyr that hardcoded x86_64 constants —
         # including the epoll_event data offset that WAS 1.4.2's CRITICAL-2.
         #
-        # qemu-user-static is a declared apt install, not a host capability
-        # this happens to find (standing rule 39). The gate carries a DECLARED
+        # qemu-user is a declared apt install, not a host capability this
+        # happens to find (standing rule 39). It is NOT qemu-user-static: Ubuntu
+        # 26.04 has no such package, only a virtual name, and qemu-user itself is
+        # the static binary there. The name works on 24.04 too, so this line does
+        # not depend on what ubuntu-latest points at. The gate carries a DECLARED
         # known-broken list and fails if the observed set drifts in either
         # direction — a new break, or a declared one that got fixed and left a
         # stale exception behind.
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-user-static
+          sudo apt-get install -y --no-install-recommends qemu-user
           bash scripts/aarch64-exec-gate.sh
 
       - name: aarch64 boot gate (kybernet-aarch64 as PID 1)
@@ -562,8 +565,8 @@ jobs:
         # kernel boot — so the override was compensating for the metric being
         # wrong rather than for kybernet being slow. 1.6.1 changed the gate to
         # kybernet's own span (`kybernet: starting` -> `kybernet: shutdown`),
-        # measured at 494 ms on this exact kernel, and the script's 1200 ms
-        # default already carries 2.4x headroom. Setting 8000 here now would
+        # measured at 480-534 ms on Ubuntu 26.04's azure kernel at 1.8.0, and the
+        # script's 1200 ms default carries 2.2x headroom. Setting 8000 here would
         # just re-blind the gate.
         #
         # WALL_CEILING_MS keeps a loose liveness bound on the whole VM; the

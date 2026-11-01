@@ -221,6 +221,13 @@ LOG=$(mktemp /tmp/kybernet-harness.XXXXXX.log)
 # boot budget can measure kybernet's own span instead of the runner's kernel.
 # $LOG stays byte-identical to the raw stream — every marker assertion below
 # reads it, and none of them should have to know about the timestamps.
+#
+# ⚠ THE STAMP MUST NOT FORK. Until 1.8.0 this was awk running `date +%s%N` per
+# line, so the stamper fell behind the serial stream and the span measured its
+# own backlog: 203 lines at about 4 ms a fork. On the same boots under the
+# Ubuntu 26.04 image, true span 480-534 ms, reported span 753-863 ms, and up to
+# 1,297 ms on a loaded host, over the budget with kybernet at under half of it.
+# Standing rule 37. $EPOCHREALTIME is a bash builtin (5.0+), in microseconds.
 TLOG="${LOG}.ts"
 trap "rm -f $LOG $TLOG" EXIT
 # KEEP_LOG=1 preserves the raw serial capture. The display pipeline below
@@ -252,7 +259,9 @@ timeout "$TIMEOUT" qemu-system-x86_64 \
     -nographic \
     -no-reboot \
     -serial mon:stdio 2>&1 \
-    | awk '{ "date +%s%N" | getline t; close("date +%s%N"); print t, $0; fflush() }' \
+    | while IFS= read -r _line || [ -n "$_line" ]; do
+          printf '%s %s\n' "${EPOCHREALTIME/[.,]/}000" "$_line"
+      done \
     | tee "$TLOG" \
     | sed 's/^[0-9][0-9]* //' \
     | tee "$LOG" \
@@ -952,9 +961,9 @@ fi
 # number. (1.6.1 did exactly that and found 82% of the old number was the
 # runner's kernel, which is why the gate moved to KYB_MS.)
 #
-# 1200 ms against a measured 119 ms on Arch and 494 ms on the azure kernel is
-# ~2.4x headroom over the slower of the two, on the metric that no longer
-# includes kernel boot.
+# 1200 ms against a measured 480-534 ms on Ubuntu 26.04's 7.0 azure kernel (25
+# services, 1.8.0) is ~2.2x headroom, on the metric that no longer includes
+# kernel boot.
 echo ""
 if [ "$KYB_MS" -lt 0 ]; then
     echo "  FAIL: could not time kybernet's span (missing start/shutdown marker)"
