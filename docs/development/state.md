@@ -6,12 +6,20 @@
 
 ## Version
 
+**1.11.1**: the TPM board on aarch64. Pass 7 of the aarch64 boot gate makes the x86 TPM board's five
+boots on aarch64: attestation, `veritysetup open` and the read-only mount, PCR 15 measured, the LUKS2
+token unsealed and the PCR capped, a swapped root and an unverified one refused, a corrupted block read
+as EIO. It boots Debian trixie's cloud-arm64 kernel through Debian's AAVMF, because neither Alpine
+aarch64 kernel builds a TPM TIS driver and only firmware measures PCR 7, with Debian's arm64 tools. All
+60 packages are pinned by sha256 to one snapshot.debian.org timestamp. No kybernet source changed, and
+all four binaries are 1.11.0's byte for byte. Suite 1056 / 1051. Harness 180, aarch64 boot gate 241.
+
 **1.11.0**: edge boot under emulation. A TPM board boots on swtpm in the x86 harness: PCR 7
 attestation, the verified root opened by dm-verity and mounted read-only, the root hash measured into
 PCR 15 before the LUKS2 token unlock and capped after it, so the key goes to this root once per boot
 (argonaut note 005). `luks_enabled` refuses a boot now, where it logged "deferred to hardware" and
 booted on. The first attestation found that a lowercase PCR baseline had never matched (since 1.5.7).
-New keys `root_mount`, `root_fstype` and `luks_name`. aarch64 runs the code ungated: roadmap 1.11.1.
+New keys `root_mount`, `root_fstype` and `luks_name`. aarch64 ran the code ungated until 1.11.1.
 Suite 1056 / 1051. Harness 180, aarch64 boot gate 205.
 
 **1.10.1**: the reactor spends nothing. argonaut 1.19.0 and kybernet's own restart path stop taking
@@ -320,6 +328,8 @@ and byte-identical, and the warning still fires.
 
 ## Binary
 
+Unchanged since 1.11.0: 1.11.1 touched no source the binaries are built from.
+
 | Arch | Bytes | `e_machine` |
 |---|---|---|
 | x86_64 (`CYRIUS_DCE=1`) | 1,129,392 | `0x3e` |
@@ -347,7 +357,7 @@ the build; that is standing rule 32.
 |---|---|---|
 | `cyrius test src/test.cyr` | **1056** assertions | floor read from CLAUDE.md; a shrinking suite fails |
 | `bash scripts/aarch64-exec-gate.sh` | **1051** assertions + 5 syscall probes | executes aarch64 under `qemu-user`; its own declared floor |
-| `bash qemu/boot-test-aarch64.sh` | **205** properties, all 6 passes, 32 services | boots `kybernet-aarch64` as PID 1 (TCG), entropy-starved; needs host `veritysetup` |
+| `bash qemu/boot-test-aarch64.sh` | **241** properties, 7 passes, 32 services, the TPM board's five boots | boots `kybernet-aarch64` as PID 1 (TCG), entropy-starved; needs host `veritysetup`, and swtpm for pass 7 |
 | `bash qemu/boot-test.sh` | **180** properties, 7 passes, the TPM board's five boots among them | `HARNESS_STRICT=1` in CI makes a skip a failure, a missing swtpm included |
 | `bash scripts/verify-lock.sh` | 2 halves, 5 commit pins | the committed lock (HEAD's, not the working tree's) vs a fresh resolve |
 | `bash scripts/bench-history.sh` | **56** benchmarks (1 reported-not-gated) | ≥15% flag against history, decided by a same-machine A/B against the previous tag; `LAYOUT_SENSITIVE` names the two exempt ones |
@@ -390,17 +400,18 @@ stricter bar on the next sweep.**
 
 ## In flight
 
-1.11.0 is cut in the working tree, not yet committed or tagged. 1.10.1 is tagged. No dep moved. Two
-issue files sit uncommitted in sibling repos: sigil's Unicode-tables issue and libro's `uuid_v4` issue.
+1.11.1 is cut in the working tree, not yet committed or tagged. 1.11.0 is tagged, and its CI run is
+green, the x86 TPM pass under the runner's AppArmor included. No dep moved. Two issue files sit
+uncommitted in sibling repos: sigil's Unicode-tables issue and libro's `uuid_v4` issue.
 
 ## Next
 
-**1.11.1, the TPM board on aarch64**, then the rest of the release plan in
+**1.11.2, a flake in the aarch64 stand-in check**, then the rest of the release plan in
 [roadmap.md](roadmap.md), where each of the 11 open items has a target release or a named gate.
 
 | Release | Theme |
 |---|---|
-| 1.11.1 | The TPM board on aarch64 |
+| 1.11.2 | A flake in the aarch64 stand-in check |
 | 1.12.0 | Non-root default services |
 
 ## Release order (cross-repo)

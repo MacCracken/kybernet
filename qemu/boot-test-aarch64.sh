@@ -53,6 +53,11 @@
 # the verdict drawn from the exit code, the refusal and the escape hatches. It does
 # NOT prove that the real veritysetup runs on aarch64.
 #
+# Pass 7 (1.11.1) does: the TPM board, with Debian's arm64 veritysetup, cryptsetup,
+# tpm2-tools and systemd's token plugin, on Debian's kernel and firmware, all pinned
+# in qemu/tpm-board-aarch64.pins. It is the only pass that boots anything but the
+# Alpine kernel; its header says why.
+#
 # ⚠ One x86 fixture has no counterpart here, deliberately: the busybox `kyb-seccomp`,
 # a glibc shell run under `seccomp: basic`. The `kyb-seccomp-on`/`-off` pair below
 # already asserts that the filter loads (`SC[2]-MODE=2`), and it does so on the static,
@@ -1473,6 +1478,498 @@ _prop "the control finished under the timeout" 'completed \(oneshot\): kyb-start
 _prop "a oneshot past the timeout was killed and failed" 'FAILED to start: kyb-start-slow' "$OUT6" 'kyb-start'
 _prop "its dependent was not started" 'SKIPPED \(prerequisite failed\): kyb-start-after' "$OUT6" 'kyb-start'
 _prop "the board powered down under its own control" 'reboot: Power down' "$OUT6"
+
+# ============================================================================
+# pass 7: the TPM board (1.11.1)
+# ============================================================================
+# The x86 harness's TPM board gate, on aarch64: attestation, the verified root
+# opened and mounted read-only, PCR 15 measured, the LUKS2 token unsealed and the
+# PCR capped, a swapped root and an unverified one refused, and a corrupted block
+# read as EIO. The same five boots and the same properties.
+#
+# ⚠ IT BOOTS A DIFFERENT KERNEL FROM PASSES 1-6, AND FIRMWARE. Neither Alpine aarch64
+# kernel builds a TPM TIS driver, so no QEMU TPM can appear on that board. This pass
+# boots Debian's cloud kernel through Debian's AAVMF, both pinned with every other
+# input in qemu/tpm-board-aarch64.pins. Firmware is not optional: PCR 7 is what
+# firmware measures, and a kernel QEMU starts directly leaves it all-zero, which
+# kybernet reads as an unread PCR, never as a match.
+#
+# The board's tools are Debian's arm64 builds, and the shared-library closure staged
+# with them is computed on every run from the binaries themselves, because an x86 host
+# cannot run aarch64 ldd. Its disks are virtio-blk, loaded by the pre-init with the
+# device-mapper modules, so it needs no RAM disks.
+#
+# Host side, as on x86: swtpm, systemd-cryptenroll for the token with the tpm2-tss
+# libraries it dlopen()s (tpm2-tools brings them), cryptsetup and veritysetup to format
+# the disks, e2fsprogs, plus depmod, dpkg-deb and python3 to unpack the pinned packages. A missing one fails this pass with its name, and
+# ALLOW_A64_TPM_SKIP=1 acknowledges that it did not run. The other passes run either
+# way (standing rule 38).
+echo
+echo "=== pass 7: aarch64 TPM board (swtpm, UEFI, PCR 15, a sealed LUKS2 token, dm-verity open) ==="
+TPM_PINS="${SCRIPT_DIR}/tpm-board-aarch64.pins"
+TPM_A64="${CACHE}/tpm-a64"
+TPM_TIMEOUT_S="${A64_TPM_TIMEOUT_S:-240}"
+TPM_WHY=""
+# A reason this pass cannot run that is the environment's, not kybernet's.
+_tpm_env() {
+    if [ "${ALLOW_A64_TPM_SKIP:-0}" = "1" ]; then
+        echo "  SKIP: $1 (ALLOW_A64_TPM_SKIP=1)."
+        echo "        ⚠ The TPM board executed NOTHING. A skip is not a pass."
+    else
+        echo "  FAIL: [env] $1. An environment failure, not a kybernet defect."
+        echo "        Install it, or set ALLOW_A64_TPM_SKIP=1 to acknowledge this pass did not run."
+        fail=1
+    fi
+}
+
+# Fetch, check and unpack every pinned input. Sets TPM_KERNEL, TPM_CODE, TPM_VARS,
+# TPM_KMOD and TPM_SYSROOT, or TPM_WHY and returns 1 (2 for an environment failure).
+_tpm_a64_inputs() {
+    local base sum path f got krel
+    local -a pinned=()
+    base="$(awk '$1 == "base" {print $2}' "$TPM_PINS")"
+    case "$base" in
+        https://snapshot.debian.org/archive/debian/[0-9]*T[0-9]*Z) ;;
+        *)
+            TPM_WHY="the pins' base is not a snapshot.debian.org timestamp (${base:-none}): any other URL can move"
+            return 1
+            ;;
+    esac
+    mkdir -p "${TPM_A64}/debs"
+    while read -r sum path; do
+        case "$sum" in '' | '#'* | base) continue ;; esac
+        f="${TPM_A64}/debs/${path##*/}"
+        pinned+=("$f")
+        if [ -f "$f" ] && [ "$(sha256sum "$f" | cut -d' ' -f1)" = "$sum" ]; then continue; fi
+        rm -f "$f"
+        if ! curl -sSf -L --retry 3 -o "$f.tmp" "${base}/${path}"; then
+            rm -f "$f.tmp"
+            TPM_WHY="could not fetch ${base}/${path}"
+            return 2
+        fi
+        got="$(sha256sum "$f.tmp" | cut -d' ' -f1)"
+        if [ "$got" != "$sum" ]; then
+            rm -f "$f.tmp"
+            TPM_WHY="checksum mismatch on ${path##*/}: pinned ${sum}, got ${got}"
+            return 1
+        fi
+        mv "$f.tmp" "$f"
+    done < "$TPM_PINS"
+
+    rm -rf "${TPM_A64}/kernel" "${TPM_A64}/fw" "${TPM_A64}/sysroot"
+    mkdir -p "${TPM_A64}/kernel" "${TPM_A64}/fw" "${TPM_A64}/sysroot"
+    # Only what the pins name: the cache keeps an older snapshot's files after a move.
+    for f in "${pinned[@]}"; do
+        case "${f##*/}" in
+            linux-image-*) dpkg-deb -x "$f" "${TPM_A64}/kernel" ;;
+            qemu-efi-aarch64_*) dpkg-deb -x "$f" "${TPM_A64}/fw" ;;
+            *) dpkg-deb -x "$f" "${TPM_A64}/sysroot" ;;
+        esac || { TPM_WHY="dpkg-deb could not unpack ${f##*/}"; return 1; }
+    done
+    TPM_KERNEL="$(ls "${TPM_A64}"/kernel/boot/vmlinuz-* 2> /dev/null | head -1 || true)"
+    krel="${TPM_KERNEL##*/vmlinuz-}"
+    TPM_KMOD="${TPM_A64}/kernel/usr/lib/modules/${krel}"
+    TPM_CODE="${TPM_A64}/fw/usr/share/AAVMF/AAVMF_CODE.secboot.fd"
+    TPM_VARS="${TPM_A64}/fw/usr/share/AAVMF/AAVMF_VARS.fd"
+    TPM_SYSROOT="${TPM_A64}/sysroot"
+    [ -n "$TPM_KERNEL" ] && [ -d "$TPM_KMOD" ] || { TPM_WHY="the kernel package holds no vmlinuz and modules"; return 1; }
+    [ -f "$TPM_CODE" ] && [ -f "$TPM_VARS" ] || { TPM_WHY="the firmware package holds no AAVMF secboot image"; return 1; }
+    # Debian generates modules.dep at install time, so it is not in the package. depmod
+    # reads either arch's modules; which base it wants depends on how kmod was built.
+    depmod -b "${TPM_A64}/kernel/usr" "$krel" 2> /dev/null || depmod -b "${TPM_A64}/kernel" "$krel" 2> /dev/null || true
+    [ -s "${TPM_KMOD}/modules.dep" ] || { TPM_WHY="depmod wrote no modules.dep for ${krel}"; return 1; }
+    return 0
+}
+
+# The shared-library closure of $2..., relative paths under the sysroot $1: each root
+# as given, each DT_NEEDED at the path the loader would take it from, and PT_INTERP.
+# "MISSING <soname>" for anything the sysroot cannot supply.
+_tpm_a64_closure() {
+    python3 -I - "$@" << 'CLOSUREPY'
+import os, struct, sys
+root, todo = sys.argv[1], list(sys.argv[2:])
+dirs = ['usr/lib/aarch64-linux-gnu', 'usr/lib', 'usr/lib/aarch64-linux-gnu/systemd']
+def elf(rel):
+    d = open(os.path.join(root, rel), 'rb').read()
+    if d[:4] != b'\x7fELF' or d[4] != 2 or d[5] != 1 or struct.unpack_from('<H', d, 18)[0] != 183:
+        sys.exit('not an aarch64 ELF: ' + rel)
+    phoff, = struct.unpack_from('<Q', d, 32)
+    phentsize, phnum = struct.unpack_from('<HH', d, 54)
+    loads, dyn, out = [], None, []
+    for i in range(phnum):
+        t, _, off, va, _, sz = struct.unpack_from('<IIQQQQ', d, phoff + i * phentsize)
+        if t == 1: loads.append((va, off, sz))
+        if t == 2: dyn = (off, sz)
+        if t == 3: out.append(('interp', d[off:off + sz].rstrip(b'\0').decode()))
+    if dyn is None: return out
+    def at(va):
+        for v, o, s in loads:
+            if v <= va < v + s: return va - v + o
+    ents, strtab = [], 0
+    for i in range(dyn[1] // 16):
+        tag, val = struct.unpack_from('<qQ', d, dyn[0] + i * 16)
+        if tag == 0: break
+        if tag == 5: strtab = at(val)
+        ents.append((tag, val))
+    for tag, val in ents:
+        if tag in (1, 15, 29):
+            s = d[strtab + val:d.index(b'\0', strtab + val)].decode()
+            out.append(('needed' if tag == 1 else 'path', s))
+    return out
+seen, missing = [], set()
+while todo:
+    rel = todo.pop(0)
+    if rel in seen: continue
+    seen.append(rel)
+    ents = elf(rel)
+    extra = [p.lstrip('/') for k, v in ents if k == 'path' for p in v.split(':') if '$' not in p]
+    for k, v in ents:
+        if k == 'interp':
+            todo.append('usr/' + v.lstrip('/') if v.startswith('/lib/') else v.lstrip('/'))
+        elif k == 'needed':
+            hit = [os.path.join(dd, v) for dd in extra + dirs if os.path.exists(os.path.join(root, dd, v))]
+            if hit: todo.append(hit[0])
+            else: missing.add(v)
+for s in seen: print(s)
+for m in sorted(missing): print('MISSING ' + m)
+CLOSUREPY
+}
+
+# A module and, first, every module modules.dep says it needs, into the stage's list.
+_tpm_a64_module() {
+    local name="$1" line rel dep
+    line="$(grep -E "(^|/)${name}\.ko(\.[a-z]+)?:" "${TPM_KMOD}/modules.dep" | head -1 || true)"
+    if [ -z "$line" ]; then
+        grep -qE "(^|/)${name}\.ko" "${TPM_KMOD}/modules.builtin" 2> /dev/null && return 0
+        TPM_WHY="the kernel has no ${name} module"
+        return 1
+    fi
+    rel="${line%%:*}"
+    for dep in ${line#*:}; do
+        _tpm_a64_module "$(basename "$dep" | sed 's/\.ko.*//')" || return 1
+    done
+    grep -qx "/kyb-board/m/${rel##*/}" "${TPM_STAGE}/kyb-board/modules" && return 0
+    cp "${TPM_KMOD}/${rel}" "${TPM_STAGE}/kyb-board/m/" || return 1
+    echo "/kyb-board/m/${rel##*/}" >> "${TPM_STAGE}/kyb-board/modules"
+}
+
+# One ext4 root for dm-verity: two files in two blocks, so a corruption in one leaves
+# the other readable (the x86 board's roots, qemu/build-initramfs.sh).
+_tpm_a64_root() {
+    rm -rf "$1"
+    mkdir -p "$1"
+    echo "$3" > "$1/hello.txt"
+    echo "KYB-SECOND-BLOCK" > "$1/other.txt"
+    mkfs.ext4 -q -F -b 4096 -O ^has_journal -E root_owner=0:0 -d "$1" "$2" 4M
+}
+
+# The stage and the disks. Sets TPM_STAGE and TPM_DISKS, or TPM_WHY and returns 1.
+_tpm_a64_board() {
+    local p lst blk i
+    TPM_STAGE="${TPM_A64}/stage"
+    TPM_DISKS="${TPM_A64}/disks"
+    rm -rf "$TPM_STAGE" "$TPM_DISKS"
+    mkdir -p "$TPM_STAGE"/{sbin,dev,proc,sys,run,tmp,etc/kybernet,usr/bin,usr/sbin,usr/lib,var/log,kyb-board/m} "$TPM_DISKS"
+    # Debian's binaries name /lib/ld-linux-aarch64.so.1, and trixie ships only /usr/lib.
+    ln -s usr/lib "$TPM_STAGE/lib"
+    cp "$BIN" "$TPM_STAGE/sbin/init"
+    cp "${FIX_DIR}/kyb-preinit-fixture" "$TPM_STAGE/kyb-preinit"
+    cp "${FIX_DIR}/kyb-svc-fixture" "$TPM_STAGE/usr/bin/kyb-svc-fixture"
+    chmod 755 "$TPM_STAGE/sbin/init" "$TPM_STAGE/kyb-preinit" "$TPM_STAGE/usr/bin/kyb-svc-fixture"
+    lst="${TPM_A64}/closure.txt"
+    # The token plugin dlopen()s tpm2-tss, and glibc dlopen()s libgcc_s, so no
+    # DT_NEEDED walk finds them: they are roots.
+    if ! _tpm_a64_closure "$TPM_SYSROOT" usr/sbin/cryptsetup usr/sbin/veritysetup usr/bin/tpm2 \
+        usr/lib/aarch64-linux-gnu/cryptsetup/libcryptsetup-token-systemd-tpm2.so \
+        usr/lib/aarch64-linux-gnu/libtss2-esys.so.0 usr/lib/aarch64-linux-gnu/libtss2-rc.so.0 \
+        usr/lib/aarch64-linux-gnu/libtss2-mu.so.0 usr/lib/aarch64-linux-gnu/libtss2-tctildr.so.0 \
+        usr/lib/aarch64-linux-gnu/libtss2-tcti-device.so.0 usr/lib/aarch64-linux-gnu/libgcc_s.so.1 \
+        > "$lst" 2>&1; then
+        TPM_WHY="the library closure could not be computed: $(tail -1 "$lst" 2> /dev/null || true)"
+        return 1
+    fi
+    if grep -q '^MISSING ' "$lst"; then
+        TPM_WHY="the pinned packages lack $(grep '^MISSING ' "$lst" | cut -d' ' -f2 | tr '\n' ' ')"
+        return 1
+    fi
+    while read -r p; do
+        mkdir -p "$TPM_STAGE/$(dirname "$p")"
+        cp -L "$TPM_SYSROOT/$p" "$TPM_STAGE/$p" || { TPM_WHY="cannot stage $p"; return 1; }
+    done < "$lst"
+    # sigil reads PCRs through this exact path. tpm2 is a multi-call binary that
+    # dispatches on its argv[0], as the x86 board's copies of the host's tools do.
+    cp -L "$TPM_SYSROOT/usr/bin/tpm2" "$TPM_STAGE/usr/bin/tpm2_pcrread"
+    cp -L "$TPM_SYSROOT/usr/bin/tpm2" "$TPM_STAGE/usr/bin/tpm2_pcrextend"
+    : > "$TPM_STAGE/kyb-board/modules"
+    # xts is loaded by name: dm-crypt asks the crypto API for xts(aes), which would
+    # need a modprobe, and modules.dep does not list it.
+    for p in tpm_tis virtio_blk xts dm-crypt dm-verity; do
+        _tpm_a64_module "$p" || return 1
+    done
+
+    # Two roots with valid hash trees: the board's own, and an attacker's.
+    _tpm_a64_root "${TPM_DISKS}/tree" "${TPM_DISKS}/data.img" "KYB-VERIFIED-ROOT" || { TPM_WHY="mkfs.ext4 failed"; return 1; }
+    _tpm_a64_root "${TPM_DISKS}/tree2" "${TPM_DISKS}/data2.img" "KYB-SWAPPED-ROOT" || { TPM_WHY="mkfs.ext4 failed"; return 1; }
+    for i in "" 2; do
+        truncate -s 1M "${TPM_DISKS}/hash${i}.img"
+        veritysetup format "${TPM_DISKS}/data${i}.img" "${TPM_DISKS}/hash${i}.img" 2> /dev/null \
+            | awk '/Root hash/{print $3}' > "${TPM_DISKS}/root_hash${i}.txt" || true
+        [ "$(wc -c < "${TPM_DISKS}/root_hash${i}.txt")" -eq 65 ] || { TPM_WHY="veritysetup format failed"; return 1; }
+    done
+    # The board's root with hello.txt's block overwritten.
+    blk="$(debugfs -R "blocks /hello.txt" "${TPM_DISKS}/data.img" 2> /dev/null | awk '{print $1}' || true)"
+    [ -n "$blk" ] || { TPM_WHY="debugfs found no block for hello.txt"; return 1; }
+    cp "${TPM_DISKS}/data.img" "${TPM_DISKS}/data-corrupt.img"
+    printf 'KYB-CORRUPTED-BLOCK' | dd of="${TPM_DISKS}/data-corrupt.img" bs=1 seek=$((blk * 4096)) conv=notrunc status=none
+    rm -rf "${TPM_DISKS}/tree" "${TPM_DISKS}/tree2"
+    echo "  staged: $(wc -l < "$lst") files of the closure, $(wc -l < "$TPM_STAGE/kyb-board/modules") modules, kernel ${TPM_KERNEL##*/vmlinuz-}"
+    return 0
+}
+
+TPM_A64_RUN=0
+_tpm_missing=""
+for t in swtpm swtpm_setup systemd-cryptenroll cryptsetup veritysetup mkfs.ext4 debugfs depmod dpkg-deb python3 curl; do
+    command -v "$t" > /dev/null 2>&1 || _tpm_missing="${_tpm_missing} ${t}"
+done
+if [ -n "$_tpm_missing" ]; then
+    _tpm_env "the host lacks${_tpm_missing}"
+else
+    _tpm_rc=0
+    _tpm_a64_inputs || _tpm_rc=$?
+    if [ "$_tpm_rc" = 2 ]; then
+        _tpm_env "$TPM_WHY"
+    elif [ "$_tpm_rc" != 0 ]; then
+        echo "  FAIL: the pinned inputs are unusable: ${TPM_WHY}"
+        fail=1
+    elif ! _tpm_a64_board; then
+        echo "  FAIL: the TPM board could not be staged: ${TPM_WHY}"
+        fail=1
+    else
+        TPM_A64_RUN=1
+    fi
+fi
+
+if [ "$TPM_A64_RUN" = 1 ]; then
+    TW="$(mktemp -d /tmp/kybernet-tpm.XXXXXX)"
+    _hexbin() { printf "$(printf '%s' "$1" | sed 's/../\\x&/g')"; }
+    # SHA-256 of the bytes a hex string encodes, and a PCR extend: SHA-256(old || digest).
+    _sha_hex() { _hexbin "$1" | sha256sum | cut -c1-64; }
+    _extend() { { _hexbin "$1"; _hexbin "$2"; } | sha256sum | cut -c1-64; }
+    _lower() { tr 'A-F' 'a-f'; }
+    # $1 label, $2 a fixed string that must be in log $3.
+    _tpm_has() {
+        if grep -aqF "$2" "$3"; then
+            echo "  OK: [$1] $2"
+        else
+            echo "  FAIL: [$1] missing: $2"
+            grep -aE 'edge boot|PREINIT|READ-|FAILED|REFUSED|ST\[' "$3" | head -12 | sed 's/^/        /' || true
+            fail=1
+        fi
+    }
+    _tpm_lacks() {
+        if grep -aqF "$2" "$3"; then
+            echo "  FAIL: [$1] present: $2"
+            fail=1
+        else
+            echo "  OK: [$1] absent: $2"
+        fi
+    }
+    _tpm_unpacked() {
+        if grep -aqF "Initramfs unpacking failed" "$2"; then
+            echo "  FAIL: [$1] the kernel could not unpack the board's initrd, so its config never landed"
+            fail=1
+        fi
+    }
+    # A boot's initrd: the stage with this boot's config, as one archive (the x86
+    # pass says why it is never an appended overlay).
+    _tpm_initrd() {
+        cp "$1" "$TPM_STAGE/etc/kybernet/config.json"
+        ( cd "$TPM_STAGE" && find . | cpio -o -H newc 2> /dev/null | gzip -1 ) > "${TW}/boot.cpio.gz"
+    }
+    # One boot on the swtpm, through the firmware. $1 data image, $2 hash image, $3 log.
+    # 1 GiB, as on x86: the board unpacks to ~40 MB of glibc tools.
+    _tpm_boot() {
+        rm -f "${TW}/q.ctrl" "${TW}/swtpm.pid"
+        swtpm socket --tpm2 --tpmstate "dir=${TW}/state" --ctrl "type=unixio,path=${TW}/q.ctrl" \
+            --terminate --daemon --pid "file=${TW}/swtpm.pid" > "${TW}/swtpm.log" 2>&1 || true
+        local i=0
+        while [ ! -S "${TW}/q.ctrl" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+        if [ ! -S "${TW}/q.ctrl" ]; then
+            echo "  FAIL: [env] swtpm did not start, so this boot has no TPM:"
+            tail -3 "${TW}/swtpm.log" 2> /dev/null | sed 's/^/        /' || true
+            fail=1
+        fi
+        # A fresh variable store per boot, so the firmware measures the same PCR 7 every time.
+        cp "$TPM_VARS" "${TW}/vars.fd"
+        timeout "$TPM_TIMEOUT_S" qemu-system-aarch64 \
+            -M virt -cpu cortex-a57 -m 1024M -smp 1 -nic none \
+            -drive "if=pflash,format=raw,readonly=on,file=${TPM_CODE}" \
+            -drive "if=pflash,format=raw,file=${TW}/vars.fd" \
+            -chardev "socket,id=chrtpm,path=${TW}/q.ctrl" -tpmdev emulator,id=tpm0,chardev=chrtpm \
+            -device tpm-tis-device,tpmdev=tpm0 \
+            -drive "if=none,id=d0,file=$1,format=raw" -device virtio-blk-pci,drive=d0 \
+            -drive "if=none,id=d1,file=$2,format=raw" -device virtio-blk-pci,drive=d1 \
+            -drive "if=none,id=d2,file=${TW}/luks.img,format=raw" -device virtio-blk-pci,drive=d2 \
+            -kernel "$TPM_KERNEL" -initrd "${TW}/boot.cpio.gz" \
+            -append "console=ttyAMA0 rdinit=/kyb-preinit kybernet.harness=1 panic=1" \
+            -nographic -no-reboot -serial mon:stdio < /dev/null > "$3" 2>&1 || true
+        if [ -f "${TW}/swtpm.pid" ]; then kill "$(cat "${TW}/swtpm.pid")" 2> /dev/null || true; fi
+        _check_qemu_env "$3"
+    }
+    # $1 file, $2 root hash, $3 readonly, $4 luks, $5 extra edge keys, $6 services
+    _tpm_cfg() {
+        cat > "$1" << TPMCFG
+{
+  "boot_mode": "edge",
+  "verify_boot": true,
+  "shutdown_timeout_ms": 400,
+  "edge": {
+    "readonly_rootfs": $3,
+    "luks_enabled": $4,
+    "max_boot_ms": 60000,
+    "root_device": "/dev/vda",
+    "hash_device": "/dev/vdb",
+    "luks_device": "/dev/vdc",
+    "root_hash": "$2"$5
+  },
+  "services": [$6
+  ]
+}
+TPMCFG
+    }
+    _svc() { printf '\n    { "name": "%s", "binary": "%s", "args": [%s], "type": "oneshot", "restart": "never" }%s' "$1" "$2" "$3" "$4"; }
+    FX=/usr/bin/kyb-svc-fixture
+    CS=/usr/sbin/cryptsetup
+    RH="$(cat "${TPM_DISKS}/root_hash.txt")"
+    RH2="$(cat "${TPM_DISKS}/root_hash2.txt")"
+    _tpm_ok=1
+    mkdir -p "${TW}/state"
+    swtpm_setup --tpm2 --tpmstate "${TW}/state" > "${TW}/setup.log" 2>&1 || _tpm_ok=0
+    truncate -s 32M "${TW}/luks.img"
+    printf 'kyb-bootstrap' > "${TW}/pw"
+    chmod 600 "${TW}/pw"
+    cryptsetup luksFormat --type luks2 --batch-mode --key-file "${TW}/pw" --pbkdf pbkdf2 \
+        --pbkdf-force-iterations 1000 "${TW}/luks.img" > "${TW}/luks.log" 2>&1 || _tpm_ok=0
+    if [ "$_tpm_ok" != 1 ]; then
+        echo "  FAIL: the TPM board could not be prepared: swtpm_setup or luksFormat failed"
+        cat "${TW}/setup.log" "${TW}/luks.log" 2> /dev/null | tail -4 | sed 's/^/        /' || true
+        fail=1
+    else
+        # 1. Read the firmware's PCR 7, which the token is sealed to.
+        T1="${CACHE}/a64-tpm-measure.log"
+        _tpm_cfg "${TW}/c.json" "$RH" true false "" "$(_svc kyb-pcr7 "$FX" '"read", "/sys/class/tpm/tpm0/pcr-sha256/7"' '')"
+        _tpm_initrd "${TW}/c.json"
+        _tpm_boot "${TPM_DISKS}/data.img" "${TPM_DISKS}/hash.img" "$T1"
+        _assert_no_panic "$T1" "tpm measure"
+        _tpm_unpacked "tpm measure" "$T1"
+        _tpm_has "tpm measure" "PREINIT-OK" "$T1"
+        _tpm_has "tpm measure" "edge boot: TPM detected" "$T1"
+        P7="$(sed -n 's/.*READ-\/sys\/class\/tpm\/tpm0\/pcr-sha256\/7=\([0-9A-Fa-f]\{64\}\).*/\1/p' "$T1" | head -1 | _lower)"
+        Z="$(printf '0%.0s' $(seq 1 64))"
+        if [ -z "$P7" ] || [ "$P7" = "$Z" ]; then
+            echo "  FAIL: [tpm measure] no PCR 7 from the firmware (read '${P7}'), so nothing can be enrolled"
+            fail=1
+        else
+            echo "  OK: [tpm measure] the firmware's PCR 7: ${P7}"
+            MEAS="$(_sha_hex "$RH")"
+            P15="$(_extend "$Z" "$MEAS")"
+            CAP="$(printf '%s' "kybernet: data volume unlocked" | sha256sum | cut -c1-64)"
+            P15CAP="$(_extend "$P15" "$CAP")"
+            # 2. Enrol the token on the host, to PCR 7 + the PCR 15 this root measures.
+            rm -f "${TW}/e.sock" "${TW}/e.sock.ctrl" "${TW}/e.pid"
+            swtpm socket --tpm2 --tpmstate "dir=${TW}/state" --server "type=unixio,path=${TW}/e.sock" \
+                --ctrl "type=unixio,path=${TW}/e.sock.ctrl" --flags startup-clear --daemon \
+                --pid "file=${TW}/e.pid" > "${TW}/swtpm-e.log" 2>&1 || true
+            i=0
+            while [ ! -S "${TW}/e.sock" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+            ENR="$(systemd-cryptenroll "--tpm2-device=swtpm:path=${TW}/e.sock" "--unlock-key-file=${TW}/pw" \
+                "--tpm2-pcrs=7:sha256=${P7}+15:sha256=${P15}" "${TW}/luks.img" 2>&1 || true)"
+            if [ -f "${TW}/e.pid" ]; then kill "$(cat "${TW}/e.pid")" 2> /dev/null || true; fi
+            sleep 0.3
+            if grep -aqF "New TPM2 token enrolled" <<< "$ENR"; then
+                echo "  OK: [tpm enrol] New TPM2 token enrolled"
+            else
+                echo "  FAIL: [tpm enrol] systemd-cryptenroll enrolled no token (the host side, not kybernet):"
+                { echo "$ENR"; cat "${TW}/swtpm-e.log" 2> /dev/null; } | tail -4 | sed 's/^/        /' || true
+                fail=1
+            fi
+
+            # 3. The board's own root.
+            T2="${CACHE}/a64-tpm-board.log"
+            SV="$(_svc kyb-read-root "$FX" '"read", "/verified/hello.txt"' ',')"
+            SV="${SV}$(_svc kyb-ro-write "$FX" '"write", "/verified/kyb-write", "x"' ',')"
+            SV="${SV}$(_svc kyb-pcr15 "$FX" '"read", "/sys/class/tpm/tpm0/pcr-sha256/15"' ',')"
+            SV="${SV}$(_svc kyb-mapper "$FX" '"stat", "/dev/mapper/agnos-data", "/dev/mapper/verified-root"' ',')"
+            SV="${SV}$(_svc kyb-cap-check "$CS" '"open", "--test-passphrase", "--type", "luks2", "--token-only", "--token-id", "0", "--tries", "1", "--", "/dev/vdc"' '')"
+            _tpm_cfg "${TW}/c.json" "$RH" true true ", \"tpm_attestation\": true, \"pcr_bindings\": \"7\", \"expected_pcrs\": [\"${P7}\"], \"root_mount\": \"/verified\"" "$SV"
+            _tpm_initrd "${TW}/c.json"
+            _tpm_boot "${TPM_DISKS}/data.img" "${TPM_DISKS}/hash.img" "$T2"
+            _assert_no_panic "$T2" "tpm board"
+            _tpm_unpacked "tpm board" "$T2"
+            _tpm_has "tpm board" "PREINIT-OK" "$T2"
+            _tpm_has "tpm board" "all configured PCR baselines MATCH" "$T2"
+            _tpm_has "tpm board" "dm-verity integrity VERIFIED" "$T2"
+            _tpm_has "tpm board" "verified root mounted read-only at /verified" "$T2"
+            _tpm_has "tpm board" "verified root measured into PCR 15" "$T2"
+            _tpm_has "tpm board" "edge boot: data volume unlocked: /dev/mapper/agnos-data" "$T2"
+            _tpm_has "tpm board" "edge boot: PCR 15 capped" "$T2"
+            _tpm_has "tpm board" "READ-/verified/hello.txt=KYB-VERIFIED-ROOT" "$T2"
+            _tpm_has "tpm board" "FAILED to start: kyb-ro-write" "$T2"
+            _tpm_has "tpm board" "ST[kyb-mapper]-STAT-/dev/mapper/agnos-data=other" "$T2"
+            GOT15="$(sed -n 's/.*READ-\/sys\/class\/tpm\/tpm0\/pcr-sha256\/15=\([0-9A-Fa-f]\{64\}\).*/\1/p' "$T2" | head -1 | _lower)"
+            if [ "$GOT15" = "$P15CAP" ]; then
+                echo "  OK: [tpm board] PCR 15 is the enrolled value extended by the cap: ${GOT15}"
+            else
+                echo "  FAIL: [tpm board] PCR 15 is '${GOT15}', expected the cap over the enrolled ${P15}: ${P15CAP}"
+                fail=1
+            fi
+            _tpm_has "tpm board" "FAILED to start: kyb-cap-check" "$T2"
+            _tpm_lacks "tpm board" "completed (oneshot): kyb-cap-check" "$T2"
+
+            # 4. A swapped root, valid against its own hash: no key.
+            T3="${CACHE}/a64-tpm-swap.log"
+            _tpm_cfg "${TW}/c.json" "$RH2" true true "" ""
+            _tpm_initrd "${TW}/c.json"
+            _tpm_boot "${TPM_DISKS}/data2.img" "${TPM_DISKS}/hash2.img" "$T3"
+            _assert_no_panic "$T3" "tpm swap"
+            _tpm_unpacked "tpm swap" "$T3"
+            _tpm_has "tpm swap" "dm-verity integrity VERIFIED" "$T3"
+            _tpm_has "tpm swap" "verified root measured into PCR 15" "$T3"
+            _tpm_has "tpm swap" "LUKS unlock FAILED" "$T3"
+            _tpm_has "tpm swap" "FATAL: LUKS unlock FAILED - the TPM released no key for this root" "$T3"
+            _tpm_has "tpm swap" "refusing to continue boot without edge prerequisites" "$T3"
+            _tpm_lacks "tpm swap" "data volume unlocked" "$T3"
+
+            # 5. The board's own hash over a corrupted root: only the refusal of an
+            # unverified root keeps the key from it (the x86 pass says why).
+            T5="${CACHE}/a64-tpm-unverified.log"
+            _tpm_cfg "${TW}/c.json" "$RH" false true "" ""
+            _tpm_initrd "${TW}/c.json"
+            _tpm_boot "${TPM_DISKS}/data-corrupt.img" "${TPM_DISKS}/hash.img" "$T5"
+            _assert_no_panic "$T5" "tpm unverified"
+            _tpm_unpacked "tpm unverified" "$T5"
+            _tpm_has "tpm unverified" "dm-verity verification FAILED" "$T5"
+            _tpm_has "tpm unverified" "FATAL: LUKS unlock needs a verified root" "$T5"
+            _tpm_lacks "tpm unverified" "verified root measured into PCR 15" "$T5"
+            _tpm_lacks "tpm unverified" "data volume unlocked" "$T5"
+        fi
+
+        # 6. A corrupted root, allowed on: EIO from the bad block only.
+        T4="${CACHE}/a64-tpm-corrupt.log"
+        SV="$(_svc kyb-read-root "$FX" '"read", "/verified/hello.txt"' ',')"
+        SV="${SV}$(_svc kyb-read-other "$FX" '"read", "/verified/other.txt"' '')"
+        _tpm_cfg "${TW}/c.json" "$RH" false false ", \"root_mount\": \"/verified\"" "$SV"
+        _tpm_initrd "${TW}/c.json"
+        _tpm_boot "${TPM_DISKS}/data-corrupt.img" "${TPM_DISKS}/hash.img" "$T4"
+        _assert_no_panic "$T4" "tpm corrupt"
+        _tpm_unpacked "tpm corrupt" "$T4"
+        _tpm_has "tpm corrupt" "dm-verity verification FAILED" "$T4"
+        _tpm_has "tpm corrupt" "verified root mounted read-only at /verified" "$T4"
+        _tpm_has "tpm corrupt" "READ-/verified/hello.txt-ERRNO=5" "$T4"
+        _tpm_has "tpm corrupt" "READ-/verified/other.txt=KYB-SECOND-BLOCK" "$T4"
+    fi
+    rm -rf "$TW"
+fi
 
 echo
 if [ "$fail" -eq 0 ]; then

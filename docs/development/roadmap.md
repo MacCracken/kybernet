@@ -3,7 +3,7 @@
 Forward work only. What shipped is in [CHANGELOG.md](../../CHANGELOG.md), and what is true
 right now, gate counts included, is in [state.md](state.md).
 
-**Current release: 1.11.0** (cyrius 6.7.18, argonaut 1.19.0, libro 2.11.3, agnostik 2.0.0,
+**Current release: 1.11.1** (cyrius 6.7.18, argonaut 1.19.0, libro 2.11.3, agnostik 2.0.0,
 sigil 3.13.15).
 
 **Every open item has a target release.** The order is the dependency order: a later release
@@ -21,7 +21,7 @@ never take one, and a comment-only item ships with a release that has code in it
 
 | Release | Theme | Items | Waits on |
 |---|---|---:|---|
-| [1.11.1](#1111--the-tpm-board-on-aarch64) | The TPM board on aarch64 | 1 | nothing outside these repos |
+| [1.11.2](#1112--a-flake-in-the-aarch64-stand-in-check) | A flake in the aarch64 stand-in check | 1 | nothing outside these repos |
 | [1.12.0](#1120--non-root-default-services) | Non-root default services | 1 | agnosticos' config, argonaut's `default_services` |
 | [Gated](#gated) | Unnumbered until the gate opens | 9 | hardware, a consumer, or a dep's release |
 
@@ -36,22 +36,14 @@ compiler-emitted call, and replay `ci.yml` in the runner's image (CHANGELOG [1.8
 
 ---
 
-## 1.11.1 — The TPM board on aarch64
+## 1.11.2 — A flake in the aarch64 stand-in check
 
-1.11.0's edge paths run on x86 only, and kybernet ships aarch64 (standing rule 44).
-
-- [ ] **Boot the TPM board on aarch64.** The measure, unlock, cap, `veritysetup open` and
-      read-only mount execute only in the x86 harness's TPM pass. The aarch64 edge pass
-      verifies with a Cyrius stand-in and boots no TPM. The new code is arch-neutral
-      (`run_safe_cmd_timeout`, `sys_mount`, `sys_mkdir`), and rule 44 says that is not
-      evidence. It needs arm64 builds of cryptsetup, veritysetup, tpm2-tools and systemd's
-      LUKS2 token plugin with their libraries, from URLs that do not move:
-      snapshot.debian.org's arm64 pool, sha256-pinned, because Alpine's mirror deletes a
-      rebuilt version (rule 52). It also needs the pinned kernel's dm-crypt and dm-verity
-      from its versioned modloop, QEMU's `tpm-tis-device` on `virt`, and an aarch64 arm in
-      the pre-init's loader. `finit_module` is 273 there and the stdlib has no wrapper, and
-      x86 273 is `set_robust_list`, so check the native number under `qemu-aarch64
-      -strace` (rule 1).
+- [ ] **The corrupted-hash-tree case fails about 1 run in 256.** `qemu/boot-test-aarch64.sh` corrupts
+      its hash tree by writing `X` over byte 4100, inside the first digest of a tree over
+      `/dev/urandom` data. When that byte already is `X`, nothing changes, the host's veritysetup
+      exits 0 where the check requires 2, and the edge and auth passes report "not run". Seen once
+      in the 1.11.1 mutation runs. Flip the byte instead of overwriting it. The 9-byte overwrites
+      elsewhere are not affected.
 
 ## 1.12.0 — Non-root default services
 

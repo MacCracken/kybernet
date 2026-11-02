@@ -7,6 +7,132 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.11.1] — 2026-11-02
+
+**The TPM board on aarch64.** 1.11.0's edge paths now run on aarch64 too: attestation, `veritysetup
+open` and the read-only mount, PCR 15 measured, the LUKS2 token unsealed and the PCR capped. They run in
+a seventh pass of the aarch64 boot gate, which makes the x86 TPM board's five boots and checks the same
+properties. kybernet's code needed nothing for aarch64, and no kybernet source changed: all four
+binaries are 1.11.0's byte for byte. Suite 1056 / 1051. Harness 180, aarch64 boot gate 241.
+
+### Added — pass 7 of the aarch64 boot gate: the TPM board
+
+| Boot | What it must show |
+|---|---|
+| measure | the firmware's PCR 7, nonzero, from sysfs. The token is enrolled to it and to the PCR 15 the gate computes on its own |
+| the board | baselines MATCH; verified, mounted read-only (a write fails), measured, unlocked and capped; PCR 15 exactly the enrolled value extended by the cap; and from inside, after the cap, a second unseal fails |
+| a swapped root | valid against its own hash: verified and measured, then no key, and the boot refused |
+| an unverified root | the board's own hash over a corrupted root: refused before anything is measured |
+| a corrupted root, allowed on | EIO from the corrupted block, and the other block still reads |
+
+Between the first two boots the gate enrols the token on the host, with systemd-cryptenroll
+against the same swtpm state. The pass passed on its first run with every host tool present.
+
+### Changed — the route the roadmap named did not exist
+
+The roadmap planned to boot the gate's pinned Alpine kernel with QEMU's `tpm-tis-device` and the dm
+modules from Alpine's modloop. **Neither Alpine aarch64 kernel builds a TPM TIS driver**:
+`CONFIG_TCG_TIS` is unset in both the lts and virt configs Alpine publishes beside them. Only the SPI
+variant is built, and QEMU has no SPI TPM on `virt`, so no QEMU TPM could ever appear on that board.
+Pass 7 boots its own kernel and firmware instead. The other six passes keep the Alpine kernel.
+
+- **Kernel: Debian trixie's cloud-arm64 6.12.107.** It builds tpm_tis, dm-crypt, dm-verity,
+  virtio-blk and xts as modules, and ext4 and virtio-pci in.
+- **Firmware: Debian's AAVMF.** Booted straight into the kernel, the board's PCR 7 reads all-zero,
+  because nothing measures it, and kybernet correctly treats an all-zero PCR as unread, never a match.
+  Firmware is what measures PCR 7. ⚠ **Only AAVMF's secure-boot build has TPM2 support.** Debian's
+  `debian/rules` gives `-DTPM2_ENABLE` to `AAVMF_COMMON_FLAGS`, which the no-secboot build does not
+  use. Booting that build showed it: the kernel had to start the TPM itself ("starting up the TPM
+  manually"), and PCRs 0 and 7 read zero. The secboot build with its empty variable store measures
+  both, and leaves secure boot in setup mode, so nothing is enforced.
+- **Tools: Debian's arm64 builds** of veritysetup and cryptsetup (2.7.5), tpm2-tools (5.7) and
+  systemd's LUKS2 TPM2 token plugin (257), all from trixie.
+
+All 60 inputs are pinned in `qemu/tpm-board-aarch64.pins`, one `<sha256> <path>` per line: the kernel,
+the firmware, and 58 packages. Every path is under one snapshot.debian.org timestamp, where a file
+never changes (standing rules 50 and 52), and the harness refuses a base URL that is not a snapshot
+timestamp. The download is about 46 MB, cached in `qemu/.cache/tpm-a64/`, and a file that does not
+match its sum is a failure, never a retry. Only the files the pins name are unpacked, so an older
+snapshot left in the cache cannot be booted by mistake. A first draft unpacked the whole cache
+directory, and a planted stale kernel whose name sorted first would have been the one booted. Moving
+the snapshot means changing every line.
+
+**The library closure is computed on every run.** An x86 host cannot run aarch64 `ldd`, so a
+short Python walker reads `PT_INTERP`, `DT_NEEDED` and `RUNPATH` out of the binaries and stages each
+library at the path the loader takes it from: 66 files. It refuses any file that is not an aarch64
+ELF (`e_machine` 183), and a soname the pinned packages cannot supply fails the staging with its name.
+The 58 packages are exactly those that ship a file the board loads, worked out the same way. The token
+plugin `dlopen()`s tpm2-tss and glibc `dlopen()`s libgcc_s, so those are roots of the walk.
+
+**The pre-init loads nine modules**: tpm_tis_core, tpm_tis, virtio_blk, xts, dm-mod, dm-crypt,
+dm-bufio, reed_solomon and dm-verity. Debian ships no `modules.dep`, so `depmod` writes one on every
+run; kmod reads either arch's modules. xts is loaded by name, because dm-crypt asks the crypto API for
+`xts(aes)`, which needs a modprobe, and `modules.dep` does not list it. The disks are virtio-blk, so
+this board needs no RAM disks.
+
+**`qemu/preinit-fixture.cyr` loads modules on aarch64.** `finit_module` is 273 there and the stdlib has
+no wrapper, and x86 273 is `set_robust_list`, which the syscall ladder could claim (standing rule 1).
+`qemu-aarch64 -strace` at cyrius 6.7.18 shows 273 issuing `finit_module`, as a literal and as a
+variable, and 313 as an unknown syscall. Rule 1 now lists 273 among the native numbers to re-check at
+every toolchain bump.
+
+**A missing host tool fails pass 7 with its name**, and `ALLOW_A64_TPM_SKIP=1` acknowledges that it
+did not run. The other six passes run either way (standing rule 38). It fired on its first container
+run, which had no `curl`. CI's aarch64 step now installs swtpm, swtpm-tools, tpm2-tools,
+systemd-cryptsetup, e2fsprogs, kmod and python3. curl and dpkg-deb are already on the runner.
+⚠ tpm2-tools is there for its tpm2-tss libraries, which systemd-cryptenroll `dlopen()`s. The first
+CI replay of this job in `ubuntu:26.04` ran without it, and the enrolment failed with `TPM device
+not usable as it does not support the required functionality (AES-128-CFB missing?)`. That names
+the TPM, not the missing libraries. The x86 job had always installed tpm2-tools, so it never saw
+this.
+
+### Gates
+
+The aarch64 boot gate takes about 2.5 minutes under TCG, of which pass 7 is about 45 s, and the
+TPM board's boots take 5 to 10 s each. This host has no swtpm, so pass 7 ran in an Ubuntu 26.04
+container. The other passes ran both there and on the host.
+
+Defects injected on aarch64, each in its own tree, through the whole aarch64 gate. The first nine are
+1.11.0's, built into `kybernet-aarch64`:
+
+| Defect injected | What went red |
+|---|---|
+| No cap after the unlock | PCR 15 was not the cap's value, and the second unseal from inside succeeded |
+| No measurement before the unlock | the TPM released no key, so the board refused |
+| The root hash's 64 hex characters measured, not its 32 bytes | the same: no key, and refused |
+| A refused unlock not refused | the swapped root booted on and logged `data volume unlocked` |
+| An unverified root allowed to unlock | the board's own hash over a corrupted root was measured and got the key |
+| Opened with argonaut's `--restart-on-corruption` | the corrupted read rebooted the board, so `hello.txt` never read EIO |
+| Baselines compared by case again | `all configured PCR baselines MATCH` |
+| Mounted without `MS_RDONLY` | the kernel refused, as on x86, so the board refused |
+| The raw root device mounted instead of the target | the kernel refused, as on x86, so the board refused |
+| The pre-init issuing x86's `finit_module` (313) on aarch64 | no module loaded: no `PREINIT-OK`, no TPM, no PCR 7, nothing to enrol |
+
+Passes 1 to 6 stayed green through every one of them: none of those passes loads modules or reaches
+the measured unlock.
+
+⚠ **One mutation run also hit a flake in the existing stand-in check**, which is not this release's
+code. The check corrupts its hash tree by writing `X` over one byte of a tree built from random data,
+so about 1 run in 256 changes nothing and the check fails. It is roadmap 1.11.2. Separately, the first
+batch of runs ran out of tmpfs: one tree copy got an empty `edge_boot.cyr` and could not build. Those
+runs were repeated with smaller copies and builds done one at a time.
+
+The x86 harness, strict in the container, passed 180 of 180, its TPM pass on the changed pre-init
+included. The sibling-free reproduction cloned every tag into an empty dep cache and produced a
+byte-identical lock and four byte-identical binaries. The bench gate ran at load 23, again mostly
+another project's work, and flagged nothing.
+Replaying every `ci.yml` step in `ubuntu:26.04` passed 23 of 23 steps once tpm2-tools was in the
+aarch64 step: the aarch64 gate 241 of 241 (pass 7 36), and the x86 harness 180 of 180 (its TPM pass
+31). The pass's swtpm runs in an owner-held `/tmp` directory, as the x86 pass's does, and 1.11.0's
+first CI run showed Ubuntu's AppArmor profile for swtpm allows that.
+
+### Binary
+
+Unchanged from 1.11.0. No source the binaries are built from changed, and every build was checked
+byte for byte against 1.11.0's.
+
+---
+
 ## [1.11.0] — 2026-11-02
 
 **Edge boot under emulation.** The edge paths no gate had ever run now boot on a real TPM 2.0

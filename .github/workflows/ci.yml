@@ -274,10 +274,22 @@ jobs:
         # `veritysetup verify` on five cases before any edge boot counts. Hence
         # cryptsetup-bin. Without it the script fails with the reason; it does not
         # skip (ALLOW_A64_EDGE_SKIP=1 is the deliberate override, and CI must not set it).
+        #
+        # Since 1.11.1 it also boots the TPM board (pass 7): swtpm for the TPM,
+        # systemd-cryptenroll for the token, e2fsprogs for the roots, and kmod's depmod,
+        # dpkg-deb and python3 for the pinned Debian arm64 packages it unpacks. A
+        # missing one fails the pass with its name (ALLOW_A64_TPM_SKIP=1 is the
+        # override, and CI must not set it either).
+        #
+        # ⚠ tpm2-tools is here for its tpm2-tss libraries, which systemd-cryptenroll
+        # dlopen()s and nothing else in this list pulls in. Without them the enrolment
+        # fails with "TPM device not usable ... (AES-128-CFB missing?)", which names the
+        # TPM, not the missing libraries. A replay of this job in ubuntu:26.04 found it.
         run: |
           # cpio and cryptsetup-bin are installed by the x86 harness JOB, which is a
           # different runner, so name them here rather than inherit them by luck.
-          sudo apt-get install -y --no-install-recommends qemu-system-arm cpio cryptsetup-bin
+          sudo apt-get install -y --no-install-recommends qemu-system-arm cpio cryptsetup-bin \
+            swtpm swtpm-tools tpm2-tools systemd-cryptsetup e2fsprogs kmod python3
           bash qemu/boot-test-aarch64.sh
 
       - name: Test

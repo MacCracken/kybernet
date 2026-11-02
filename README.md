@@ -212,7 +212,7 @@ file leaves no credential, and the config key is never its fallback. After a
 correct password, the shell kybernet execs is a probe that reports its own
 descriptors, signal mask and environment, and the gate checks each one.
 
-The aarch64 harness asserts 205 properties and exists because **a cross-build
+The aarch64 harness asserts 241 properties and exists because **a cross-build
 exiting 0 is not evidence**. It boots `kybernet-aarch64` as PID 1 under TCG —
 an x86 host cannot accelerate aarch64 — against a pinned, sha256-checked kernel.
 Besides the boot sequence, cgroup controllers, a real reactor iteration and a
@@ -231,6 +231,15 @@ host's real veritysetup, exit code for exit code, on five cases. The pinned kern
 no virtio-blk, so a pre-init copies the image into a RAM disk before kybernet starts.
 The edge pass therefore proves kybernet's half on aarch64 (the config, the exec, the
 verdict, the refusal), not the real veritysetup on aarch64.
+
+Its seventh pass does: the x86 harness's TPM board, on aarch64, with the same five boots
+and the same properties. It boots a different kernel and firmware from the other passes.
+Neither Alpine aarch64 kernel builds a TPM TIS driver, and only firmware measures PCR 7.
+So it boots Debian trixie's cloud-arm64 kernel through Debian's AAVMF, on Debian's arm64
+veritysetup, cryptsetup, tpm2-tools and systemd token plugin. All 60 packages are pinned
+by sha256 to one snapshot.debian.org timestamp in `qemu/tpm-board-aarch64.pins`. The
+libraries staged with them are worked out from the binaries on every run, because an x86
+host cannot run aarch64 `ldd`.
 
 ⚠ That Argon2id record is minted by `qemu/mkcred-fixture.cyr`, using sigil's
 Argon2id — the same implementation argonaut verifies with at the prompt. It is
@@ -256,8 +265,7 @@ operator tool, and CI still exercises its parameter validation.
   `root_mount` a kernel with dm-verity built in or loaded before kybernet starts
   (kybernet loads no modules). `tpm2_pcrread` for attestation. For `luks_enabled`,
   `tpm2_pcrextend`, `cryptsetup` and systemd's LUKS2 TPM2 token plugin with its
-  tpm2-tss libraries, and dm-crypt. The x86 harness gates all of it on a TPM board.
-  aarch64 runs the same code with no gate yet (roadmap 1.11.1).
+  tpm2-tss libraries, and dm-crypt. Both harnesses gate all of it on a TPM board.
 - OpenSSL 3.2+ — **provisioning only**, for `scripts/mkcred.sh`. Nothing kybernet
   runs at boot depends on it; the verifier is sigil's own Argon2id.
 

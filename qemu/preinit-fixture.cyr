@@ -28,11 +28,13 @@
 #
 # MODULES (1.11.0). dm-verity and dm-crypt are modules in every kernel a harness
 # boots, and kybernet carries no module loader: a board's kernel is built for it.
-# This program is not PID 1's code: it runs before kybernet exists. When /kyb-board/modules lists them, one path
-# per line in dependency order, it loads each with finit_module, flag
-# MODULE_INIT_COMPRESSED_FILE when the name ends in .zst or .xz, so the kernel
-# decompresses it (CONFIG_MODULE_DECOMPRESS) and no decompressor is staged. A module
-# already loaded (EEXIST) is not a failure.
+# This program is not PID 1's code: it runs before kybernet exists. When
+# /kyb-board/modules lists them, one path per line in dependency order, it loads each
+# with finit_module, flag MODULE_INIT_COMPRESSED_FILE when the name ends in .zst or
+# .xz, so the kernel decompresses it (CONFIG_MODULE_DECOMPRESS) and no decompressor is
+# staged. A module already loaded (EEXIST) is not a failure. The aarch64 TPM board
+# (1.11.1) boots Debian's cloud kernel, which builds its TPM driver, virtio-blk and
+# xts as modules too, so that board's disks are virtio-blk and it needs no RAM disk.
 #
 # ⚠ A BOARD THAT WAS NOT PREPARED MUST NOT READ AS A VERDICT. An empty RAM disk
 # fails verification, so a copy that failed quietly would make every
@@ -156,11 +158,16 @@ fn copy_to(src, dst, shown) {
     return total;
 }
 
-# finit_module(2). Not in the stdlib. x86_64 only: the aarch64 board loads no modules,
-# and a gated native aarch64 number is exactly what standing rule 1 warns the syscall
-# ladder can rewrite.
+# finit_module(2). Not in the stdlib, so each arch names its own number (1.11.1 added
+# aarch64's, for its TPM board). ⚠ aarch64's 273 is x86's set_robust_list, and a gated
+# native number is what standing rule 1 warns the syscall ladder can rewrite. At cyrius
+# 6.7.18 `qemu-aarch64 -strace` shows 273 issuing finit_module, as a literal and as a
+# variable. Check it again at every toolchain bump.
 #ifdef CYRIUS_ARCH_X86
 var SYS_FINIT_MODULE_NR = 313;
+#endif
+#ifdef CYRIUS_ARCH_AARCH64
+var SYS_FINIT_MODULE_NR = 273;
 #endif
 var MODULE_INIT_COMPRESSED_FILE = 4;
 var EEXIST_NR = 17;
@@ -177,10 +184,7 @@ fn load_one(path, n) {
     var flags = 0;
     if (ends_with(path, n, ".zst") == 1) { flags = MODULE_INIT_COMPRESSED_FILE; }
     if (ends_with(path, n, ".xz") == 1) { flags = MODULE_INIT_COMPRESSED_FILE; }
-    var r = 0 - 38;
-    #ifdef CYRIUS_ARCH_X86
-    r = syscall(SYS_FINIT_MODULE_NR, fd, "", flags);
-    #endif
+    var r = syscall(SYS_FINIT_MODULE_NR, fd, "", flags);
     sys_close(fd);
     if (r != 0 && r != 0 - EEXIST_NR) { return fail("finit_module failed for", path, r); }
     ln_add("PREINIT: module ");
