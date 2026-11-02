@@ -3,7 +3,7 @@
 Forward work only. What shipped is in [CHANGELOG.md](../../CHANGELOG.md), and what is true
 right now, gate counts included, is in [state.md](state.md).
 
-**Current release: 1.11.1** (cyrius 6.7.18, argonaut 1.19.0, libro 2.11.3, agnostik 2.0.0,
+**Current release: 1.12.0** (cyrius 6.7.18, argonaut 1.20.0, libro 2.11.3, agnostik 2.0.0,
 sigil 3.13.15).
 
 **Every open item has a target release.** The order is the dependency order: a later release
@@ -13,7 +13,7 @@ under a release or under Gated, never in a list of its own. A finished item is d
 a finished release's section goes with it. A version is for code: docs and roadmap changes
 never take one, and a comment-only item ships with a release that has code in it.
 
-**Open: 11** (`grep -c '^- \[ \]'` against this file).
+**Open: 12** (`grep -c '^- \[ \]'` against this file).
 
 ---
 
@@ -21,9 +21,7 @@ never take one, and a comment-only item ships with a release that has code in it
 
 | Release | Theme | Items | Waits on |
 |---|---|---:|---|
-| [1.11.2](#1112--a-flake-in-the-aarch64-stand-in-check) | A flake in the aarch64 stand-in check | 1 | nothing outside these repos |
-| [1.12.0](#1120--non-root-default-services) | Non-root default services | 1 | agnosticos' config, argonaut's `default_services` |
-| [Gated](#gated) | Unnumbered until the gate opens | 9 | hardware, a consumer, or a dep's release |
+| [Gated](#gated) | Unnumbered until the gate opens | 12 | hardware, a consumer, a design, or a dep's release |
 
 **Every release:** the full release gates in CLAUDE.md, including the benchmark gate, then the
 sibling-free reproduction.
@@ -35,30 +33,6 @@ what already-compiling code computes, diff the DCE list knowing it cannot see a
 compiler-emitted call, and replay `ci.yml` in the runner's image (CHANGELOG [1.8.0], [1.8.1]).
 
 ---
-
-## 1.11.2 — A flake in the aarch64 stand-in check
-
-- [ ] **The corrupted-hash-tree case fails about 1 run in 256.** `qemu/boot-test-aarch64.sh` corrupts
-      its hash tree by writing `X` over byte 4100, inside the first digest of a tree over
-      `/dev/urandom` data. When that byte already is `X`, nothing changes, the host's veritysetup
-      exits 0 where the check requires 2, and the edge and auth passes report "not run". Seen once
-      in the 1.11.1 mutation runs. Flip the byte instead of overwriting it. The 9-byte overwrites
-      elsewhere are not affected.
-
-## 1.12.0 — Non-root default services
-
-Last, because it changes what every real service runs as, and it is the one release that
-spans the distribution: argonaut's `default_services` and agnosticos' config move with it.
-
-- [ ] **Give the AGNOS default services a non-root uid.** `security.uid` /
-      `security.gid` work end to end (1.6.9), and agnos-init makes the runtime
-      directories (1.7.6), but nothing in the shipped config or in argonaut's
-      `default_services` sets a uid, so every real service runs as root. Needs a uid per
-      service (aethersafha, daimon, agnoshi, ...), agnos-init owning each service's
-      runtime paths to match (`/run/agnos/agents` and `/run/agnos/plugins` are root-owned
-      today), and the numeric ids in agnosticos' config. A service with
-      `"seccomp": "basic"` and a uid works only because the drop precedes the filter:
-      none of setuid/setgid/setgroups/setresuid are in that allowlist.
 
 ---
 
@@ -102,6 +76,28 @@ Each takes the next free number when its gate opens.
 - [ ] **`log_config`.** `LogConfig` has no setter and no reader, and a service's stdout and
       stderr go to `/dev/null`, so there is nothing to rotate and a key would do nothing.
       It needs the design argonaut's roadmap names: where output goes, and who rotates it.
+
+**Gate: agnosticos defining their accounts.**
+
+- [ ] **postgres, redis and ifran still run as root.** 1.12.0 moved the four AGNOS services argonaut
+      starts by default off root, with ids agnosticos already defines. These three have no AGNOS
+      account, and postgres refuses to run as root at all. Each needs a fixed uid and gid in
+      agnosticos, its data directory in agnos-init's layout, and the ids in argonaut's
+      `default_services`, checked by `test_agnos_identity_contract`.
+
+**Gate: a design, in argonaut, for a service that owns a terminal.**
+
+- [ ] **agnoshi has no terminal as a service.** Every service's stdin, stdout and stderr are
+      `/dev/null` (standing rule 20), and agnoshi reads its commands from fd 0, so the default
+      agnoshi reads EOF and exits, as root or as user 1000. A console shell needs a service that
+      is given a tty, with the tty's ownership and its group to match its uid.
+
+**Gate: a device manager, or a decision that kybernet listens for uevents.**
+
+- [ ] **A device that appears after boot stays root-only.** agnos-init grants `/dev/fb0` and
+      `/dev/input/event*` to their groups once, as a oneshot, so a keyboard plugged in later is
+      `root:root 0600` and aethersafha cannot open it. Following hotplug is udev's job, and
+      kybernet runs no udev.
 
 **Gate: real hardware on the bench.**
 

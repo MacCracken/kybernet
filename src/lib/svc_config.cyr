@@ -990,35 +990,20 @@ enum SeccompKind {
 # `landlock_optional` rides here rather than on the landlock block because
 # that block is a JSON ARRAY of rules with nowhere to hang a scalar, and this
 # object is already the per-service policy kyb_pre_exec reads.
-# ⚠ uid/gid RIDE HERE, on kybernet's own policy struct, rather than on
-# argonaut's ServiceDefinition — which has no such field and would need a dep
-# change and a tag to gain one. This is the same reason `landlock_optional`
-# lives here: the struct is kybernet's, hung off `svc_def_seccomp`, so a new
-# per-service policy field costs nothing outside this repo.
-#
-# -1 means "not configured", NOT uid 0. That distinction is load-bearing: 0 is
-# a legitimate value meaning root, and conflating the two would make an absent
-# key indistinguishable from an explicit request to stay root.
-struct KybSeccompPolicy { kind; no_new_privs; landlock_optional; uid; gid; }
+# uid/gid rode here, on kybernet's own policy struct, from 1.6.9 to 1.11.1,
+# because argonaut's ServiceDefinition had no such field. argonaut 1.20.0 added
+# uid, gid, supplementary groups and cgroup delegation, so since 1.12.0 they live
+# there (svc_def_set_ids and friends), where a built-in service carries them too
+# and kyb_pre_exec reads one source for both.
+struct KybSeccompPolicy { kind; no_new_privs; landlock_optional; }
 
 fn kyb_seccomp_policy_new(kind, nnp, ll_opt) {
-    var p = alloc(40);
+    var p = alloc(24);
     store64(p, kind);
     store64(p + 8, nnp);
     store64(p + 16, ll_opt);
-    store64(p + 24, 0 - 1);          # uid: -1 = not configured (0 means root)
-    store64(p + 32, 0 - 1);          # gid: -1 = not configured
     return p;
 }
-
-fn kyb_policy_set_ids(p, uid, gid) {
-    store64(p + 24, uid);
-    store64(p + 32, gid);
-    return p;
-}
-
-fn kyb_policy_uid(p) { return load64(p + 24); }
-fn kyb_policy_gid(p) { return load64(p + 32); }
 
 fn kyb_policy_kind(p)              { return load64(p); }
 fn kyb_policy_no_new_privs(p)      { return load64(p + 8); }
@@ -1118,6 +1103,60 @@ fn svc_apply_security_json(sd, obj) {
         kmsg("kybernet: config: security.uid without gid leaves the service as group root; refused");
         return 0;
     }
+
+    # --- supplementary groups (1.12.0): numeric, each bounded like a gid ---
+    #
+    # The drop REPLACES the list, so these are the only groups the service holds.
+    # Groups without a uid and gid would leave a root service with extra groups,
+    # which grants nothing root lacks: a config that cannot mean anything is an
+    # error naming the key (rule 19).
+    var groups_v = 0;
+    var grv = bayan_json_v_obj_get_by_cstr(sec, "groups");
+    if (grv != 0) {
+        if (json_v_is_arr(grv) == 0) {
+            klog("config: security.groups must be an array of numbers - service REFUSED");
+            return 0;
+        }
+        if (uid_v == 0 - 1) {
+            klog("config: security.groups needs security.uid and security.gid - service REFUSED");
+            return 0;
+        }
+        var gn = json_v_arr_len(grv);
+        if (gn > PRIV_MAX_GROUPS) {
+            klog("config: security.groups lists more than 32 groups - service REFUSED");
+            return 0;
+        }
+        groups_v = vec_new();
+        for (var gi = 0; gi < gn; gi = gi + 1) {
+            var ge = json_v_arr_get(grv, gi);
+            if (ge == 0 || json_v_is_int(ge) == 0) {
+                klog("config: security.groups must hold JSON numbers, not strings - service REFUSED");
+                return 0;
+            }
+            var gval = json_v_int(ge);
+            if (gval < 0 || gval > 2147483647) {
+                klog("config: security.groups holds a gid out of range - service REFUSED");
+                return 0;
+            }
+            vec_push(groups_v, gval);
+        }
+    }
+
+    # --- cgroup delegation (1.12.0) ---
+    #
+    # The service gets its own cgroup's cgroup.procs, cgroup.threads and
+    # cgroup.subtree_control, so it can make cgroups below its own and move its
+    # workloads into them, as daimon does with each agent. Without a uid it would
+    # be delegating to root, who needs nothing delegated.
+    var dlg = _cfg_sec_bool(sec, "delegate", 0);
+    if (dlg == CFG_SEC_BADTYPE) {
+        klog("config: security.delegate must be true or false - service REFUSED");
+        return 0;
+    }
+    if (dlg == 1 && uid_v == 0 - 1) {
+        klog("config: security.delegate needs security.uid - service REFUSED");
+        return 0;
+    }
     # --- landlock filesystem rules ---
     var llv = bayan_json_v_obj_get_by_cstr(sec, "landlock");
     if (llv != 0) {
@@ -1211,13 +1250,29 @@ fn svc_apply_security_json(sd, obj) {
         kmsg("kybernet: config: security.landlock_optional wrong type; service refused");
         return 0;
     }
-    var pol = kyb_seccomp_policy_new(kind, nnp, ll_opt);
-    # uid/gid were validated at the top of this function; carry them onto the
-    # policy that is actually stored. (An earlier draft built a second policy
-    # object there and dropped it on the floor — the parse succeeded and the
-    # ids silently never reached kyb_pre_exec.)
-    kyb_policy_set_ids(pol, uid_v, gid_v);
-    svc_def_set_seccomp(sd, pol);
+    # ⚠ A BLOCK THAT NAMES ONLY AN IDENTITY STORES NO POLICY (1.12.0). Its policy
+    # would hold the defaults (no profile, no_new_privs on, Landlock required), and
+    # kyb_pre_exec applies exactly those to a service with an identity and no policy,
+    # which is what a built-in is. So such a config service takes the built-in's path
+    # through the hook, and the harness's identity fixtures run the one path every
+    # default service takes. Any other key still stores the policy.
+    var policy_keys = 0;
+    if (sc_raw != 0) { policy_keys = 1; }
+    if (bayan_json_v_obj_get_by_cstr(sec, "no_new_privs") != 0) { policy_keys = 1; }
+    if (bayan_json_v_obj_get_by_cstr(sec, "landlock_optional") != 0) { policy_keys = 1; }
+    if (bayan_json_v_obj_get_by_cstr(sec, "landlock") != 0) { policy_keys = 1; }
+    if (bayan_json_v_obj_get_by_cstr(sec, "capabilities") != 0) { policy_keys = 1; }
+    # No identity either (`"security": {}`): the defaults, stored, as before 1.12.0.
+    if (uid_v == 0 - 1 && gid_v == 0 - 1 && groups_v == 0 && dlg == 0) { policy_keys = 1; }
+    if (policy_keys == 1) {
+        svc_def_set_seccomp(sd, kyb_seccomp_policy_new(kind, nnp, ll_opt));
+    }
+    # The identity was validated above and goes onto argonaut's fields (1.12.0),
+    # only once every key in the block has parsed: a refused block leaves the
+    # definition as svc_def_new made it.
+    svc_def_set_ids(sd, uid_v, gid_v);
+    svc_def_set_groups(sd, groups_v);
+    svc_def_set_delegate(sd, dlg);
     return 1;
 }
 

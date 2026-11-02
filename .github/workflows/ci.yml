@@ -230,6 +230,16 @@ jobs:
           sudo apt-get install -y --no-install-recommends qemu-user
           bash scripts/aarch64-exec-gate.sh
 
+      - name: Cache the aarch64 TPM board's pinned packages
+        # Pass 7 fetches 60 Debian packages (about 46 MB) from snapshot.debian.org,
+        # which throttles a burst with HTTP 503. Keyed on the pins file, so a pin change
+        # fetches afresh. The gate checks every file against its sha256 either way, so the
+        # cache cannot serve a wrong one, and snapshot paths never change under a pin.
+        uses: actions/cache@v4
+        with:
+          path: qemu/.cache/tpm-a64/debs
+          key: tpm-a64-debs-${{ hashFiles('qemu/tpm-board-aarch64.pins') }}
+
       - name: aarch64 boot gate (kybernet-aarch64 as PID 1)
         # ⚠ A SYSCALL PROBE IS NOT A BOOT (standing rule 50). The gate above
         # runs the unit suite and probes primitives under qemu-USER — a

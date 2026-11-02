@@ -98,32 +98,40 @@ fn kyb_pre_exec(svc_def) {
     var ll   = svc_def_landlock(svc_def);
     var sc   = svc_def_seccomp(svc_def);
 
+    # The identity is argonaut's (1.12.0, argonaut 1.20.0): a config service's
+    # security.uid / gid / groups and a built-in's alike, -1 for unset. argonaut
+    # applies it itself only when no hook is registered, so this hook owns it, and
+    # one that skipped it would run a service declared non-root as root.
+    var want_uid = svc_def_uid(svc_def);
+    var want_gid = svc_def_gid(svc_def);
+    var want_groups = svc_def_groups(svc_def);
+    var has_privdrop = 0;
+    if (want_uid != 0 - 1 || want_gid != 0 - 1) { has_privdrop = 1; }
+    if (want_groups != 0 && vec_len(want_groups) > 0) { has_privdrop = 1; }
+    # A uid without a gid would keep gid 0 (1.6.15 MEDIUM-6). The config parser
+    # refuses it; a built-in reaches here without that parser, so it is refused
+    # here too, before anything changes.
+    if (want_uid != 0 - 1 && want_gid == 0 - 1) {
+        kmsg("kybernet: pre-exec: a uid with no gid would keep group root - refusing to exec");
+        return 1;
+    }
+
     # No policy at all — nothing to enforce, and no_new_privs is not
     # imposed on services that never asked to be confined. The cgroup join
     # above already happened; limits are not a security policy in this
     # sense and do not by themselves trigger no_new_privs.
-    if (caps == 0 && ll == 0 && sc == 0) { return 0; }
+    if (caps == 0 && ll == 0 && sc == 0 && has_privdrop == 0) { return 0; }
 
     # 1. no_new_privs. Defaults on for any confined service (both Landlock
     #    and seccomp require it, and it is what stops a setuid binary
     #    handing the privileges straight back on exec); a policy may opt
-    #    out explicitly. 1.5.2.
+    #    out explicitly. 1.5.2. A built-in with an identity and no policy
+    #    gets it too: it is confined, by its uid.
     var want_nnp = 1;
     if (sc != 0) { want_nnp = kyb_policy_no_new_privs(sc); }
     if (want_nnp == 1) {
         if (is_err_result(set_no_new_privs()) == 1) { return 1; }
     }
-
-    # Does this policy also ask for a uid/gid drop? The answer changes HOW the
-    # capabilities are surrendered, so it has to be known before step 2.
-    var want_uid = 0 - 1;
-    var want_gid = 0 - 1;
-    if (sc != 0) {
-        want_uid = kyb_policy_uid(sc);
-        want_gid = kyb_policy_gid(sc);
-    }
-    var has_privdrop = 0;
-    if (want_uid != 0 - 1 || want_gid != 0 - 1) { has_privdrop = 1; }
 
     # 2. capabilities — STANDALONE ONLY. 1.6.14 HIGH-3.
     #
@@ -214,13 +222,13 @@ fn kyb_pre_exec(svc_def) {
             # under PR_SET_KEEPCAPS, then raises AMBIENT — which is the only
             # set that survives execve of an unprivileged binary, and therefore
             # the only way a non-root service actually receives a capability.
-            var cprt, cprv = drop_caps_and_privileges(capset_keep_mask(caps), du, dg);
+            var cprt, cprv = drop_caps_and_privileges(capset_keep_mask(caps), du, dg, want_groups);
             if (is_err_result(cprt) == 1) {
                 kmsg("kybernet: pre-exec: CAPABILITY+PRIVILEGE DROP FAILED - refusing to exec");
                 return 1;
             }
         } else {
-            var prt, prv = drop_privileges(du, dg);
+            var prt, prv = drop_privileges_groups(du, dg, want_groups);
             if (is_err_result(prt) == 1) {
                 kmsg("kybernet: pre-exec: PRIVILEGE DROP FAILED - refusing to exec as root");
                 return 1;

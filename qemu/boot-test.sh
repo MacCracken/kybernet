@@ -24,7 +24,7 @@
 #   "started: kyb-live"              — a LIVE service, so a cgroup is really
 #                                      created and the pid moved into it
 #                                      (a completed oneshot correctly gets none)
-#   "removed service cgroups: 31"    — the shutdown sweep killed and rmdir'd them
+#   "removed service cgroups: 38"    — the shutdown sweep killed and rmdir'd them
 #
 #     ⚠ NINE of NINE. This said EIGHT from 1.5.3 to 1.6.1, with a comment
 #     arguing the shortfall was correct: kyb-orphan backgrounds a child, this
@@ -390,12 +390,12 @@ for marker in \
     "kybernet: services started" \
     "kybernet: harness done" \
     "kybernet: shutdown" \
-    "kybernet: config: services parsed: 32" \
+    "kybernet: config: services parsed: 39" \
     "kybernet:   completed (oneshot): kyb-dep" \
     "kybernet:   completed (oneshot): kyb-svc" \
     "kybernet: boot: skipped (not applicable): Start udev device manager" \
     "kybernet:   started: kyb-live" \
-    "kybernet: removed service cgroups: 31"; do
+    "kybernet: removed service cgroups: 38"; do
     if grep -aqF "$marker" <<< "$RUNTIME_OUT"; then
         echo "  OK: $marker"
     else
@@ -504,19 +504,65 @@ else
     echo "$RUNTIME_OUT" | grep -aF 'agnos-init' | head -4 || true
     fail=1
 fi
+# Since 1.12.0 the socket directories are aethersafha's (uid 900), agent-memory is
+# daimon's, the two device nodes are granted to video (44) and input (104), and the
+# slice is 0711 so a delegated service can walk to its own cgroup.
 for want in \
-    'STAT-/run/agnos/agents=dir 0755 0:0' \
-    'STAT-/run/agnos/plugins=dir 0755 0:0' \
+    'STAT-/run/agnos/agents=dir 0755 900:900' \
+    'STAT-/run/agnos/plugins=dir 0755 900:900' \
     'STAT-/run/user/1000=dir 0700 1000:1001' \
     'STAT-/var/lib/agnos/agents=dir 0755 900:900' \
+    'STAT-/var/lib/agnos/agent-memory=dir 0755 900:900' \
     'STAT-/var/lib/agnos/models=dir 0755 901:901' \
-    'STAT-/var/log/agnos=dir 0750 0:0'; do
+    'STAT-/var/log/agnos=dir 0750 0:0' \
+    'STAT-/dev/input/event90=other 0660 0:104' \
+    'STAT-/dev/fb0=other 0660 0:44' \
+    'STAT-/sys/fs/cgroup/kybernet.slice=dir 0711 0:0'; do
     if grep -aqF "ST[kyb-agnos-dirs]-$want" <<< "$RUNTIME_OUT"; then
         echo "  OK: agnos-init layout: $want"
     else
         echo "  FAIL: agnos-init layout: no $want"
-        echo "$RUNTIME_OUT" | grep -aF 'ST[kyb-agnos-dirs]' | head -8 || true
+        echo "$RUNTIME_OUT" | grep -aF 'ST[kyb-agnos-dirs]' | head -12 || true
         fail=1
+    fi
+done
+
+# --- identity: groups, device grants and cgroup delegation (1.12.0) -----------
+# Every property is read from inside a non-root service and relayed by a root one.
+# kyb-grant has aethersafha's identity (900:900 with video and input); kyb-nogrant is
+# the same uid with no groups, the control arm, so a pass cannot come from nodes that
+# anybody could open. event90 has no driver behind it, so a permitted open fails
+# after the permission check, ENXIO (6); a refused one is EACCES (13).
+for want in \
+    'ST[kyb-grant]-Uid=900 900 900 900' \
+    'ST[kyb-grant]-Gid=900 900 900 900' \
+    'ST[kyb-grant]-Groups=44 104' \
+    'ST[kyb-grant]-NoNewPrivs=1' \
+    'ST[kyb-grant]-OPEN-/dev/input/event90=ERRNO=6' \
+    'ST[kyb-grant]-OPEN-/dev/fb0=' \
+    'ST[kyb-nogrant]-Uid=900 900 900 900' \
+    'ST[kyb-nogrant]-OPEN-/dev/input/event90=ERRNO=13' \
+    'ST[kyb-nogrant]-OPEN-/dev/fb0=ERRNO=13' \
+    'kybernet:   cgroup delegated: kyb-deleg' \
+    'ST[kyb-deleg]-CGD-MKDIR=OK' \
+    'ST[kyb-deleg]-CGD-MOVE=OK' \
+    'ST[kyb-deleg]-CGD-NOW=/kybernet.slice/kyb-deleg/kyb-sub' \
+    'ST[kyb-nodeleg]-CGD-MKDIR=ERRNO=13' \
+    'ST[kyb-nodeleg]-CGD-MOVE=ERRNO=13'; do
+    if grep -aqF "$want" <<< "$RUNTIME_OUT"; then
+        echo "  OK: identity: $want"
+    else
+        echo "  FAIL: identity: no $want"
+        echo "$RUNTIME_OUT" | grep -aE 'ST\[kyb-(grant|nogrant|deleg|nodeleg)\]|delegat|MKNOD' | head -14 || true
+        fail=1
+    fi
+done
+for unwanted in 'ST[kyb-grant]-OPEN-/dev/fb0=ERRNO=13'; do
+    if grep -aqF "$unwanted" <<< "$RUNTIME_OUT"; then
+        echo "  FAIL: identity: present: $unwanted"
+        fail=1
+    else
+        echo "  OK: identity: absent: $unwanted"
     fi
 done
 if grep -aqF "FAILED to start: kyb-ready-fail" <<< "$RUNTIME_OUT"; then

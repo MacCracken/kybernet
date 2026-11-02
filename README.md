@@ -46,15 +46,19 @@ Requires Cyrius 6.7.18 (`cyriusly install 6.7.18 && cyriusly use 6.7.18`).
 cyrius deps                                # Resolve deps from cyrius.cyml into lib/
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet   # Build (DCE recommended)
 CYRIUS_DCE=1 cyrius build src/agnos_init.cyr build/agnos-init   # agnos-init (see below)
-cyrius test src/test.cyr                   # Run 1056 tests
+cyrius test src/test.cyr                   # Run 1096 tests
 cyrius bench src/bench.cyr                 # Run benchmarks
 ```
 
 The package ships two programs. `kybernet` is PID 1. `agnos-init` (1.7.6) is a
 separate oneshot that kybernet runs as a service to make the directories AGNOS
 services expect at boot: `/run` is a fresh tmpfs every boot, so `/run/agnos/agents`,
-`/run/agnos/plugins` and `/run/user/1000` cannot ship in an image. It is installed at
-`/usr/lib/agnos/agnos-init` and is never linked into PID 1.
+`/run/agnos/plugins` and `/run/user/1000` cannot ship in an image. Since 1.12.0 it
+also owns those paths by the numeric ids the services run as, and gives `/dev/fb0` to
+group video (44) and `/dev/input/event*` to group input (104), mode 0660: kybernet runs
+no udev, so devtmpfs makes every node root-only. It grants the nodes present when it
+runs, not devices that appear later. It is installed at `/usr/lib/agnos/agnos-init` and
+is never linked into PID 1.
 
 ## Modules
 
@@ -103,6 +107,13 @@ services expect at boot: `/run` is a fresh tmpfs every boot, so `/run/agnos/agen
   capabilities keep-list, Landlock rules and a seccomp profile. A service
   without one behaves exactly as before. The QEMU harness boots a confined
   service that reports its own `/proc/self/status` and asserts `CapEff=0`.
+- **Non-root default services (1.12.0)** — a service's uid, gid, supplementary
+  groups and cgroup delegation (`security.uid`, `gid`, `groups`, `delegate`) live on
+  argonaut's definition, so argonaut's own defaults carry them too. daimon runs as
+  agnos 900:900 with its cgroup delegated (it contains each agent in a cgroup below
+  its own), llm-gateway as agnos-llm 901:901, aethersafha as agnos with groups video
+  and input, and agnoshi as the interactive user 1000. Both harnesses check each
+  property from inside a non-root service, against a control arm that lacks it.
 - **Verified boot (edge mode)** — TPM detection and PCR read, plus dm-verity
   **integrity verification** against an operator-pinned root hash via
   `veritysetup verify`, which walks the hash tree in pure userspace and so needs
@@ -150,7 +161,7 @@ services expect at boot: `/run` is a fresh tmpfs every boot, so `/run/agnos/agen
 - **Data-driven mount table** — not hardcoded per-mount calls
 - **sd_notify compatible** — READY, STOPPING, WATCHDOG, STATUS, RELOADING messages via epoll
 - **String builder** for path construction and logging
-- **1056 tests** (1051 on aarch64 — the seccomp allowlist is arch-specific), 56 benchmarks
+- **1096 tests** (1091 on aarch64 — the seccomp allowlist is arch-specific), 56 benchmarks
 
 ## Dependencies
 
@@ -189,14 +200,14 @@ boot. With the working lane moved onto the caller's arena it costs +25 KB.
 ## Testing
 
 ```sh
-cyrius test src/test.cyr            # 1056 assertions (1051 on aarch64)
+cyrius test src/test.cyr            # 1096 assertions (1091 on aarch64)
 bash scripts/bench-history.sh       # 56 benchmarks, load-tolerant regression gate
 bash qemu/boot-test.sh              # PID-1 boot harness, x86_64 (needs KVM)
 bash qemu/boot-test-aarch64.sh      # PID-1 boot harness, aarch64 (TCG, no KVM)
 ```
 
 The QEMU harness is the gate that matters: it boots kybernet as real PID 1 and
-asserts 180 properties across seven passes — the boot sequence, the reactor
+asserts 200 properties across seven passes — the boot sequence, the reactor
 (that it sleeps rather than spins, and that a SIGHUP spends no arena), dm-verity
 verification against a real image pair on virtio disks, the emergency-auth prompt
 with a password fed over the serial line, the start timeout killing a oneshot
@@ -212,7 +223,7 @@ file leaves no credential, and the config key is never its fallback. After a
 correct password, the shell kybernet execs is a probe that reports its own
 descriptors, signal mask and environment, and the gate checks each one.
 
-The aarch64 harness asserts 241 properties and exists because **a cross-build
+The aarch64 harness asserts 258 properties and exists because **a cross-build
 exiting 0 is not evidence**. It boots `kybernet-aarch64` as PID 1 under TCG —
 an x86 host cannot accelerate aarch64 — against a pinned, sha256-checked kernel.
 Besides the boot sequence, cgroup controllers, a real reactor iteration and a

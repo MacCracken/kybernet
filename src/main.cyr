@@ -81,7 +81,19 @@ fn _prepare_service_cgroup(name_cs) {
     if (g_init == 0) { return 0; }
     var ms = init_get_service(g_init, name_cs);
     if (ms == 0) { return 0; }
-    var cl = svc_def_cgroup_limits(managed_svc_def(ms));
+    var sd = managed_svc_def(ms);
+    # Delegation (1.12.0): a service that manages cgroups below its own, daimon
+    # with its agents, gets its cgroup's control files as its own uid. Best-effort
+    # like the limits: daimon refuses no work without it, it runs agents
+    # uncontained and says so, which is the case this line exists to name.
+    if (svc_def_delegate(sd) == 1 && svc_def_uid(sd) != 0 - 1) {
+        if (is_err_result(cgroup_delegate(name_cs, svc_def_uid(sd), svc_def_gid(sd))) == 1) {
+            klog2("  WARNING: could not delegate cgroup: ", name_cs);
+        } else {
+            klog2("  cgroup delegated: ", name_cs);
+        }
+    }
+    var cl = svc_def_cgroup_limits(sd);
     if (cl == 0) { return 0; }
     if (is_err_result(cgroup_apply_limits(name_cs, cl)) == 1) {
         klog2("  WARNING: could not apply cgroup limits: ", name_cs);

@@ -304,8 +304,9 @@ fn cgroup_enable_controllers() {
     str_builder_add_cstr(slice_sb, KYBERNET_SLICE);
     var slice = str_builder_build(slice_sb);
 
-    # The slice must exist before its own subtree_control can be written.
-    sys_mkdir(str_data(slice), 0x1C0);
+    # The slice must exist before its own subtree_control can be written. 0711, as
+    # create_service_cgroup makes it (1.12.0): this call usually comes first.
+    sys_mkdir(str_data(slice), 0x1C9);
 
     var enabled = 0;
     var want = CGROUP_WANTED_CONTROLLERS;
@@ -344,7 +345,10 @@ fn create_service_cgroup(service) {
         str_builder_add_cstr(sb1, KYBERNET_SLICE);
         _cg_slice_path = str_builder_build(sb1);
     }
-    sys_mkdir(str_data(_cg_slice_path), 0x1C0);
+    # 0711 (1.12.0), was 0700: a delegated service runs as its own uid and must be
+    # able to walk to its cgroup. Search without read: it can reach its own path
+    # and cannot list the other services'.
+    sys_mkdir(str_data(_cg_slice_path), 0x1C9);
 
     # Create service dir
     var path = cgroup_path(service);
@@ -611,13 +615,111 @@ fn cgroup_has_pid(service, pid) {
     return 0;
 }
 
-# Remove a service cgroup directory (must be empty)
+# Hand a service its own cgroup (1.12.0), as systemd's `Delegate=yes` does: the
+# directory and the three files a delegatee writes, cgroup.procs (to move its
+# processes), cgroup.threads and cgroup.subtree_control, owned by uid:gid. The limit
+# files stay root's, so the service cannot lift its own memory.max or pids.max, and
+# everything it makes below inherits them. Returns Ok(0), or Err(errno) at the first
+# chown the kernel refuses.
+fn cgroup_delegate(service, uid, gid) {
+    if (cgroup_name_is_safe(service) == 0) { return Err(EINVAL); }
+    var r = sys_fchownat(AT_FDCWD, str_data(cgroup_path(service)), uid, gid, AT_SYMLINK_NOFOLLOW);
+    if (r != 0) { return Err(0 - r); }
+    r = sys_fchownat(AT_FDCWD, str_data(cgroup_file(service, "cgroup.procs")), uid, gid, AT_SYMLINK_NOFOLLOW);
+    if (r != 0) { return Err(0 - r); }
+    r = sys_fchownat(AT_FDCWD, str_data(cgroup_file(service, "cgroup.threads")), uid, gid, AT_SYMLINK_NOFOLLOW);
+    if (r != 0) { return Err(0 - r); }
+    r = sys_fchownat(AT_FDCWD, str_data(cgroup_file(service, "cgroup.subtree_control")), uid, gid,
+      AT_SYMLINK_NOFOLLOW);
+    if (r != 0) { return Err(0 - r); }
+    return Ok(0);
+}
+
+# The cgroups a delegated service made below its own, removed depth first (1.12.0).
+# rmdir refuses a cgroup that has children (EBUSY), so without this a delegated
+# service's cgroup could never be removed and the shutdown sweep would spend its
+# whole budget retrying it.
+#
+# ⚠ IT ALLOCATES NOTHING. This runs on the reactor's give-up path, which must take
+# nothing from the arena past its first event (standing rule 23), so it reads with
+# getdents64 into a static buffer and builds paths in another. A directory is read
+# only until its first subdirectory, closed, and that one removed before the next
+# read: the buffer is never live across a recursion. Bounded by CG_CHILD_DEPTH levels
+# and CG_CHILD_SCANS removals per directory. Failures are left to the caller's rmdir,
+# whose EBUSY the shutdown sweep already retries.
+var _CG_DENTS[512];         # GLOBAL: 512 slots = 4096 bytes, one getdents64 batch
+var _CG_WALK[64];           # GLOBAL: 64 slots = 512 bytes, the path being walked
+var CG_CHILD_DEPTH = 8;
+var CG_CHILD_SCANS = 256;
+var CG_DT_DIR = 4;
+
+# The first subdirectory of the directory in _CG_WALK[0..len): appends "/name" to
+# the walk path and returns the new length, or 0 when there is none.
+fn _cg_first_child(len) {
+    store8(&_CG_WALK + len, 0);
+    var fd = sys_open(&_CG_WALK, O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0);
+    if (fd < 0) { return 0; }
+    var found = 0;
+    var batches = 0;
+    var n = sys_getdents64(fd, &_CG_DENTS, 4096);
+    while (found == 0 && n > 0 && batches < 64) {
+        var off = 0;
+        while (found == 0 && off < n) {
+            var e = &_CG_DENTS + off;
+            var reclen = load16(e + 16);
+            if (reclen <= 0) { break; }
+            var nm = e + 19;
+            var dot = 0;
+            if (load8(nm) == 46) {
+                if (load8(nm + 1) == 0) { dot = 1; }
+                if (load8(nm + 1) == 46 && load8(nm + 2) == 0) { dot = 1; }
+            }
+            if (dot == 0 && load8(e + 18) == CG_DT_DIR) {
+                var k = strlen(nm);
+                if (len + 1 + k < 500) {
+                    store8(&_CG_WALK + len, 47);
+                    memcpy(&_CG_WALK + len + 1, nm, k);
+                    found = len + 1 + k;
+                }
+            }
+            off = off + reclen;
+        }
+        if (found == 0) { n = sys_getdents64(fd, &_CG_DENTS, 4096); }
+        batches = batches + 1;
+    }
+    sys_close(fd);
+    return found;
+}
+
+fn _cg_remove_children(len, depth) {
+    if (depth <= 0) { return 0; }
+    var scans = 0;
+    while (scans < CG_CHILD_SCANS) {
+        var clen = _cg_first_child(len);
+        if (clen == 0) { return 0; }
+        _cg_remove_children(clen, depth - 1);
+        store8(&_CG_WALK + clen, 0);
+        if (sys_rmdir(&_CG_WALK) != 0) { return 0; }
+        scans = scans + 1;
+    }
+    return 0;
+}
+
+# Remove every directory below cstr `dir` (`len` bytes), leaving `dir` itself.
+fn cgroup_remove_children_at(dir, len) {
+    if (len <= 0 || len >= 500) { return 0; }
+    memcpy(&_CG_WALK, dir, len);
+    return _cg_remove_children(len, CG_CHILD_DEPTH);
+}
+
+# Remove a service cgroup directory, after any cgroups below it.
 fn remove_service_cgroup(service) {
     # Same predicate as create. The asymmetry was the defect: a name refused
     # at mkdir was accepted at rmdir, so a traversal that could never be
     # created could still be removed.
     if (cgroup_name_is_safe(service) == 0) { return Err(EINVAL); }
     var path = cgroup_path(service);
+    cgroup_remove_children_at(str_data(path), str_len(path));
     var r = sys_rmdir(str_data(path));
     if (is_err(r) == 1) { return Err(err_code(r)); }
     # Drop the path cache for this service — a future re-create at the

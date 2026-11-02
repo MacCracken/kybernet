@@ -77,8 +77,8 @@ All under `src/lib/`, included by `src/main.cyr`.
 | `signals.cyr` | signalfd for SIGCHLD, SIGTERM, SIGINT, SIGHUP, SIGPWR |
 | `reaper.cyr` | Zombie reaping via `sys_waitpid(-1, WNOHANG)` |
 | `mount.cyr` | Essential filesystems, data-driven mount table; the mount-table cache, read with the stdlib's `file_read_whole_into` up to 1 MiB (1.7.11; kybernet's own `read_whole.cyr` from 1.7.8) |
-| `cgroup.cyr` | Cgroup v2: controllers, create, limits, move, kill, cleanup |
-| `privdrop.cyr` | Privilege drop: capabilities, no_new_privs, agnostik bridge |
+| `cgroup.cyr` | Cgroup v2: controllers, create, limits, delegation, move, kill, cleanup (children first) |
+| `privdrop.cyr` | Privilege drop: capabilities, supplementary groups, no_new_privs, agnostik bridge |
 | `eventloop.cyr` | epoll multiplexer; arch-gated `struct epoll_event` ABI |
 | `notify.cyr` | sd_notify socket (READY, STOPPING, WATCHDOG, STATUS, RELOADING) |
 | `seccomp.cyr` | Seccomp BPF filter builder + loader |

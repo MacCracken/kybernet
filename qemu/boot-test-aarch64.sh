@@ -374,12 +374,32 @@ cat > "$ROOT/etc/kybernet/config.json" << 'CFGEOF'
       "type": "simple", "restart": "never",
       "ready_check": { "type": "tcp", "target": "127.0.0.1", "port": 9,
                        "timeout_ms": 500, "retries": 2, "retry_delay_ms": 50 } },
+    { "name": "kyb-mknod-in", "binary": "/usr/bin/kyb-svc-fixture",
+      "args": ["mknod", "/dev/input/event90", "13", "154"], "type": "oneshot", "restart": "never" },
+    { "name": "kyb-mknod-fb", "binary": "/usr/bin/kyb-svc-fixture",
+      "args": ["mknod", "/dev/fb0", "29", "0"], "type": "oneshot", "restart": "never" },
     { "name": "agnos-init", "binary": "/usr/lib/agnos/agnos-init",
-      "type": "oneshot", "restart": "never" },
+      "type": "oneshot", "restart": "never", "depends_on": ["kyb-mknod-in", "kyb-mknod-fb"] },
     { "name": "kyb-agnos-dirs", "binary": "/usr/bin/kyb-svc-fixture",
       "args": ["stat", "/run/agnos/agents", "/run/agnos/plugins", "/run/user/1000",
-               "/var/lib/agnos/agents", "/var/lib/agnos/models", "/var/log/agnos"],
-      "type": "oneshot", "restart": "never", "depends_on": ["agnos-init"] }
+               "/var/lib/agnos/agents", "/var/lib/agnos/agent-memory", "/var/lib/agnos/models",
+               "/var/log/agnos", "/dev/input/event90", "/dev/fb0", "/sys/fs/cgroup/kybernet.slice"],
+      "type": "oneshot", "restart": "never", "depends_on": ["agnos-init"] },
+    { "name": "kyb-grant", "binary": "/usr/bin/kyb-svc-fixture",
+      "args": ["open", "/dev/input/event90", "/dev/fb0"], "type": "oneshot", "restart": "never",
+      "depends_on": ["agnos-init"], "security": { "uid": 900, "gid": 900, "groups": [44, 104] } },
+    { "name": "kyb-nogrant", "binary": "/usr/bin/kyb-svc-fixture",
+      "args": ["open", "/dev/input/event90", "/dev/fb0"], "type": "oneshot", "restart": "never",
+      "depends_on": ["agnos-init"], "security": { "uid": 900, "gid": 900 } },
+    { "name": "kyb-deleg", "binary": "/usr/bin/kyb-svc-fixture", "args": ["cgdelegate"],
+      "type": "oneshot", "restart": "never", "security": { "uid": 900, "gid": 900, "delegate": true } },
+    { "name": "kyb-nodeleg", "binary": "/usr/bin/kyb-svc-fixture", "args": ["cgdelegate"],
+      "type": "oneshot", "restart": "never", "security": { "uid": 900, "gid": 900 } },
+    { "name": "kyb-id-relay", "binary": "/usr/bin/kyb-svc-fixture",
+      "args": ["relay", "/dev/shm/kyb-st-kyb-grant.txt", "/dev/shm/kyb-st-kyb-nogrant.txt",
+               "/dev/shm/kyb-st-kyb-deleg.txt", "/dev/shm/kyb-st-kyb-nodeleg.txt"],
+      "type": "oneshot", "restart": "never",
+      "depends_on": ["kyb-grant", "kyb-nogrant", "kyb-deleg", "kyb-nodeleg"] }
   ]
 }
 CFGEOF
@@ -525,7 +545,12 @@ if [ "$A64_EDGE" = "1" ]; then
         exit 1
     fi
     cp "$EDGE_WORK/hash.img" "$EDGE_WORK/hash-corrupt.img"
-    printf 'X' | dd of="$EDGE_WORK/hash-corrupt.img" bs=1 seek=4100 conv=notrunc status=none
+    # FLIPPED, NOT OVERWRITTEN (1.12.0). Byte 4100 is inside the first digest of a tree
+    # over random data, so writing a fixed `X` there changed nothing whenever the byte
+    # already was `X`: about 1 run in 256, veritysetup verified the "corrupted" tree and
+    # the stand-in check failed. Its complement always differs.
+    _hb="$(od -An -tu1 -j4100 -N1 "$EDGE_WORK/hash-corrupt.img" | tr -d ' ')"
+    printf "$(printf '\\%03o' $((_hb ^ 255)))" | dd of="$EDGE_WORK/hash-corrupt.img" bs=1 seek=4100 conv=notrunc status=none
     truncate -s 1M "$EDGE_WORK/zero.img"
     case "$ROOT_HASH" in 0*) WRONG_HASH="1${ROOT_HASH#?}" ;; *) WRONG_HASH="0${ROOT_HASH#?}" ;; esac
 
@@ -872,8 +897,8 @@ fi
 # Each assertion mirrors the x86 harness's assertion of the same name. The reasoning
 # behind each one lives there; what is new here is that it RUNS on aarch64, where
 # the syscall numbers, the seccomp allowlist and the struct layouts differ.
-_prop "config: services parsed: 31" \
-    'kybernet: config: services parsed: 31([^0-9]|$)' "$OUT1"
+_prop "config: services parsed: 38" \
+    'kybernet: config: services parsed: 38([^0-9]|$)' "$OUT1"
 # 1.7.8: the config above is padded past the old 16 KiB limit. Check the size kybernet
 # itself reports, so a fixture that shrank back under 16 KiB fails here rather than
 # proving nothing.
@@ -889,8 +914,8 @@ _prop "completed (oneshot): kyb-dep" 'completed \(oneshot\): kyb-dep' "$OUT1"
 _prop "completed (oneshot): kyb-svc, after its dependency" 'completed \(oneshot\): kyb-svc' "$OUT1"
 _prop "started: kyb-live" 'started: kyb-live' "$OUT1"
 # 23, not 24: kyb-prereq-dep is skipped, so no cgroup is ever made for it.
-_prop "removed service cgroups: 30 (every started service, torn down)" \
-    'kybernet: removed service cgroups: 30([^0-9]|$)' "$OUT1" 'removed service cgroups'
+_prop "removed service cgroups: 37 (every started service, torn down, a delegated one's child first)" \
+    'kybernet: removed service cgroups: 37([^0-9]|$)' "$OUT1" 'removed service cgroups'
 
 # ⚠ THE LABEL IS THE PLACEMENT CHECK. svc-fixture labels its report with the leaf
 # of its OWN cgroup path, so a service whose child-side join failed (standing rule
@@ -960,9 +985,21 @@ _prop "a service whose ready_check cannot pass is failed" 'FAILED to start: kyb-
 # agnos-init (1.7.6): the real binary as a oneshot, and an observer that depends on it
 # lstat()ing the result from inside the guest. Owners come from the staged passwd.
 _prop "agnos-init ran as a oneshot and exited 0" 'completed \(oneshot\): agnos-init' "$OUT1" 'agnos-init'
-_prop "agnos-init: /run/agnos/agents, 0755 root" \
-    'ST\[kyb-agnos-dirs\]-STAT-/run/agnos/agents=dir 0755 0:0' "$OUT1" 'ST\[kyb-agnos-dirs\]'
-_prop "agnos-init: /run/agnos/plugins, 0755 root" 'ST\[kyb-agnos-dirs\]-STAT-/run/agnos/plugins=dir 0755 0:0' "$OUT1"
+# Since 1.12.0 the socket directories are aethersafha's (uid 900), agent-memory is
+# daimon's, the two device nodes are granted to video (44) and input (104), and the
+# slice is 0711 so a delegated service can walk to its own cgroup.
+_prop "agnos-init: /run/agnos/agents, 0755, aethersafha's (900)" \
+    'ST\[kyb-agnos-dirs\]-STAT-/run/agnos/agents=dir 0755 900:900' "$OUT1" 'ST\[kyb-agnos-dirs\]'
+_prop "agnos-init: /run/agnos/plugins, 0755, aethersafha's (900)" \
+    'ST\[kyb-agnos-dirs\]-STAT-/run/agnos/plugins=dir 0755 900:900' "$OUT1"
+_prop "agnos-init: /var/lib/agnos/agent-memory, daimon's (900)" \
+    'ST\[kyb-agnos-dirs\]-STAT-/var/lib/agnos/agent-memory=dir 0755 900:900' "$OUT1"
+_prop "agnos-init: /dev/input/event90 granted to input (104), 0660" \
+    'ST\[kyb-agnos-dirs\]-STAT-/dev/input/event90=other 0660 0:104' "$OUT1" 'MKNOD|kyb-agnos-dirs\].*/dev/'
+_prop "agnos-init: /dev/fb0 granted to video (44), 0660" \
+    'ST\[kyb-agnos-dirs\]-STAT-/dev/fb0=other 0660 0:44' "$OUT1" 'MKNOD|kyb-agnos-dirs\].*/dev/'
+_prop "the slice is 0711: a delegated service can walk to its own cgroup" \
+    'ST\[kyb-agnos-dirs\]-STAT-/sys/fs/cgroup/kybernet.slice=dir 0711 0:0' "$OUT1"
 _prop "agnos-init: /run/user/1000, 0700, uid 1000 with passwd's gid 1001" \
     'ST\[kyb-agnos-dirs\]-STAT-/run/user/1000=dir 0700 1000:1001' "$OUT1"
 _prop "agnos-init: /var/lib/agnos/agents owned by agnos (900)" \
@@ -970,6 +1007,28 @@ _prop "agnos-init: /var/lib/agnos/agents owned by agnos (900)" \
 _prop "agnos-init: /var/lib/agnos/models owned by agnos-llm (901)" \
     'ST\[kyb-agnos-dirs\]-STAT-/var/lib/agnos/models=dir 0755 901:901' "$OUT1"
 _prop "agnos-init: /var/log/agnos, 0750 root" 'ST\[kyb-agnos-dirs\]-STAT-/var/log/agnos=dir 0750 0:0' "$OUT1"
+# Identity (1.12.0), read from inside non-root services and relayed by a root one.
+# kyb-grant has aethersafha's identity; kyb-nogrant is the same uid with no groups,
+# the control arm. event90 has no driver, so a permitted open is ENXIO (6) after the
+# permission check, and a refused one EACCES (13).
+_prop "kyb-grant runs as 900 with groups video and input, exactly" 'ST\[kyb-grant\]-Groups=44 104([^0-9]|$)' "$OUT1" \
+    'ST\[kyb-(grant|nogrant)\]'
+_prop "kyb-grant: uid 900" 'ST\[kyb-grant\]-Uid=900 900 900 900' "$OUT1"
+_prop "kyb-grant: no_new_privs" 'ST\[kyb-grant\]-NoNewPrivs=1' "$OUT1"
+_prop "kyb-grant passes the permission check on the granted input node" \
+    'ST\[kyb-grant\]-OPEN-/dev/input/event90=ERRNO=6([^0-9]|$)' "$OUT1"
+_prop "kyb-grant opens past the permission check on /dev/fb0" \
+    'ST\[kyb-grant\]-OPEN-/dev/fb0=(OK|ERRNO=([0-9]|1[0-24-9]|[2-9][0-9]))([^0-9]|$)' "$OUT1"
+_prop "kyb-nogrant (no groups) is refused the input node" \
+    'ST\[kyb-nogrant\]-OPEN-/dev/input/event90=ERRNO=13([^0-9]|$)' "$OUT1"
+_prop "kyb-nogrant (no groups) is refused /dev/fb0" 'ST\[kyb-nogrant\]-OPEN-/dev/fb0=ERRNO=13([^0-9]|$)' "$OUT1"
+_prop "kyb-deleg's cgroup was delegated" 'cgroup delegated: kyb-deleg' "$OUT1" 'delegat'
+_prop "kyb-deleg made a cgroup below its own" 'ST\[kyb-deleg\]-CGD-MKDIR=OK' "$OUT1" 'ST\[kyb-(deleg|nodeleg)\]'
+_prop "kyb-deleg moved itself into it" 'ST\[kyb-deleg\]-CGD-MOVE=OK' "$OUT1"
+_prop "kyb-deleg now runs below its own cgroup" \
+    'ST\[kyb-deleg\]-CGD-NOW=/kybernet.slice/kyb-deleg/kyb-sub' "$OUT1"
+_prop "kyb-nodeleg (undelegated) cannot make one" 'ST\[kyb-nodeleg\]-CGD-MKDIR=ERRNO=13([^0-9]|$)' "$OUT1"
+_prop "kyb-nodeleg cannot move itself" 'ST\[kyb-nodeleg\]-CGD-MOVE=ERRNO=13([^0-9]|$)' "$OUT1"
 _prop "a oneshot whose binary is missing fails to start" 'FAILED to start: kyb-prereq-fail' "$OUT1"
 _prop "its dependent is SKIPPED, with the blocker named" \
     'SKIPPED \(prerequisite failed\): kyb-prereq-dep' "$OUT1" 'prereq'
@@ -1542,7 +1601,15 @@ _tpm_a64_inputs() {
         pinned+=("$f")
         if [ -f "$f" ] && [ "$(sha256sum "$f" | cut -d' ' -f1)" = "$sum" ]; then continue; fi
         rm -f "$f"
-        if ! curl -sSf -L --retry 3 -o "$f.tmp" "${base}/${path}"; then
+        # ⚠ snapshot.debian.org THROTTLES A BURST (1.12.0). Fetching all 60 files back to
+        # back, a replay of CI got HTTP 503 on seven straight tries of one file, and once lost
+        # its resolver for longer than three retries' backoff. So a fetch waits a second
+        # after the one before it, and retries 8 times: curl backs off 1, 2, 4 s..., about
+        # four minutes, and only while it is failing. CI caches these files on the pins'
+        # hash, so it fetches only when a pin changes.
+        if [ "${_tpm_fetched:-0}" = 1 ]; then sleep 1; fi
+        _tpm_fetched=1
+        if ! curl -sSf -L --retry 8 -o "$f.tmp" "${base}/${path}"; then
             rm -f "$f.tmp"
             TPM_WHY="could not fetch ${base}/${path}"
             return 2

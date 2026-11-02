@@ -2025,6 +2025,183 @@ fn test_cgroup() {
     return 0;
 }
 
+# 1.12.0 — the identity keys. uid and gid moved from kybernet's policy struct onto
+# argonaut's definition (argonaut 1.20.0), where a built-in carries them too, and
+# groups and delegate are new. A refused key refuses the whole service.
+fn test_identity_keys() {
+    println("--- security.uid/gid/groups/delegate (1.12.0) ---");
+    var ok = svc_defs_from_json(json_v_parse(_doc2(
+          "{\"services\":[{\"name\":\"b\",\"binary\":\"/bin/b\",\"security\":{\"uid\":900,\"gid\":901,",
+          "\"groups\":[44,104],\"delegate\":true}}]}")));
+    assert_eq(vec_len(ok), 1, "id: uid, gid, groups and delegate accepted");
+    var sd = vec_get(ok, 0);
+    assert_eq(svc_def_uid(sd), 900, "id: the uid is on argonaut's definition");
+    assert_eq(svc_def_gid(sd), 901, "id: and the gid");
+    assert_eq(vec_len(svc_def_groups(sd)), 2, "id: two groups");
+    assert_eq(vec_get(svc_def_groups(sd), 1), 104, "id: in order");
+    assert_eq(svc_def_delegate(sd), 1, "id: delegated");
+    assert_eq(svc_def_seccomp(sd), 0, "id: an identity-only block stores no policy: the built-in path");
+    var empty = svc_defs_from_json(json_v_parse(_doc2(
+          "{\"services\":[{\"name\":\"b\",\"binary\":\"/bin/b\",", "\"security\":{}}]}")));
+    assert(svc_def_seccomp(vec_get(empty, 0)) != 0, "id: an empty block still stores its policy (no_new_privs)");
+    var mixed = svc_defs_from_json(json_v_parse(_doc2(
+          "{\"services\":[{\"name\":\"b\",\"binary\":\"/bin/b\",",
+          "\"security\":{\"uid\":900,\"gid\":900,\"no_new_privs\":false}}]}")));
+    assert(svc_def_seccomp(vec_get(mixed, 0)) != 0, "id: an identity with a policy key stores the policy");
+
+    var plain = svc_defs_from_json(json_v_parse(_doc2(
+          "{\"services\":[{\"name\":\"b\",\"binary\":\"/bin/b\",",
+          "\"security\":{\"seccomp\":\"basic\"}}]}")));
+    assert_eq(svc_def_uid(vec_get(plain, 0)), 0 - 1, "id: no uid key, uid unset (-1), not root (0)");
+    assert_eq(svc_def_groups(vec_get(plain, 0)), 0, "id: no groups key, no groups");
+    assert_eq(svc_def_delegate(vec_get(plain, 0)), 0, "id: not delegated");
+
+    var g_noid = json_v_parse(_doc2("{\"services\":[{\"name\":\"b\",\"binary\":\"/bin/b\",",
+        "\"security\":{\"groups\":[44]}}]}"));
+    assert_eq(vec_len(svc_defs_from_json(g_noid)), 0, "id: groups without a uid refused");
+    var g_str = json_v_parse(_doc2("{\"services\":[{\"name\":\"b\",\"binary\":\"/bin/b\",",
+        "\"security\":{\"uid\":900,\"gid\":900,\"groups\":[\"44\"]}}]}"));
+    assert_eq(vec_len(svc_defs_from_json(g_str)), 0, "id: a quoted gid in groups refused");
+    var g_obj = json_v_parse(_doc2("{\"services\":[{\"name\":\"b\",\"binary\":\"/bin/b\",",
+        "\"security\":{\"uid\":900,\"gid\":900,\"groups\":44}}]}"));
+    assert_eq(vec_len(svc_defs_from_json(g_obj)), 0, "id: groups that is not an array refused");
+    var g_neg = json_v_parse(_doc2("{\"services\":[{\"name\":\"b\",\"binary\":\"/bin/b\",",
+        "\"security\":{\"uid\":900,\"gid\":900,\"groups\":[-1]}}]}"));
+    assert_eq(vec_len(svc_defs_from_json(g_neg)), 0, "id: a negative gid in groups refused");
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"services\":[{\"name\":\"b\",\"binary\":\"/bin/b\",");
+    str_builder_add_cstr(sb, "\"security\":{\"uid\":900,\"gid\":900,\"groups\":[");
+    for (var i = 0; i < PRIV_MAX_GROUPS + 1; i = i + 1) {
+        if (i > 0) { str_builder_add_cstr(sb, ","); }
+        str_builder_add_int(sb, 100 + i);
+    }
+    str_builder_add_cstr(sb, "]}}]}");
+    var g_many = json_v_parse(str_builder_build(sb));
+    assert_eq(vec_len(svc_defs_from_json(g_many)), 0, "id: more groups than the drop's buffer refused, not cut");
+    var d_noid = json_v_parse(_doc2("{\"services\":[{\"name\":\"b\",\"binary\":\"/bin/b\",",
+        "\"security\":{\"delegate\":true}}]}"));
+    assert_eq(vec_len(svc_defs_from_json(d_noid)), 0, "id: delegate without a uid refused");
+    var d_str = json_v_parse(_doc2("{\"services\":[{\"name\":\"b\",\"binary\":\"/bin/b\",",
+        "\"security\":{\"uid\":900,\"gid\":900,\"delegate\":\"yes\"}}]}"));
+    assert_eq(vec_len(svc_defs_from_json(d_str)), 0, "id: a non-boolean delegate refused");
+
+    # The drop's group buffer: a list longer than it holds is EINVAL, never truncated.
+    var many = vec_new();
+    for (var j = 0; j < PRIV_MAX_GROUPS + 1; j = j + 1) { vec_push(many, 100 + j); }
+    assert_eq(_priv_set_groups(many), 0 - EINVAL, "id: setgroups refuses a list past its buffer");
+    return 0;
+}
+
+# 1.12.0 — argonaut's default services drop to fixed numeric ids, and agnos-init owns
+# their runtime paths and grants their devices by the same numbers. agnos-init does
+# not link argonaut, so it repeats them; this fails if the two drift, which would
+# leave aethersafha unable to bind its sockets or open its framebuffer.
+fn _ai_find(svcs, name) {
+    for (var i = 0; i < vec_len(svcs); i = i + 1) {
+        if (str_eq_cstr(svc_def_name(vec_get(svcs, i)), name) == 1) { return vec_get(svcs, i); }
+    }
+    return 0;
+}
+
+fn _ad_owner_of(path) {
+    for (var i = 0; i < agnos_dirs_count(); i = i + 1) {
+        if (streq(agnos_dirs_path(i), path) == 1) {
+            if (vec_get(_ad_kinds, i) != AD_OWN_UID) { return 0 - 2; }
+            return vec_get(_ad_whos, i);
+        }
+    }
+    return 0 - 1;
+}
+
+fn test_agnos_identity_contract() {
+    println("--- default identities vs agnos-init (1.12.0) ---");
+    var dsk = default_services(BOOT_DESKTOP);
+    var comp = _ai_find(dsk, "aethersafha");
+    var dm = _ai_find(dsk, "daimon");
+    var gw = _ai_find(dsk, "llm-gateway");
+    assert_eq(AD_UID_AGNOS, AGNOS_ID_AGNOS, "contract: agnos is the same uid on both sides");
+    assert_eq(AD_UID_AGNOS_LLM, AGNOS_ID_AGNOS_LLM, "contract: agnos-llm too");
+    assert_eq(AD_UID_USER, AGNOS_ID_USER, "contract: the interactive user too");
+    assert_eq(_ad_owner_of("/run/agnos/agents"), svc_def_uid(comp), "contract: aethersafha owns its agents socket dir");
+    assert_eq(_ad_owner_of("/run/agnos/plugins"), svc_def_uid(comp), "contract: and its plugins socket dir");
+    assert_eq(_ad_owner_of("/var/lib/agnos/agent-memory"), svc_def_uid(dm), "contract: daimon owns its memory store");
+    assert_eq(_ad_owner_of("/var/lib/agnos/agents"), svc_def_uid(dm), "contract: and its agents state");
+    assert_eq(_ad_owner_of("/var/lib/agnos/models"), svc_def_uid(gw), "contract: llm-gateway owns the models");
+    var cg = svc_def_groups(comp);
+    var has_video = 0;
+    var has_input = 0;
+    for (var i = 0; i < vec_len(cg); i = i + 1) {
+        if (vec_get(cg, i) == AD_GID_VIDEO) { has_video = 1; }
+        if (vec_get(cg, i) == AD_GID_INPUT) { has_input = 1; }
+    }
+    assert_eq(has_video, 1, "contract: aethersafha holds the group agnos-init grants /dev/fb0 to");
+    assert_eq(has_input, 1, "contract: and the one it grants /dev/input/event* to");
+    assert_eq(svc_def_delegate(dm), 1, "contract: daimon's cgroup is delegated (it contains agents)");
+    assert_eq(svc_def_uid(_ai_find(dsk, "agnos-init")), 0 - 1, "contract: agnos-init itself stays root");
+    return 0;
+}
+
+# 1.12.0 — agnos-init's device grants under a scratch root. Unprivileged, the suite
+# cannot make a character device, so it proves what is refused: a missing node is
+# not a failure, and a regular file or a symlink where a node belongs is left alone.
+# The harness proves a real grant, as root, from inside a non-root service.
+fn test_agnos_devices_grant() {
+    println("--- agnos-init device grants (1.12.0) ---");
+    agnos_dirs_set_log(0 - 1, 0);
+    var root = "/tmp/kyb-agnos-dev-test";
+    sys_unlink(_cat2(root, "/dev/input/event0"));
+    sys_unlink(_cat2(root, "/dev/input/mice"));
+    sys_unlink(_cat2(root, "/dev/fb0"));
+    sys_rmdir(_cat2(root, "/dev/input"));
+    sys_rmdir(_cat2(root, "/dev"));
+    sys_rmdir(root);
+    assert_eq(agnos_devices_grant(root), 0, "devices: no /dev at all grants nothing, and fails nothing");
+    sys_mkdir(root, 493);
+    sys_mkdir(_cat2(root, "/dev"), 493);
+    sys_mkdir(_cat2(root, "/dev/input"), 493);
+    _write_file(_cat2(root, "/dev/input/event0"), "x", 384);
+    _write_file(_cat2(root, "/dev/input/mice"), "x", 384);
+    sys_symlink(_cat2(root, "/dev/input/event0"), _cat2(root, "/dev/fb0"));
+    assert_eq(agnos_devices_grant(root), 0, "devices: a file or a symlink in a node's place is not granted");
+    assert_eq(_ad_t_mode(_cat2(root, "/dev/input/event0")) & 0xFFF, 384, "devices: the file was not chmod'd");
+    assert_eq(_ad_t_mode(_cat2(root, "/dev/input/mice")) & 0xFFF, 384, "devices: a non-event entry is not touched");
+    sys_unlink(_cat2(root, "/dev/fb0"));
+    sys_unlink(_cat2(root, "/dev/input/event0"));
+    sys_unlink(_cat2(root, "/dev/input/mice"));
+    sys_rmdir(_cat2(root, "/dev/input"));
+    sys_rmdir(_cat2(root, "/dev"));
+    sys_rmdir(root);
+    return 0;
+}
+
+# 1.12.0 — the cgroups a delegated service leaves below its own are removed depth
+# first before its own rmdir. A scratch tree stands in for cgroupfs: directories go,
+# a file stays, and the top directory is left for the caller.
+fn test_cgroup_child_walk() {
+    println("--- cgroup child removal (1.12.0) ---");
+    var top = "/tmp/kyb-cgwalk-test";
+    sys_unlink(_cat2(top, "/cgroup.procs"));
+    sys_rmdir(_cat2(top, "/a/b/c"));
+    sys_rmdir(_cat2(top, "/a/b"));
+    sys_rmdir(_cat2(top, "/a"));
+    sys_rmdir(_cat2(top, "/d"));
+    sys_rmdir(top);
+    sys_mkdir(top, 493);
+    sys_mkdir(_cat2(top, "/a"), 493);
+    sys_mkdir(_cat2(top, "/a/b"), 493);
+    sys_mkdir(_cat2(top, "/a/b/c"), 493);
+    sys_mkdir(_cat2(top, "/d"), 493);
+    _write_file(_cat2(top, "/cgroup.procs"), "0", 420);
+    cgroup_remove_children_at(top, strlen(top));
+    assert(_ad_t_mode(_cat2(top, "/a")) == 0 - 1, "cgwalk: a nested child is gone, its children first");
+    assert(_ad_t_mode(_cat2(top, "/d")) == 0 - 1, "cgwalk: a second child is gone");
+    assert(_ad_t_mode(_cat2(top, "/cgroup.procs")) != 0 - 1, "cgwalk: a file is not a cgroup, and stays");
+    assert(_ad_t_mode(top) != 0 - 1, "cgwalk: the top directory is left for the caller");
+    sys_unlink(_cat2(top, "/cgroup.procs"));
+    sys_rmdir(top);
+    return 0;
+}
+
 fn test_privdrop() {
     println("--- privdrop ---");
     var root = is_root();
@@ -4370,6 +4547,10 @@ fn main() {
     test_emerg_describe();
     test_reload_spends_nothing();
     test_reload_config_is_private();
+    test_identity_keys();
+    test_agnos_identity_contract();
+    test_agnos_devices_grant();
+    test_cgroup_child_walk();
     return assert_summary();
 }
 var exit_code = main();

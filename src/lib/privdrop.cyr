@@ -14,10 +14,38 @@ enum PrivError {
     PRIV_VERIFY_FAIL = 5;
 }
 
+# Supplementary gids for setgroups(2), which takes 32-bit gid_t. GLOBAL scope: 16
+# slots = 128 bytes, room for PRIV_MAX_GROUPS of them. The config parser refuses a
+# longer list, so this bound is never the first to say no.
+var _PRIV_GROUPS[16];
+var PRIV_MAX_GROUPS = 32;
+
+# setgroups(2) with `groups`, a vec of gids or 0 for none. Returns 0, or a negative
+# errno (-EINVAL for a list longer than the buffer holds).
+fn _priv_set_groups(groups) {
+    var n = 0;
+    if (groups != 0) { n = vec_len(groups); }
+    if (n > PRIV_MAX_GROUPS) { return 0 - EINVAL; }
+    for (var i = 0; i < n; i = i + 1) {
+        store32(&_PRIV_GROUPS + i * 4, vec_get(groups, i));
+    }
+    return sys_setgroups(n, &_PRIV_GROUPS);
+}
+
+fn _priv_ngroups(groups) {
+    if (groups == 0) { return 0; }
+    return vec_len(groups);
+}
+
 # Drop all supplementary groups, set gid and uid.
 # uid=0 or gid=0 means "don't change".
 # Returns: Result (Ok(0) on success, Err(PrivError) on failure)
-fn drop_privileges(uid, gid) {
+fn drop_privileges(uid, gid) { return drop_privileges_groups(uid, gid, 0); }
+
+# drop_privileges with a supplementary group list (1.12.0): `groups` is a vec of gids,
+# or 0, and REPLACES the list rather than adding to it, so the service holds exactly
+# these and never PID 1's.
+fn drop_privileges_groups(uid, gid, groups) {
     # Verify we're root before trying (fail fast)
     if (sys_geteuid() != 0 && uid > 0) { return Err(PRIV_NOT_ROOT); }
     if (sys_geteuid() != 0 && gid > 0) { return Err(PRIV_NOT_ROOT); }
@@ -33,7 +61,7 @@ fn drop_privileges(uid, gid) {
     # `secure_from_context`) that do not go through that parser. It costs
     # nothing: PID 1's empty group list is a property of the boot path, not an
     # invariant kybernet enforces, so clearing it is always correct here.
-    if ((uid > 0 || gid > 0) && is_err(sys_setgroups(0, 0)) == 1) {
+    if ((uid > 0 || gid > 0 || _priv_ngroups(groups) > 0) && is_err(_priv_set_groups(groups)) == 1) {
         return Err(PRIV_SETGROUPS_FAIL);
     }
 
@@ -220,7 +248,7 @@ fn _capset3(eff, perm, inh) {
 # Returns Ok(0), or Err(PrivError/errno). FAILS CLOSED at every step: a service
 # configured for uid N and a keep-list must never run as root, or with more
 # capability than it asked for.
-fn drop_caps_and_privileges(keep_mask, uid, gid) {
+fn drop_caps_and_privileges(keep_mask, uid, gid, groups) {
     if (sys_geteuid() != 0) { return Err(PRIV_NOT_ROOT); }
 
     # 1. Keep the permitted set across the uid change.
@@ -244,9 +272,10 @@ fn drop_caps_and_privileges(keep_mask, uid, gid) {
 
     # 4. The privilege drop itself.
     # Supplementary groups go on EITHER id being dropped — see the note in
-    # drop_privileges (1.6.15 MEDIUM-6). setgid itself still needs a real gid.
-    if (uid > 0 || gid > 0) {
-        if (is_err(sys_setgroups(0, 0)) == 1) { return Err(PRIV_SETGROUPS_FAIL); }
+    # drop_privileges (1.6.15 MEDIUM-6), and become exactly `groups` (1.12.0).
+    # setgid itself still needs a real gid.
+    if (uid > 0 || gid > 0 || _priv_ngroups(groups) > 0) {
+        if (is_err(_priv_set_groups(groups)) == 1) { return Err(PRIV_SETGROUPS_FAIL); }
     }
     if (gid > 0) {
         if (is_err(sys_setgid(gid)) == 1) { return Err(PRIV_SETGID_FAIL); }

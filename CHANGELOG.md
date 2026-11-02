@@ -7,6 +7,165 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.12.0] — 2026-11-02
+
+**Non-root default services.** argonaut 1.20.0 gives a service definition an identity, and the four
+AGNOS services it starts by default use one, so on an AGNOS board they no longer run as root:
+
+| Service | uid:gid | groups | cgroup |
+|---|---|---|---|
+| daimon | 900:900 (agnos) | none | delegated |
+| llm-gateway | 901:901 (agnos-llm) | none | |
+| aethersafha | 900:900 | 44 (video), 104 (input) | |
+| agnoshi | 1000:1000 (the interactive user) | none | |
+
+What each needs as a non-root uid came with it: supplementary groups in the drop, cgroup delegation,
+agnos-init owning their runtime paths by number and granting their device nodes, and a fixed-id
+account setup in agnosticos. Suite 1096 / 1091. Harness 200, aarch64 boot gate 258.
+
+### Changed — the identity is argonaut's
+
+- **uid and gid moved onto argonaut's `ServiceDefinition`** (`svc_def_uid`, `svc_def_gid`). They
+  rode on kybernet's own policy struct from 1.6.9 to 1.11.1, because argonaut had no field for
+  them, and a built-in service could not carry one. `kyb_pre_exec` now reads one source for a
+  config service and a built-in alike. `KybSeccompPolicy` keeps kind, `no_new_privs` and
+  `landlock_optional`.
+- **The hook owns the identity.** argonaut applies it itself only when no hook is registered, so a
+  hook that skipped it would run a service declared non-root as root. A service with an identity
+  is confined, `no_new_privs` included, even with no policy, which is what a built-in is. A uid with
+  no gid is refused in the hook too, because a built-in never passes through the config parser
+  that refuses it.
+- **A `security` block that names only identity keys stores no policy.** Its policy would hold the
+  defaults the hook already applies, so such a service takes exactly a built-in's path, and the
+  harness's identity fixtures now run the one path every default service takes. An empty
+  `"security": {}` still stores its policy and gets `no_new_privs`, as before.
+
+### Added — supplementary groups and cgroup delegation
+
+- **`security.groups`**: an array of numeric gids, at most 32, each bounded like a gid. It needs
+  `uid` and `gid`. The drop **replaces** the supplementary list (setgroups with exactly these),
+  where it used to clear it, so a service holds these and never PID 1's.
+- **`security.delegate`**: `true` hands the service its cgroup, as systemd's `Delegate=yes` does.
+  Before the start, kybernet chowns the cgroup directory and its `cgroup.procs`,
+  `cgroup.threads` and `cgroup.subtree_control` to the service's uid and gid, and logs
+  `cgroup delegated: <name>`. The limit files stay root's, so the service cannot lift its own
+  `memory.max`, and everything it makes below inherits them. It needs a `uid`. daimon needs this:
+  it contains each agent in a cgroup below its own, and without it daimon runs the agents
+  uncontained and says so.
+- **`kybernet.slice` is 0711, where it was 0700**, so a delegated uid can walk to its own cgroup.
+  Other services' cgroups stay 0700, so it cannot list or enter them.
+- **A delegated service's child cgroups are removed before its own.** rmdir refuses a cgroup that
+  has children, so the shutdown sweep would have spent its whole budget retrying one. The walk is
+  depth first, bounded (8 levels, 256 removals a level), and allocates nothing, because the
+  reactor's give-up path runs it too (standing rule 23).
+
+### Added — agnos-init owns by number and grants devices
+
+- **The runtime paths are owned by the ids the services run as**, not by whoever `/etc/passwd`
+  names: `/run/agnos/agents` and `/run/agnos/plugins` by 900 (aethersafha binds its sockets there,
+  and they were root's), the new `/var/lib/agnos/agent-memory` (daimon's memory store) by 900, and
+  `/var/lib/agnos/agents` and `/var/lib/agnos/models` by 900 and 901, where they were owned by name.
+  The gid still comes from passwd.
+- **`/dev/fb0` goes to group video (44) and each `/dev/input/event*` to group input (104), mode
+  0660.** kybernet runs no udev, so devtmpfs makes every node `root:root 0600`, and aethersafha's
+  Linux backend opens exactly those. A node must be a character device itself: a symlink or a file
+  in its place is left alone and reported. A missing one is reported, not a failure.
+- ⚠ **Only the nodes present when agnos-init runs.** It is a oneshot, so a keyboard plugged in later
+  stays root-only. Following hotplug is udev's job (roadmap, Gated).
+- **`test_agnos_identity_contract`**: agnos-init does not link argonaut, so it repeats the numbers,
+  and the suite fails if argonaut's defaults and agnos-init's owners and grants disagree.
+
+### Found on the way
+
+- **agnoshi has no terminal as a service.** Every service's stdio is `/dev/null` (standing rule 20),
+  and agnoshi reads its commands from fd 0, so the default agnoshi reads EOF and exits, as root or
+  as 1000. It now has its identity, and the console is a design of its own (roadmap, Gated).
+- **postgres, redis and ifran stay root**: agnosticos defines no account for them yet, and postgres
+  refuses to run as root at all (roadmap, Gated).
+- **CI caches the aarch64 TPM board's 60 pinned packages**, keyed on the pins file. Two replays of
+  CI failed pass 7 fetching them: one lost its resolver for longer than three retries' backoff, and
+  one got HTTP 503 from snapshot.debian.org, which throttles a burst, on seven straight tries of
+  one file. Each was reported as an environment failure, as it should be, and either would have
+  turned CI red. With the cache, a CI run fetches only when a pin changes. When it does, each fetch
+  waits a second after the one before and retries 8 times, about four minutes, only while failing.
+  Every file is still checked against its sha256, so neither a cache nor a retry can let a wrong
+  one in.
+- **The aarch64 stand-in check's corrupted-hash case is fixed**, the roadmap's 1.11.2 item, merged
+  here. It wrote `X` over byte 4100 of a tree over random data, so about 1 run in 256 changed
+  nothing and failed the check. It flips the byte now. Shown on the failing case itself: formatting
+  random images until byte 4100 was already `X` took 432 tries; on that tree the old overwrite left
+  veritysetup exiting 0, the flip exits 2.
+
+### Gates
+
+Both harnesses read each property from inside a non-root service, and a root one relays it. Each has
+a control arm that lacks the property, so a pass cannot come from something anybody could do:
+
+| Service | Identity | What it must show |
+|---|---|---|
+| kyb-grant | 900:900, groups 44 104 | `Groups=44 104`, `NoNewPrivs=1`, and opening the granted input node fails past the permission check (ENXIO, 6: no driver behind it), as does `/dev/fb0` |
+| kyb-nogrant | 900:900 | the same two opens refused, EACCES (13) |
+| kyb-deleg | 900:900, delegated | makes a cgroup below its own and moves into it |
+| kyb-nodeleg | 900:900 | refused, EACCES, on both |
+
+Two root oneshots make the device nodes first (`/dev/input/event90`, and `/dev/fb0` unless a real
+one exists), so the grants have something to act on on any board. agnos-init's observer checks the
+new owners, the two grants (`0660 0:104`, `0660 0:44`) and the slice's 0711. The shutdown sweep
+removes 38 cgroups on x86 and 37 on aarch64, the delegated one's child first. The service fixture
+gained `mknod`, `open`, `cgdelegate`, a multi-file `relay` and the `Groups` line.
+
+Ten defects injected, each in its own tree, through the unit suite and both harnesses (pass 7 aside,
+which this host cannot run), after a no-defect control that was clean on all three:
+
+| Defect injected | Unit | x86 | aarch64 | What went red |
+|---|---:|---:|---:|---|
+| The hook ignores the definition's uid and gid | 0 | 9 | 8 | every non-root fixture ran as root, the 1.6.9 ones too |
+| The supplementary groups never applied | 0 | 3 | 3 | `Groups=` empty, and the granted nodes refused |
+| No `no_new_privs` on the built-in path | 0 | 1 | 1 | `NoNewPrivs=0` |
+| agnos-init grants no devices | 0 | 4 | 4 | both nodes `0600 0:0`, and kyb-grant refused |
+| The cgroup never delegated | 0 | 4 | 4 | no `cgroup delegated`, mkdir and move refused |
+| A delegated cgroup's children not removed | 0 | 1 | 1 | one cgroup fewer removed at shutdown |
+| The slice back to 0700 | 0 | 4 | 4 | the mode, and the delegated service cannot reach its cgroup |
+| The socket directories left root's | 1 | 1 | 1 | the owner, and the contract |
+| agnos-init and argonaut disagree on agnos (901) | 5 | 4 | 4 | the contract, and every 900-owned path |
+| `security.groups` accepted without a uid | 1 | 0 | 0 | the unit suite; no fixture writes that config |
+
+Each column counts failed assertions. The last defect is visible only to the suite, as a config the
+parser refuses should be.
+
+The x86 boot span grew with the pass's workload: 572 to 587 ms for 1.11.1 and 687 to 696 ms for this
+tree, measured one after the other on this machine. That is seven more services, about 16 ms
+each, and the budget stays 1,200 ms. At load 20 from other work on the box this tree read 1,320 ms
+on all three boots, and 1.11.1 had read 1,002 ms at that load earlier the same day: contention
+multiplies whatever the pass does, so more services cost more there (standing rule 37).
+
+Every release gate passed on the pinned tree. The lock was re-resolved against argonaut 1.20.0's tag
+(`1a93265`, checked against the remote), and the binaries built from it are byte-identical to those
+built against the local argonaut tree, so every run before the pin tested these bytes. The suite
+passed 1,096, the exec gate 1,091, and the bench gate found no regression on a quiet host. In the
+container, strict x86 passed 200 of 200 and the aarch64 gate 258 of 258, both TPM passes in full.
+The sibling-free reproduction gave a byte-identical lock and binaries. `verify-lock.sh` reads the
+committed lock, so it stays red until this lock is committed; on a commit of this tree it passes.
+Replaying every `ci.yml` step in `ubuntu:26.04` passed 23 of 23 on a cold package cache, and the
+retries absorbed 11 HTTP 503s from snapshot.debian.org on the way.
+
+### Binary
+
+| Binary | 1.11.1 | 1.12.0 |
+|---|---:|---:|
+| x86_64 | 1,129,392 | 1,143,360 |
+| aarch64 | 2,730,520 | 2,736,272 |
+| agnos-init x86_64 | 565,608 | 570,288 |
+| agnos-init aarch64 | 2,592,832 | 2,593,408 |
+
+The x86 binary gained 13,968 bytes. 4,400 of them are argonaut 1.20.0 alone: the 1.11.1 source built
+against it already read 1,133,792, mostly the identity drop the spawn child now carries. The rest is
+the hook's identity path, the group list, delegation, the allocation-free child walk and the new keys.
+agnos-init's +4,680 is the device grants. The builds against the local argonaut tree and against the
+1.20.0 tag are byte-identical, so every gate run before the pin tested these bytes.
+
+---
+
 ## [1.11.1] — 2026-11-02
 
 **The TPM board on aarch64.** 1.11.0's edge paths now run on aarch64 too: attestation, `veritysetup

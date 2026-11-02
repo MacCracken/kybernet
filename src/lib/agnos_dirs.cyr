@@ -32,9 +32,20 @@ enum AgnosDirOwner {
     AD_OWN_UID = 2;     # a fixed uid, with that uid's primary gid (or the uid)
 }
 
-# S_IFMT / S_IFDIR from the kernel's stat.h. The stdlib has no constants for them.
+# S_IFMT / S_IFDIR / S_IFCHR from the kernel's stat.h. The stdlib has no constants
+# for them.
 var AD_S_IFMT = 0xF000;
 var AD_S_IFDIR = 0x4000;
+var AD_S_IFCHR = 0x2000;
+
+# The AGNOS identities, as argonaut's default services run (its AgnosIdentity enum).
+# agnos-init does not link argonaut, so the numbers are repeated here and
+# test_agnos_identity_contract fails if the two disagree.
+var AD_UID_AGNOS = 900;
+var AD_UID_AGNOS_LLM = 901;
+var AD_UID_USER = 1000;
+var AD_GID_VIDEO = 44;
+var AD_GID_INPUT = 104;
 
 # The layout, parents before children. Each entry: path, mode, owner kind, and the
 # user name (AD_OWN_USER) or uid (AD_OWN_UID).
@@ -57,17 +68,27 @@ fn agnos_dirs_layout_init() {
     _ad_modes = vec_new();
     _ad_kinds = vec_new();
     _ad_whos = vec_new();
-    # Sockets. aethersafha: apps.cyr (agents), plugin_host.cyr (plugins).
+    # ⚠ OWNED BY NUMBER, AS THE SERVICES RUN (1.12.0). argonaut's default services
+    # drop to fixed numeric ids (AgnosIdentity in its services.cyr): daimon and
+    # aethersafha 900, llm-gateway 901. A directory owned by whoever /etc/passwd
+    # names "agnos" would be someone else's on a board whose passwd numbers it
+    # differently, so these name the uid, and take its primary gid from passwd.
+    # test_agnos_identity_contract holds the two tables together.
+    #
+    # Sockets. aethersafha binds them as uid 900: apps.cyr (agents), plugin_host.cyr
+    # (plugins).
     _ad_add("/run/agnos", 493, AD_OWN_NONE, 0);                  # 0755
-    _ad_add("/run/agnos/agents", 493, AD_OWN_NONE, 0);
-    _ad_add("/run/agnos/plugins", 493, AD_OWN_NONE, 0);
+    _ad_add("/run/agnos/agents", 493, AD_OWN_UID, AD_UID_AGNOS);
+    _ad_add("/run/agnos/plugins", 493, AD_OWN_UID, AD_UID_AGNOS);
     # XDG_RUNTIME_DIR for the default interactive user, uid 1000.
     _ad_add("/run/user", 493, AD_OWN_NONE, 0);
-    _ad_add("/run/user/1000", 448, AD_OWN_UID, 1000);            # 0700
+    _ad_add("/run/user/1000", 448, AD_OWN_UID, AD_UID_USER);     # 0700
     # State and logs, as agnos-init.sh's setup_directories() made them.
     _ad_add("/var/lib/agnos", 493, AD_OWN_NONE, 0);
-    _ad_add("/var/lib/agnos/agents", 493, AD_OWN_USER, "agnos");
-    _ad_add("/var/lib/agnos/models", 493, AD_OWN_USER, "agnos-llm");
+    _ad_add("/var/lib/agnos/agents", 493, AD_OWN_UID, AD_UID_AGNOS);
+    # daimon's memory store (daimon app.cyr), which it writes as uid 900.
+    _ad_add("/var/lib/agnos/agent-memory", 493, AD_OWN_UID, AD_UID_AGNOS);
+    _ad_add("/var/lib/agnos/models", 493, AD_OWN_UID, AD_UID_AGNOS_LLM);
     _ad_add("/var/lib/agnos/cache", 493, AD_OWN_NONE, 0);
     _ad_add("/var/lib/agnos/audit", 493, AD_OWN_NONE, 0);
     _ad_add("/var/log/agnos", 488, AD_OWN_NONE, 0);              # 0750
@@ -273,6 +294,76 @@ fn _ad_own(root, full, kind, who) {
     var r = sys_fchownat(AT_FDCWD, full, load64(&ids), load64(&ids + 8), AT_SYMLINK_NOFOLLOW);
     if (r != 0) { _ad_report("could not set the owner of ", full); }
     return 0;
+}
+
+# ---------------------------------------------------------------------------
+# Device nodes (1.12.0).
+#
+# kybernet runs no udev, so devtmpfs makes every node root:root 0600 and a service
+# that has dropped root cannot open the framebuffer or an input device. aethersafha
+# runs as uid 900 with groups video and input (argonaut's default), so agnos-init
+# gives /dev/fb0 to group video and each /dev/input/event* to group input, mode 0660,
+# owner left root. A node must be a character device itself (lstat, never stat): a
+# symlink or a file there is left alone and reported.
+#
+# ⚠ ONLY THE NODES PRESENT WHEN IT RUNS. agnos-init is a oneshot, so a device that
+# appears later (a keyboard plugged in after boot) stays root-only. Following hotplug
+# is udev's job, and this is not a udev. A missing node is reported, not a failure:
+# a board can boot without a framebuffer, and the compositor then fails on its own.
+var AD_DEV_MODE = 432;      # 0660
+
+# Grant the node at `full` to `gid`. 1 when granted, 0 when it is not there, -1 when
+# something else is there or the kernel refused.
+fn _ad_grant_node(full, gid) {
+    var st[STAT_BUFSZ];
+    var r = sys_lstat(full, &st);
+    if (r == 0 - ENOENT) { return 0; }
+    if (r != 0) {
+        _ad_report("cannot inspect device node: ", full);
+        return 0 - 1;
+    }
+    if ((load32(&st + STAT_MODE) & AD_S_IFMT) != AD_S_IFCHR) {
+        _ad_report("not a character device, left alone: ", full);
+        return 0 - 1;
+    }
+    if (sys_fchownat(AT_FDCWD, full, 0 - 1, gid, AT_SYMLINK_NOFOLLOW) != 0) {
+        _ad_report("could not set the group of ", full);
+        return 0 - 1;
+    }
+    # lstat said character device a moment ago, in a directory only root can write,
+    # so chmod (which follows links) cannot be redirected here.
+    if (sys_chmod(full, AD_DEV_MODE) != 0) {
+        _ad_report("could not set the mode of ", full);
+        return 0 - 1;
+    }
+    _ad_report("device granted to its group: ", full);
+    return 1;
+}
+
+# Grant every device node aethersafha needs under `root`. Returns how many were
+# granted; nothing here fails the run.
+fn agnos_devices_grant(root) {
+    var granted = 0;
+    var fb = _ad_join(root, "/dev/fb0");
+    if (fb != 0) {
+        var g = _ad_grant_node(fb, AD_GID_VIDEO);
+        if (g == 1) { granted = granted + 1; }
+        if (g == 0) { _ad_report("no framebuffer to grant: ", fb); }
+    }
+    var dir = _ad_join(root, "/dev/input");
+    if (dir == 0) { return granted; }
+    var names = dir_list(str_from(dir));
+    var seen = 0;
+    for (var i = 0; i < vec_len(names); i = i + 1) {
+        var nm = str_data(vec_get(names, i));
+        if (strlen(nm) > 5 && memeq(nm, "event", 5) == 1) {
+            seen = seen + 1;
+            var full = _ad_join(dir, _ad_join("/", nm));
+            if (full != 0 && _ad_grant_node(full, AD_GID_INPUT) == 1) { granted = granted + 1; }
+        }
+    }
+    if (seen == 0) { _ad_report("no input devices to grant under ", dir); }
+    return granted;
 }
 
 # Make every directory in the layout under `root`, set each one's mode, and set the

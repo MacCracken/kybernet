@@ -6,6 +6,16 @@
 
 ## Version
 
+**1.12.0**: non-root default services. argonaut 1.20.0 gives a service definition a uid, gid,
+supplementary groups and cgroup delegation, and its four AGNOS defaults use them: daimon 900:900
+delegated, llm-gateway 901:901, aethersafha 900:900 with video and input, agnoshi 1000:1000.
+kybernet's hook applies them (with `no_new_privs`), the drop sets the group list, a delegated
+service gets its cgroup's control files and its children are removed at teardown, and agnos-init
+owns the runtime paths by number and grants `/dev/fb0` and `/dev/input/event*` to their groups.
+New keys `security.groups` and `security.delegate`. agnosticos makes the accounts at those ids.
+Also the aarch64 stand-in check's 1-in-256 flake, the roadmap's 1.11.2. Suite 1096 / 1091.
+Harness 200, aarch64 boot gate 258.
+
 **1.11.1**: the TPM board on aarch64. Pass 7 of the aarch64 boot gate makes the x86 TPM board's five
 boots on aarch64: attestation, `veritysetup open` and the read-only mount, PCR 15 measured, the LUKS2
 token unsealed and the PCR capped, a swapped root and an unverified one refused, a corrupted block read
@@ -298,7 +308,7 @@ gitignored: **the contract is the lock file, not the bytes on disk.**
 | sigil | 3.13.15 | `3c47656` | THIN surface: mldsa + sha_ni + sha256 + hex + tpm + argon2. **Never the monolith.** libro's, argonaut's and the fold's pin |
 | agnostik | 2.0.0 | `e6d33aa` | `dist/agnostik.cyr` full bundle |
 | libro | 2.11.3 | `f4a31a4` | `dist/libro.cyr` full bundle |
-| argonaut | 1.19.0 | `12bf004` | **12 selective modules**, no dist bundle |
+| argonaut | 1.20.0 | `1a93265` | **12 selective modules**, no dist bundle |
 | patra | 1.16.6 | `efa2e34` | stdlib fold, and libro's pin (byte-identical); kybernet calls no `patra_*` |
 
 `cyrius deps --verify`: **84 verified, 0 failed**, 5 commit pins, each compared with the
@@ -328,14 +338,12 @@ and byte-identical, and the warning still fires.
 
 ## Binary
 
-Unchanged since 1.11.0: 1.11.1 touched no source the binaries are built from.
-
 | Arch | Bytes | `e_machine` |
 |---|---|---|
-| x86_64 (`CYRIUS_DCE=1`) | 1,129,392 | `0x3e` |
-| aarch64 (`CYRIUS_DCE=1`) | 2,730,520 | `0xb7` |
-| agnos-init x86_64 (`CYRIUS_DCE=1`) | 565,608 | `0x3e` |
-| agnos-init aarch64 (`CYRIUS_DCE=1`) | 2,592,832 | `0xb7` |
+| x86_64 (`CYRIUS_DCE=1`) | 1,143,360 | `0x3e` |
+| aarch64 (`CYRIUS_DCE=1`) | 2,736,272 | `0xb7` |
+| agnos-init x86_64 (`CYRIUS_DCE=1`) | 570,288 | `0x3e` |
+| agnos-init aarch64 (`CYRIUS_DCE=1`) | 2,593,408 | `0xb7` |
 
 ⚠ 1.8.1 is mostly the toolchain. 1.8.0's source and deps under 6.7.18 give 1,095,824 B on x86_64
 (+308,488), of which 283,912 B is the data segment's Unicode tables; the deps and this release's
@@ -355,21 +363,21 @@ the build; that is standing rule 32.
 
 | Gate | Count | Enforcement |
 |---|---|---|
-| `cyrius test src/test.cyr` | **1056** assertions | floor read from CLAUDE.md; a shrinking suite fails |
-| `bash scripts/aarch64-exec-gate.sh` | **1051** assertions + 5 syscall probes | executes aarch64 under `qemu-user`; its own declared floor |
-| `bash qemu/boot-test-aarch64.sh` | **241** properties, 7 passes, 32 services, the TPM board's five boots | boots `kybernet-aarch64` as PID 1 (TCG), entropy-starved; needs host `veritysetup`, and swtpm for pass 7 |
-| `bash qemu/boot-test.sh` | **180** properties, 7 passes, the TPM board's five boots among them | `HARNESS_STRICT=1` in CI makes a skip a failure, a missing swtpm included |
+| `cyrius test src/test.cyr` | **1096** assertions | floor read from CLAUDE.md; a shrinking suite fails |
+| `bash scripts/aarch64-exec-gate.sh` | **1091** assertions + 5 syscall probes | executes aarch64 under `qemu-user`; its own declared floor |
+| `bash qemu/boot-test-aarch64.sh` | **258** properties, 7 passes, 39 services, the TPM board's five boots | boots `kybernet-aarch64` as PID 1 (TCG), entropy-starved; needs host `veritysetup`, and swtpm for pass 7 |
+| `bash qemu/boot-test.sh` | **200** properties, 7 passes, the TPM board's five boots among them | `HARNESS_STRICT=1` in CI makes a skip a failure, a missing swtpm included |
 | `bash scripts/verify-lock.sh` | 2 halves, 5 commit pins | the committed lock (HEAD's, not the working tree's) vs a fresh resolve |
 | `bash scripts/bench-history.sh` | **56** benchmarks (1 reported-not-gated) | ≥15% flag against history, decided by a same-machine A/B against the previous tag; `LAYOUT_SENSITIVE` names the two exempt ones |
 | `cyrius lint` | 0 warnings, **0 untracked deferrals** | HARD GATE, both halves |
 | `cyrius fmt --check` | clean | non-mutating; never `diff <(cyrius fmt …)` |
 
-⚠ **1056 and 1051 are both correct, and neither floor gates the other.** Six assertions are
+⚠ **1096 and 1091 are both correct, and neither floor gates the other.** Six assertions are
 x86-only (`BS_OPEN`/`BS_STAT`/`BS_LSTAT`/`BS_PIPE`/`BS_POLL`/`BS_NANOSLEEP`) and one is
 aarch64-only (`BS_PPOLL`). Both floors are declared in CLAUDE.md and must be bumped
 together. **Do not pad the short arch to equalise them.**
 
-21 modules in `src/lib/`. 33 services in the x86 harness and 32 in the aarch64 gate, one of each left out by `required_for_modes`. 8 `.cyr` files under `qemu/`.
+21 modules in `src/lib/`. 40 services in the x86 harness and 39 in the aarch64 gate, one of each left out by `required_for_modes`. 8 `.cyr` files under `qemu/`.
 
 ## Verification posture
 
@@ -400,19 +408,17 @@ stricter bar on the next sweep.**
 
 ## In flight
 
-1.11.1 is cut in the working tree, not yet committed or tagged. 1.11.0 is tagged, and its CI run is
-green, the x86 TPM pass under the runner's AppArmor included. No dep moved. Two issue files sit
-uncommitted in sibling repos: sigil's Unicode-tables issue and libro's `uuid_v4` issue.
+1.12.0 is cut in the working tree, not yet committed or tagged, and so are argonaut 1.20.0 and the
+agnosticos account change it needs. kybernet pins argonaut by tag, so argonaut 1.20.0 is tagged first
+and the lock re-resolved against it before kybernet is tagged. 1.11.1 is tagged and its CI run is
+green. Two issue files sit uncommitted in sibling repos: sigil's Unicode-tables issue and libro's
+`uuid_v4` issue.
 
 ## Next
 
-**1.11.2, a flake in the aarch64 stand-in check**, then the rest of the release plan in
-[roadmap.md](roadmap.md), where each of the 11 open items has a target release or a named gate.
-
-| Release | Theme |
-|---|---|
-| 1.11.2 | A flake in the aarch64 stand-in check |
-| 1.12.0 | Non-root default services |
+**No release is numbered after 1.12.0.** All 12 open items in [roadmap.md](roadmap.md) are Gated,
+each with its gate named: three of them were found by 1.12.0 (agnoshi's terminal, hotplugged
+devices, and accounts for postgres, redis and ifran).
 
 ## Release order (cross-repo)
 

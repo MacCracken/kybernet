@@ -685,21 +685,87 @@ cat > "${INITRAMFS_DIR}/etc/kybernet/config.json" << 'CFGEOF'
                        "timeout_ms": 500, "retries": 2, "retry_delay_ms": 50 }
     },
     {
-      "name": "agnos-init",
-      "description": "the real agnos-init oneshot: the AGNOS directory layout (1.7.6)",
-      "binary": "/usr/lib/agnos/agnos-init",
+      "name": "kyb-mknod-in",
+      "description": "1.12.0: an input node for agnos-init to grant, on any board (no driver behind it)",
+      "binary": "/usr/bin/kyb-svc-fixture",
+      "args": ["mknod", "/dev/input/event90", "13", "154"],
       "type": "oneshot",
       "restart": "never"
+    },
+    {
+      "name": "kyb-mknod-fb",
+      "description": "1.12.0: /dev/fb0, or the real one left as it is (EXISTS)",
+      "binary": "/usr/bin/kyb-svc-fixture",
+      "args": ["mknod", "/dev/fb0", "29", "0"],
+      "type": "oneshot",
+      "restart": "never"
+    },
+    {
+      "name": "agnos-init",
+      "description": "the real agnos-init oneshot: the AGNOS directory layout (1.7.6), device grants (1.12.0)",
+      "binary": "/usr/lib/agnos/agnos-init",
+      "type": "oneshot",
+      "restart": "never",
+      "depends_on": ["kyb-mknod-in", "kyb-mknod-fb"]
     },
     {
       "name": "kyb-agnos-dirs",
       "description": "observer: lstat()s what agnos-init made, from inside the guest (1.7.6)",
       "binary": "/usr/bin/kyb-svc-fixture",
       "args": ["stat", "/run/agnos/agents", "/run/agnos/plugins", "/run/user/1000",
-               "/var/lib/agnos/agents", "/var/lib/agnos/models", "/var/log/agnos"],
+               "/var/lib/agnos/agents", "/var/lib/agnos/agent-memory", "/var/lib/agnos/models",
+               "/var/log/agnos", "/dev/input/event90", "/dev/fb0", "/sys/fs/cgroup/kybernet.slice"],
       "type": "oneshot",
       "restart": "never",
       "depends_on": ["agnos-init"]
+    },
+    {
+      "name": "kyb-grant",
+      "description": "1.12.0: aethersafha's identity (900:900 + video, input) opens the granted nodes",
+      "binary": "/usr/bin/kyb-svc-fixture",
+      "args": ["open", "/dev/input/event90", "/dev/fb0"],
+      "type": "oneshot",
+      "restart": "never",
+      "depends_on": ["agnos-init"],
+      "security": { "uid": 900, "gid": 900, "groups": [44, 104] }
+    },
+    {
+      "name": "kyb-nogrant",
+      "description": "1.12.0: control arm, the same uid with no groups: EACCES on both",
+      "binary": "/usr/bin/kyb-svc-fixture",
+      "args": ["open", "/dev/input/event90", "/dev/fb0"],
+      "type": "oneshot",
+      "restart": "never",
+      "depends_on": ["agnos-init"],
+      "security": { "uid": 900, "gid": 900 }
+    },
+    {
+      "name": "kyb-deleg",
+      "description": "1.12.0: a delegated service makes a cgroup below its own and moves into it",
+      "binary": "/usr/bin/kyb-svc-fixture",
+      "args": ["cgdelegate"],
+      "type": "oneshot",
+      "restart": "never",
+      "security": { "uid": 900, "gid": 900, "delegate": true }
+    },
+    {
+      "name": "kyb-nodeleg",
+      "description": "1.12.0: control arm, the same uid undelegated: EACCES",
+      "binary": "/usr/bin/kyb-svc-fixture",
+      "args": ["cgdelegate"],
+      "type": "oneshot",
+      "restart": "never",
+      "security": { "uid": 900, "gid": 900 }
+    },
+    {
+      "name": "kyb-id-relay",
+      "description": "1.12.0: root relay for the four non-root identity probes",
+      "binary": "/usr/bin/kyb-svc-fixture",
+      "args": ["relay", "/dev/shm/kyb-st-kyb-grant.txt", "/dev/shm/kyb-st-kyb-nogrant.txt",
+               "/dev/shm/kyb-st-kyb-deleg.txt", "/dev/shm/kyb-st-kyb-nodeleg.txt"],
+      "type": "oneshot",
+      "restart": "never",
+      "depends_on": ["kyb-grant", "kyb-nogrant", "kyb-deleg", "kyb-nodeleg"]
     }
   ]
 }

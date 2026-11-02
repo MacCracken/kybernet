@@ -27,10 +27,22 @@
 #                    observer for the verified root: dm-verity fails a corrupted
 #                    block with EIO, 5 (1.11.0). Exits 3 on an error.
 #   status           report this process's own confinement, see below
-#   relay <file>     copy a status report from a file to the console
+#   relay <file>...  copy status reports from files to the console
 #   stat <path>...   report each path as `STAT-<path>=<kind> <mode> <uid>:<gid>`, kind
 #                    dir, link, file, other or absent, from lstat so a symlink shows as
 #                    one. The observer for agnos-init's layout (1.7.6).
+#   mknod <path> <major> <minor>  make a character device node there, 0600 root, and
+#                    its parent directory if missing, as `MKNOD-<path>=OK`, `=EXISTS`
+#                    or `-ERRNO=<n>`. The stand-in for a device the kernel made, so
+#                    agnos-init's grants have a node to act on on any board (1.12.0).
+#   cgdelegate       make a cgroup below this process's own and move into it, as daimon
+#                    does with each agent, as `ST[<leaf>]-CGD-MKDIR=` and `-CGD-MOVE=`
+#                    with OK or ERRNO=<n>, then `-CGD-NOW=<cgroup>`. Without delegation
+#                    a non-root service gets EACCES (1.12.0).
+#   open <path>...   this process's identity (the status keys), then each path opened
+#                    for reading as `ST[<leaf>]-OPEN-<path>=OK` or `=ERRNO=<n>`. The
+#                    probe for agnos-init's device grants: a granted node passes the
+#                    permission check and an ungranted one is EACCES, 13 (1.12.0).
 #
 # EMERGENCY SHELL (1.7.3) — started AS /usr/bin/agnoshi, i.e. with that argv[0], this
 # is the shell kybernet's drop_to_emergency execs after a correct password. It
@@ -220,6 +232,7 @@ fn open_sink() {
 fn wanted(k) {
     if (streq(k, "Uid") == 1) { return 1; }
     if (streq(k, "Gid") == 1) { return 1; }
+    if (streq(k, "Groups") == 1) { return 1; }
     if (streq(k, "CapEff") == 1) { return 1; }
     if (streq(k, "CapPrm") == 1) { return 1; }
     if (streq(k, "CapBnd") == 1) { return 1; }
@@ -325,6 +338,48 @@ fn relay(path) {
     if (fd < 0) { return 3; }
     sys_write(fd, &_ST, n);
     sys_close(fd);
+    return 0;
+}
+
+# Every file from argv[2] on. 3 when any could not be relayed, after trying them all.
+fn relay_all() {
+    var rc = 0;
+    var i = 2;
+    var p = argv_at(i);
+    while (p != 0) {
+        if (relay(p) != 0) { rc = 3; }
+        i = i + 1;
+        p = argv_at(i);
+    }
+    return rc;
+}
+
+# This process's identity, then each path from argv[2] on opened read-only.
+fn do_open() {
+    load_cgroup();
+    if (open_sink() < 0) { return 3; }
+    report_status();
+    var i = 2;
+    var p = argv_at(i);
+    while (p != 0) {
+        line_add("ST[");
+        line_add(_leaf);
+        line_add("]-OPEN-");
+        line_add(p);
+        var fd = sys_open(p, O_RDONLY | O_CLOEXEC, 0);
+        if (fd >= 0) {
+            sys_close(fd);
+            line_add("=OK");
+        } else {
+            line_add("=ERRNO=");
+            add_dec(0 - fd);
+        }
+        line_emit();
+        i = i + 1;
+        p = argv_at(i);
+    }
+    emit_kv("DONE", "1");
+    sys_close(_sink);
     return 0;
 }
 
@@ -544,6 +599,80 @@ fn do_stat() {
     return 0;
 }
 
+# A character device node at `path`, 0600 root, in a parent made if it is missing.
+# dev_t's encoding for a major below 4096 and a minor below 256.
+fn do_mknod(path, major, minor) {
+    if (path == 0 || major < 0 || major > 4095 || minor < 0 || minor > 255) { return 3; }
+    if (open_sink() < 0) { return 3; }
+    var k = strlen(path);
+    if (k > 500) { return 3; }
+    memcpy(&_PATH, path, k);
+    store8(&_PATH + k, 0);
+    var s = k;
+    while (s > 0 && load8(&_PATH + s) != 47) { s = s - 1; }
+    if (s > 0) {
+        store8(&_PATH + s, 0);
+        sys_mkdir(&_PATH, 493);   # 0755; EEXIST is fine
+    }
+    line_add("MKNOD-");
+    line_add(path);
+    var r = sys_mknodat(AT_FDCWD, path, 0x2000 | 384, (major << 8) | minor);   # S_IFCHR | 0600
+    if (r == 0) {
+        line_add("=OK");
+    } elif (r == 0 - EEXIST) {
+        line_add("=EXISTS");
+    } else {
+        line_add("-ERRNO=");
+        add_dec(0 - r);
+    }
+    line_emit();
+    return 0;
+}
+
+# A cgroup below this process's own, and this process moved into it: what a
+# delegated service can do and an undelegated non-root one cannot.
+fn do_cgdelegate() {
+    load_cgroup();
+    if (open_sink() < 0) { return 3; }
+    if (path_join3("/sys/fs/cgroup", _cgpath, "/kyb-sub") < 0) { return 3; }
+    line_add("ST[");
+    line_add(_leaf);
+    line_add("]-CGD-MKDIR=");
+    var m = sys_mkdir(&_PATH, 493);
+    if (m == 0 || m == 0 - EEXIST) { line_add("OK"); } else { line_add("ERRNO="); add_dec(0 - m); }
+    line_emit();
+    if (path_join3("/sys/fs/cgroup", _cgpath, "/kyb-sub/cgroup.procs") < 0) { return 3; }
+    line_add("ST[");
+    line_add(_leaf);
+    line_add("]-CGD-MOVE=");
+    var fd = sys_open(&_PATH, O_WRONLY | O_CLOEXEC, 0);
+    if (fd < 0) {
+        line_add("ERRNO=");
+        add_dec(0 - fd);
+    } else {
+        var w = sys_write(fd, "0", 1);
+        sys_close(fd);
+        if (w == 1) { line_add("OK"); } else { line_add("ERRNO="); add_dec(0 - w); }
+    }
+    line_emit();
+    # Into _VAL, not _CG: _leaf points into _CG, and the line names this service.
+    read_into("/proc/self/cgroup", &_VAL, 512);
+    var at = strstr(&_VAL, "::");
+    line_add("ST[");
+    line_add(_leaf);
+    line_add("]-CGD-NOW=");
+    if (at >= 0) {
+        var q = &_VAL + at + 2;
+        var e = q;
+        while (load8(e) != 0 && load8(e) != 10) { e = e + 1; }
+        store8(e, 0);
+        line_add(q);
+    }
+    line_emit();
+    sys_close(_sink);
+    return 0;
+}
+
 # The child is reparented to PID 1 when this process exits, and kybernet has to
 # reap a process it never started (the reactor's "reaped orphans: N").
 fn do_orphan() {
@@ -585,9 +714,14 @@ fn main() {
         return do_stat();
     }
     if (streq(mode, "relay") == 1) {
-        var f = argv_at(2);
-        if (f == 0) { return 3; }
-        return relay(f);
+        if (argv_at(2) == 0) { return 3; }
+        return relay_all();
     }
+    if (streq(mode, "open") == 1) { return do_open(); }
+    if (streq(mode, "mknod") == 1) {
+        load_cgroup();
+        return do_mknod(argv_at(2), parse_uint(argv_at(3)), parse_uint(argv_at(4)));
+    }
+    if (streq(mode, "cgdelegate") == 1) { return do_cgdelegate(); }
     return 3;
 }
