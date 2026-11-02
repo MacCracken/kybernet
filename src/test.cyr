@@ -531,6 +531,20 @@ fn test_svc_config_env_files() {
     assert(bad != 0, "envf: a bad variable name is not a load error");
     assert_eq(_service_env_map(bad), 0 - 1, "envf: a bad variable name fails the merge, so the start");
 
+    # A NUL in a value: execve would stop at it, so the service would get part of what it
+    # was configured with. kybernet refused this until 1.10.0 moved the read to argonaut,
+    # which has refused it itself since 1.19.0.
+    var nb = alloc(16);
+    memcpy(nb, "KYB_N=ab", 8);
+    store8(nb + 8, 0);
+    memcpy(nb + 9, "cd\n", 3);
+    file_write_all("/tmp/kyb-envf-nul.env", nb, 12);
+    var nul = _svc_one(_doc2("{\"services\":[{\"name\":\"f\",\"binary\":\"/bin/f\",",
+        "\"env_files\":[\"/tmp/kyb-envf-nul.env\"]}]}"));
+    assert(nul != 0, "envf: a NUL in a value is not a load error");
+    assert_eq(_env_files_preflight(svc_def_env_files(nul)), 0, "envf: nor can the preflight see it");
+    assert_eq(_service_env_map(nul), 0 - 1, "envf: the merge refuses it, so the child exits 126");
+
     var dir = _svc_one(_doc2("{\"services\":[{\"name\":\"f\",\"binary\":\"/bin/f\",",
         "\"env_files\":[\"/tmp\"]}]}"));
     assert_eq(_env_files_preflight(svc_def_env_files(dir)), 0 - 1, "envf: a directory fails the preflight");
@@ -551,6 +565,7 @@ fn test_svc_config_env_files() {
     sys_unlink("/tmp/kyb-envf-bad.env");
     sys_unlink("/tmp/kyb-envf-big.env");
     sys_unlink("/tmp/kyb-envf-late.env");
+    sys_unlink("/tmp/kyb-envf-nul.env");
     return 0;
 }
 
@@ -3309,6 +3324,23 @@ fn test_emerg_classifiers_agree() {
     return 0;
 }
 
+# create_service_cgroup runs on every restart, so past its first call for a name it must
+# spend nothing. mkdir's answer does not matter here: an unprivileged suite gets EACCES,
+# and a privileged one makes the directory, which goes again below. 1.10.1.
+fn test_create_cgroup_spends_nothing() {
+    println("--- a restart's cgroup (1.10.1) ---");
+    var name = "kyb-spend-probe";
+    create_service_cgroup(name);
+    var before = alloc_used();
+    for (var i = 0; i < 20; i = i + 1) { create_service_cgroup(name); }
+    assert_eq(alloc_used() - before, 0, "cgroup: twenty repeat creates spend no arena");
+    assert(streq(str_data(_cg_slice_path), "/sys/fs/cgroup/kybernet.slice") == 1, "cgroup: the slice path is kept");
+    _cg_cache_reset_all();
+    assert_eq(_cg_slice_path, 0, "cgroup: a cache reset forgets it, for the arena reset (rule 8)");
+    remove_service_cgroup(name);
+    return 0;
+}
+
 # reload's two generations. A use-after-free here would be in PID 1, so each promise in
 # cfg_reload_parse's header gets an assertion. The parsed values are one length, so a
 # generation reset under a live pointer overwrites it instead of going unnoticed.
@@ -4254,6 +4286,7 @@ fn main() {
     test_config_merge_services();
     test_emerg_classifiers_agree();
     test_config_reload_generations();
+    test_create_cgroup_spends_nothing();
     test_emerg_describe();
     test_reload_spends_nothing();
     test_reload_config_is_private();

@@ -1129,6 +1129,37 @@ else
 fi
 _prop "the out-of-range start timeout was rejected with its reason" \
     'start_timeout_ms must be an integer in 1000\.\.3600000 - REJECTED' "$OUT2" 'start_timeout|start timeout'
+# ⚠ THE LAST EVENT OF EACH KIND SPENDS NOTHING (1.10.1). This arena is never reset and
+# these handlers run for the life of the system. A leak spends on every event, so it
+# spends on the last one, and lazy setup spends early, so it cannot. Which early event
+# pays for it depends on timing: under TCG the first health tick saw no failure, and the
+# second paid for the first failure's strings. So nothing here asks when (standing rule
+# 36). Each event zeroes its kind's figure, and only the spend reported after the last
+# event survives. 16 bytes of it may be an audit action box, new for that event type.
+_LASTS="$(awk '
+/service exited: / { last["sigchld"] = 0; n["sigchld"] = n["sigchld"] + 1 }
+/health check failed: / { last["health tick"] = 0; n["health tick"] = n["health tick"] + 1 }
+/restarted: / { last["restart tick"] = 0; n["restart tick"] = n["restart tick"] + 1 }
+/reactor: [a-z ]* spent: / { h = $0; sub(/.*reactor: /, "", h); sub(/ spent: .*/, "", h)
+    v = $0; sub(/.* spent: /, "", v); last[h] = v + 0 }
+END { printf "%d %d %d %d %d %d\n", n["sigchld"], last["sigchld"], n["health tick"], last["health tick"], n["restart tick"], last["restart tick"] }
+' "$OUT2")"
+read -r _NEX _LEX _NHF _LHF _NRS _LRS <<< "$_LASTS"
+if [ "${_NEX:-0}" -ge 3 ] && [ "${_NHF:-0}" -ge 2 ] && [ "${_NRS:-0}" -ge 2 ]; then
+    echo "  OK: those handlers had work: ${_NEX} exits, ${_NHF} failed probes, ${_NRS} restarts"
+else
+    echo "  FAIL: too few events to judge the handlers: ${_NEX} exits, ${_NHF} failed probes, ${_NRS} restarts"
+    fail=1
+fi
+for _p in "exit:$_LEX" "failed probe:$_LHF" "restart:$_LRS"; do
+    if [ "${_p##*:}" -le 16 ]; then
+        echo "  OK: the last ${_p%%:*} spent ${_p##*:} bytes of PID 1's arena"
+    else
+        echo "  FAIL: the last ${_p%%:*} spent ${_p##*:} bytes of PID 1's arena, so every one does"
+        grep -aE 'reactor: .* spent' "$OUT2" | head -10 | sed 's/^/        /' || true
+        fail=1
+    fi
+done
 # A command check runs under its service's confinement (argonaut 1.18.0), through
 # kyb_pre_exec. The service only sleeps, so these can come only from its check, and the
 # ST label is the check's own cgroup. Same assertions as the x86 reactor gate.

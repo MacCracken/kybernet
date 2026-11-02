@@ -46,7 +46,7 @@ Requires Cyrius 6.7.18 (`cyriusly install 6.7.18 && cyriusly use 6.7.18`).
 cyrius deps                                # Resolve deps from cyrius.cyml into lib/
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet   # Build (DCE recommended)
 CYRIUS_DCE=1 cyrius build src/agnos_init.cyr build/agnos-init   # agnos-init (see below)
-cyrius test src/test.cyr                   # Run 1015 tests
+cyrius test src/test.cyr                   # Run 1021 tests
 cyrius bench src/bench.cyr                 # Run benchmarks
 ```
 
@@ -60,11 +60,11 @@ services expect at boot: `/run` is a fresh tmpfs every boot, so `/run/agnos/agen
 
 | Module | Lines | What |
 |--------|-------|------|
-| main | 2089 | Boot sequence, argonaut init, event loop, emergency shell, shutdown |
+| main | 2119 | Boot sequence, argonaut init, event loop, emergency shell, shutdown |
 | svc_config | 1486 | JSON → ServiceDefinition; security, limits and edge blocks; config-read classification |
 | edge_boot | 767 | Verified-boot pre-flight: TPM PCR, dm-verity verification |
 | emergency_auth | 687 | Argon2id credential: record format, parameter bounds, legacy migration, file-vs-key source |
-| cgroup | 623 | Cgroup v2 controllers, paths, limits, move, kill, teardown |
+| cgroup | 629 | Cgroup v2 controllers, paths, limits, move, kill, teardown |
 | notify | 517 | sd_notify socket (READY, STOPPING, WATCHDOG, STATUS, RELOADING) |
 | seccomp | 516 | Seccomp BPF filter builder + loader |
 | privdrop | 408 | Capability dropping + no_new_privs + agnostik bridge |
@@ -82,7 +82,7 @@ services expect at boot: `/run` is a fresh tmpfs every boot, so `/run/agnos/agen
 | console_io | 74 | Bounded line read, integer formatting — testable helpers moved out of main |
 | cmdline | 56 | `/proc/cmdline` token scanning |
 
-**9,282 lines of Cyrius** across `main.cyr` + 20 modules.
+**9,318 lines of Cyrius** across `main.cyr` + 20 modules.
 
 ## Features
 
@@ -143,7 +143,7 @@ services expect at boot: `/run` is a fresh tmpfs every boot, so `/run/agnos/agen
 - **Data-driven mount table** — not hardcoded per-mount calls
 - **sd_notify compatible** — READY, STOPPING, WATCHDOG, STATUS, RELOADING messages via epoll
 - **String builder** for path construction and logging
-- **1015 tests** (1010 on aarch64 — the seccomp allowlist is arch-specific), 56 benchmarks
+- **1021 tests** (1016 on aarch64 — the seccomp allowlist is arch-specific), 56 benchmarks
 
 ## Dependencies
 
@@ -182,14 +182,14 @@ boot. With the working lane moved onto the caller's arena it costs +25 KB.
 ## Testing
 
 ```sh
-cyrius test src/test.cyr            # 1015 assertions (1010 on aarch64)
+cyrius test src/test.cyr            # 1021 assertions (1016 on aarch64)
 bash scripts/bench-history.sh       # 56 benchmarks, load-tolerant regression gate
 bash qemu/boot-test.sh              # PID-1 boot harness, x86_64 (needs KVM)
 bash qemu/boot-test-aarch64.sh      # PID-1 boot harness, aarch64 (TCG, no KVM)
 ```
 
 The QEMU harness is the gate that matters: it boots kybernet as real PID 1 and
-asserts 145 properties across six passes — the boot sequence, the reactor
+asserts 149 properties across six passes — the boot sequence, the reactor
 (that it sleeps rather than spins, and that a SIGHUP spends no arena), dm-verity
 verification against a real image pair on virtio disks, the emergency-auth prompt
 with a password fed over the serial line, and the start timeout killing a oneshot
@@ -201,7 +201,7 @@ file leaves no credential, and the config key is never its fallback. After a
 correct password, the shell kybernet execs is a probe that reports its own
 descriptors, signal mask and environment, and the gate checks each one.
 
-The aarch64 harness asserts 201 properties and exists because **a cross-build
+The aarch64 harness asserts 205 properties and exists because **a cross-build
 exiting 0 is not evidence**. It boots `kybernet-aarch64` as PID 1 under TCG —
 an x86 host cannot accelerate aarch64 — against a pinned, sha256-checked kernel.
 Besides the boot sequence, cgroup controllers, a real reactor iteration and a

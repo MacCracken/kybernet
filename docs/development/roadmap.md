@@ -3,7 +3,7 @@
 Forward work only. What shipped is in [CHANGELOG.md](../../CHANGELOG.md), and what is true
 right now, gate counts included, is in [state.md](state.md).
 
-**Current release: 1.10.0** (cyrius 6.7.18, argonaut 1.18.0, libro 2.11.3, agnostik 2.0.0,
+**Current release: 1.10.1** (cyrius 6.7.18, argonaut 1.19.0, libro 2.11.3, agnostik 2.0.0,
 sigil 3.13.15).
 
 **Every open item has a target release.** The order is the dependency order: a later release
@@ -13,7 +13,7 @@ under a release or under Gated, never in a list of its own. A finished item is d
 a finished release's section goes with it. A version is for code: docs and roadmap changes
 never take one, and a comment-only item ships with a release that has code in it.
 
-**Open: 16** (`grep -c '^- \[ \]'` against this file).
+**Open: 13** (`grep -c '^- \[ \]'` against this file).
 
 ---
 
@@ -21,10 +21,9 @@ never take one, and a comment-only item ships with a release that has code in it
 
 | Release | Theme | Items | Waits on |
 |---|---|---:|---|
-| [1.10.1](#1101--reactor-arena-and-the-boot-budget) | Reactor arena and the boot budget | 2 | nothing |
 | [1.11.0](#1110--edge-boot-under-emulation) | Edge boot under emulation | 3 | `swtpm` in the harness and in CI |
 | [1.12.0](#1120--non-root-default-services) | Non-root default services | 1 | agnosticos' config, argonaut's `default_services` |
-| [Gated](#gated) | Unnumbered until the gate opens | 10 | hardware, a consumer, or a dep's release |
+| [Gated](#gated) | Unnumbered until the gate opens | 9 | hardware, a consumer, or a dep's release |
 
 **Every release:** the full release gates in CLAUDE.md, including the benchmark gate, then the
 sibling-free reproduction.
@@ -36,19 +35,6 @@ what already-compiling code computes, diff the DCE list knowing it cannot see a
 compiler-emitted call, and replay `ci.yml` in the runner's image (CHANGELOG [1.8.0], [1.8.1]).
 
 ---
-
-## 1.10.1 — Reactor arena and the boot budget
-
-- [ ] **A failed health probe and a restart still add to PID 1's arena.** Idle ticks and
-      reloads add nothing since 1.10.0, which is what made these visible: 344 bytes per
-      failed probe and about 850 per restart on the aarch64 reactor pass. A service that
-      fails its probe for good costs about 1 MB a day at a 30 s interval. Find whose
-      allocations they are first: if they are argonaut's or libro's, this waits on that tag.
-- [ ] **The x86 boot budget reads host contention.** One tree spanned 561 to 1,333 ms at
-      load 20 from other work on the box, and failed the 1,200 ms budget on a run where
-      kybernet was unchanged (531 ms against 1.9.0's 526 on one image). Contention only adds
-      time, so take the best of several boots when one is over, as the bench gate does
-      (standing rule 6). The budget stays where it is (standing rule 37).
 
 ## 1.11.0 — Edge boot under emulation
 
@@ -113,13 +99,6 @@ Each takes the next free number when its gate opens.
       `getrandom` fails, which in PID 1 is a panic. Filed in its repo,
       `docs/development/issues/2026-11-01-uuid-v4-waits-for-the-crng-in-pid-1.md`, because
       its comment says a predictable id makes the chain forgeable, and that is its call.
-
-**Gate: the next argonaut tag.**
-
-- [ ] **A NUL in an env file's value is cut short at spawn.** kybernet refused one until
-      1.10.0, when the read moved to argonaut's loader, which keeps the bytes, and execve
-      then stops at the NUL. So the service gets part of a value it was configured with.
-      `_env_files_merge` should refuse it, as it refuses a bad name.
 
 **Gate: an AGNOS service that reads `LISTEN_FDS`, and then a design in argonaut.**
 

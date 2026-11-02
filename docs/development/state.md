@@ -6,6 +6,13 @@
 
 ## Version
 
+**1.10.1**: the reactor spends nothing. argonaut 1.19.0 and kybernet's own restart path stop taking
+from the arena PID 1 never resets, past the first event of each kind: a healthy service probed every
+5 s had cost 830 KB a day. Both boot gates require that the last exit, failed probe and restart each
+spend nothing. The x86 boot budget takes the best of up to three boots when one is over, because the
+stamps are the host's and contention only adds time. An env file value holding a NUL is refused again,
+by argonaut. Suite 1021 / 1016. Harness 149, aarch64 boot gate 205.
+
 **1.10.0**: the service config surface, and a reload that spends nothing. Past the two reloads that
 build the generations, a SIGHUP spends exactly 0 bytes of the arena PID 1 never resets, and both
 harnesses require that. `env_files` are read by argonaut at each start, so a oneshot can write a later
@@ -275,7 +282,7 @@ gitignored: **the contract is the lock file, not the bytes on disk.**
 | sigil | 3.13.15 | `3c47656` | THIN surface: mldsa + sha_ni + sha256 + hex + tpm + argon2. **Never the monolith.** libro's, argonaut's and the fold's pin |
 | agnostik | 2.0.0 | `e6d33aa` | `dist/agnostik.cyr` full bundle |
 | libro | 2.11.3 | `f4a31a4` | `dist/libro.cyr` full bundle |
-| argonaut | 1.18.0 | `88e45a2` | **12 selective modules**, no dist bundle |
+| argonaut | 1.19.0 | `12bf004` | **12 selective modules**, no dist bundle |
 | patra | 1.16.6 | `efa2e34` | stdlib fold, and libro's pin (byte-identical); kybernet calls no `patra_*` |
 
 `cyrius deps --verify`: **84 verified, 0 failed**, 5 commit pins, each compared with the
@@ -304,10 +311,10 @@ and byte-identical, and the warning still fires.
 
 | Arch | Bytes | `e_machine` |
 |---|---|---|
-| x86_64 (`CYRIUS_DCE=1`) | 1,118,744 | `0x3e` |
-| aarch64 (`CYRIUS_DCE=1`) | 2,662,560 | `0xb7` |
-| agnos-init x86_64 (`CYRIUS_DCE=1`) | 565,032 | `0x3e` |
-| agnos-init aarch64 (`CYRIUS_DCE=1`) | 2,526,736 | `0xb7` |
+| x86_64 (`CYRIUS_DCE=1`) | 1,123,576 | `0x3e` |
+| aarch64 (`CYRIUS_DCE=1`) | 2,663,264 | `0xb7` |
+| agnos-init x86_64 (`CYRIUS_DCE=1`) | 565,608 | `0x3e` |
+| agnos-init aarch64 (`CYRIUS_DCE=1`) | 2,592,832 | `0xb7` |
 
 ⚠ 1.8.1 is mostly the toolchain. 1.8.0's source and deps under 6.7.18 give 1,095,824 B on x86_64
 (+308,488), of which 283,912 B is the data segment's Unicode tables; the deps and this release's
@@ -327,16 +334,16 @@ the build; that is standing rule 32.
 
 | Gate | Count | Enforcement |
 |---|---|---|
-| `cyrius test src/test.cyr` | **1015** assertions | floor read from CLAUDE.md; a shrinking suite fails |
-| `bash scripts/aarch64-exec-gate.sh` | **1010** assertions + 5 syscall probes | executes aarch64 under `qemu-user`; its own declared floor |
-| `bash qemu/boot-test-aarch64.sh` | **201** properties, all 6 passes, 32 services | boots `kybernet-aarch64` as PID 1 (TCG), entropy-starved; needs host `veritysetup` |
-| `bash qemu/boot-test.sh` | **145** properties, 6 passes | `HARNESS_STRICT=1` in CI makes a skip a failure |
+| `cyrius test src/test.cyr` | **1021** assertions | floor read from CLAUDE.md; a shrinking suite fails |
+| `bash scripts/aarch64-exec-gate.sh` | **1016** assertions + 5 syscall probes | executes aarch64 under `qemu-user`; its own declared floor |
+| `bash qemu/boot-test-aarch64.sh` | **205** properties, all 6 passes, 32 services | boots `kybernet-aarch64` as PID 1 (TCG), entropy-starved; needs host `veritysetup` |
+| `bash qemu/boot-test.sh` | **149** properties, 6 passes | `HARNESS_STRICT=1` in CI makes a skip a failure |
 | `bash scripts/verify-lock.sh` | 2 halves, 5 commit pins | the committed lock (HEAD's, not the working tree's) vs a fresh resolve |
 | `bash scripts/bench-history.sh` | **56** benchmarks (1 reported-not-gated) | ≥15% flag against history, decided by a same-machine A/B against the previous tag; `LAYOUT_SENSITIVE` names the two exempt ones |
 | `cyrius lint` | 0 warnings, **0 untracked deferrals** | HARD GATE, both halves |
 | `cyrius fmt --check` | clean | non-mutating; never `diff <(cyrius fmt …)` |
 
-⚠ **1015 and 1010 are both correct, and neither floor gates the other.** Six assertions are
+⚠ **1021 and 1016 are both correct, and neither floor gates the other.** Six assertions are
 x86-only (`BS_OPEN`/`BS_STAT`/`BS_LSTAT`/`BS_PIPE`/`BS_POLL`/`BS_NANOSLEEP`) and one is
 aarch64-only (`BS_PPOLL`). Both floors are declared in CLAUDE.md and must be bumped
 together. **Do not pad the short arch to equalise them.**
@@ -372,17 +379,17 @@ stricter bar on the next sweep.**
 
 ## In flight
 
-1.10.0 is cut in the working tree, not yet committed or tagged. 1.9.0 is tagged. Two issue files sit
-uncommitted in sibling repos: sigil's Unicode-tables issue and libro's `uuid_v4` issue.
+1.10.1 is cut in the working tree, not yet committed or tagged. 1.10.0 is tagged, and so is argonaut
+1.19.0. Two issue files sit uncommitted in sibling repos: sigil's Unicode-tables issue and libro's
+`uuid_v4` issue.
 
 ## Next
 
-**1.10.1, the reactor arena and the boot budget**, then the rest of the release plan in
-[roadmap.md](roadmap.md), where each of the 16 open items has a target release or a named gate.
+**1.11.0, edge boot under emulation**, then the rest of the release plan in
+[roadmap.md](roadmap.md), where each of the 13 open items has a target release or a named gate.
 
 | Release | Theme |
 |---|---|
-| 1.10.1 | Reactor arena and the boot budget |
 | 1.11.0 | Edge boot under emulation |
 | 1.12.0 | Non-root default services |
 

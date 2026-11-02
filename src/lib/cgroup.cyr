@@ -46,6 +46,9 @@ var _cg_last_prefix = 0;
 var _cg_last_full_svc = 0;
 var _cg_last_full_fn = 0;
 var _cg_last_full_path = 0;
+# The slice directory, built once. create_service_cgroup runs on every restart, so
+# rebuilding it cost 136 bytes of arena per restart (1.10.1).
+var _cg_slice_path = 0;
 
 fn _cg_cache_init() {
     if (_cg_prefix_cache == 0) { _cg_prefix_cache = map_new(); }
@@ -200,6 +203,7 @@ fn _cg_cache_reset_all() {
     _cg_last_full_svc = 0;
     _cg_last_full_fn = 0;
     _cg_last_full_path = 0;
+    _cg_slice_path = 0;
     return 0;
 }
 
@@ -333,12 +337,14 @@ fn create_service_cgroup(service) {
     # cgroup_name_is_safe — 1.4.2 audit MEDIUM-3.
     if (cgroup_name_is_safe(service) == 0) { return Err(EINVAL); }
     # Create slice dir
-    var sb1 = str_builder_new();
-    str_builder_add_cstr(sb1, CGROUP_ROOT);
-    str_builder_add_cstr(sb1, "/");
-    str_builder_add_cstr(sb1, KYBERNET_SLICE);
-    var slice = str_builder_build(sb1);
-    sys_mkdir(str_data(slice), 0x1C0);
+    if (_cg_slice_path == 0) {
+        var sb1 = str_builder_new();
+        str_builder_add_cstr(sb1, CGROUP_ROOT);
+        str_builder_add_cstr(sb1, "/");
+        str_builder_add_cstr(sb1, KYBERNET_SLICE);
+        _cg_slice_path = str_builder_build(sb1);
+    }
+    sys_mkdir(str_data(_cg_slice_path), 0x1C0);
 
     # Create service dir
     var path = cgroup_path(service);

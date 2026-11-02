@@ -872,10 +872,24 @@ fn do_shutdown(shutdown_type) {
 # Signal handling
 # ================================================================
 
+# What a reactor handler took from the arena PID 1 never resets, for the reactor pass.
+# Past the first of each kind of event a handler must take nothing, because these run
+# for the life of the system. Only in that pass, so a board does not log it. 1.10.1.
+fn _reactor_spent(what, before) {
+    if (g_loop_harness == 0) { return 0; }
+    var spent = alloc_used() - before;
+    if (spent != 0) { klog2(what, _u64_str(spent)); }
+    return 0;
+}
+
 fn handle_signal(signum) {
     var cls = classify_signal(signum);
     switch (cls) {
-        case 1: handle_sigchld();
+        case 1: {
+            var before = alloc_used();
+            handle_sigchld();
+            _reactor_spent("reactor: sigchld spent: ", before);
+        }
         case 2: klog("received SIGTERM"); do_shutdown(SHUTDOWN_POWEROFF);
         case 3: klog("received SIGINT"); do_shutdown(SHUTDOWN_REBOOT);
         case 4: handle_sighup();
@@ -2034,10 +2048,26 @@ fn kybernet_run() {
                         handle_signal(result_unwrap(sig_t, sig_v));
                     }
                 }
-                case 2: handle_health_tick();
-                case 3: handle_watchdog_tick();
-                case 4: handle_restart_tick();
-                case 5: handle_notify_msg();
+                case 2: {
+                    var hb = alloc_used();
+                    handle_health_tick();
+                    _reactor_spent("reactor: health tick spent: ", hb);
+                }
+                case 3: {
+                    var wb = alloc_used();
+                    handle_watchdog_tick();
+                    _reactor_spent("reactor: watchdog tick spent: ", wb);
+                }
+                case 4: {
+                    var rb = alloc_used();
+                    handle_restart_tick();
+                    _reactor_spent("reactor: restart tick spent: ", rb);
+                }
+                case 5: {
+                    var nb = alloc_used();
+                    handle_notify_msg();
+                    _reactor_spent("reactor: notify spent: ", nb);
+                }
                 default: {
                     # Unknown epoll event token — log and continue.
                     # Previously returned 0 here, which fell through to

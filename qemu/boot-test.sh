@@ -1017,6 +1017,42 @@ fi
 # services, 1.8.0) is ~2.2x headroom, on the metric that no longer includes
 # kernel boot.
 echo ""
+# One more boot of the same image, through the same stamper: its span in ms, or -1.
+_boot_span() {
+    timeout "$TIMEOUT" qemu-system-x86_64 \
+        -kernel "$KERNEL" -initrd "$INITRAMFS" \
+        -append "console=ttyS0 panic=5 rdinit=/sbin/init kybernet.harness=1 loglevel=3" \
+        $ACCEL_FLAGS -m 512M -nographic -no-reboot -serial mon:stdio 2>&1 \
+        | while IFS= read -r _line || [ -n "$_line" ]; do
+              printf '%s %s\n' "${EPOCHREALTIME/[.,]/}000" "$_line"
+          done > "${TLOG}.again" || true
+    local a b
+    a=$(grep -aF "kybernet: starting" "${TLOG}.again" 2>/dev/null | head -1 | awk '{print $1}' || true)
+    b=$(grep -aF "kybernet: shutdown" "${TLOG}.again" 2>/dev/null | head -1 | awk '{print $1}' || true)
+    rm -f "${TLOG}.again"
+    if [ -n "$a" ] && [ -n "$b" ]; then
+        echo $(( (b - a) / 1000000 ))
+    else
+        echo -1
+    fi
+}
+
+# ⚠ THE BEST OF UP TO THREE BOOTS, AND ONLY WHEN ONE IS OVER (1.10.1). The stamps are the
+# host's, so a span holds whatever else the host was doing: one tree read 561 to 1,333 ms
+# at load 20 from unrelated work, and failed a budget kybernet was not near (531 ms
+# against 1.9.0's 526 on one image). Contention only ever adds time, so the minimum is
+# the best estimate, which is what the bench gate does (standing rule 6). A real slowdown
+# is in every boot, so it stays red. The budget does not move (standing rule 37).
+if [ "$KYB_MS" -gt "$BUDGET_MS" ]; then
+    for _again in 1 2; do
+        if [ "$KYB_MS" -gt "$BUDGET_MS" ]; then
+            echo "  kybernet span: ${KYB_MS} ms is over budget, booting again"
+            _SPAN=$(_boot_span)
+            if [ "$_SPAN" -ge 0 ] && [ "$_SPAN" -lt "$KYB_MS" ]; then KYB_MS=$_SPAN; fi
+        fi
+    done
+fi
+
 if [ "$KYB_MS" -lt 0 ]; then
     echo "  FAIL: could not time kybernet's span (missing start/shutdown marker)"
     fail=1
@@ -1280,6 +1316,38 @@ else
     echo "  FAIL: no reload rejected reload-b's start_timeout_ms"
     fail=1
 fi
+
+# ⚠ THE LAST EVENT OF EACH KIND SPENDS NOTHING (1.10.1). This arena is never reset and
+# these handlers run for the life of the system. A leak spends on every event, so it
+# spends on the last one, and lazy setup spends early, so it cannot. Which early event
+# pays for it depends on timing: under TCG the first health tick saw no failure, and the
+# second paid for the first failure's strings. So nothing here asks when (standing rule
+# 36). Each event zeroes its kind's figure, and only the spend reported after the last
+# event survives. 16 bytes of it may be an audit action box, new for that event type.
+_LASTS=$(echo "$LOOP_OUT" | awk '
+/service exited: / { last["sigchld"] = 0; n["sigchld"] = n["sigchld"] + 1 }
+/health check failed: / { last["health tick"] = 0; n["health tick"] = n["health tick"] + 1 }
+/restarted: / { last["restart tick"] = 0; n["restart tick"] = n["restart tick"] + 1 }
+/reactor: [a-z ]* spent: / { h = $0; sub(/.*reactor: /, "", h); sub(/ spent: .*/, "", h)
+    v = $0; sub(/.* spent: /, "", v); last[h] = v + 0 }
+END { printf "%d %d %d %d %d %d\n", n["sigchld"], last["sigchld"], n["health tick"], last["health tick"], n["restart tick"], last["restart tick"] }
+')
+read -r _NEX _LEX _NHF _LHF _NRS _LRS <<< "$_LASTS"
+if [ "$_NEX" -ge 3 ] && [ "$_NHF" -ge 2 ] && [ "$_NRS" -ge 2 ]; then
+    echo "  OK: those handlers had work: ${_NEX} exits, ${_NHF} failed probes, ${_NRS} restarts"
+else
+    echo "  FAIL: too few events to judge the handlers: ${_NEX} exits, ${_NHF} failed probes, ${_NRS} restarts"
+    fail=1
+fi
+for _p in "exit:$_LEX" "failed probe:$_LHF" "restart:$_LRS"; do
+    if [ "${_p##*:}" -le 16 ]; then
+        echo "  OK: the last ${_p%%:*} spent ${_p##*:} bytes of PID 1's arena"
+    else
+        echo "  FAIL: the last ${_p%%:*} spent ${_p##*:} bytes of PID 1's arena, so every one does"
+        echo "$LOOP_OUT" | grep -aE 'reactor: .* spent' | head -10 || true
+        fail=1
+    fi
+done
 
 if grep -aqF "health check failed: kyb-health" <<< "$LOOP_OUT"; then
     echo "  OK: health tick body executed and reported a failing check"

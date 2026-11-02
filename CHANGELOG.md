@@ -7,6 +7,95 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.10.1] — 2026-11-02
+
+**The reactor spends nothing.** Reloads stopped costing PID 1's arena at 1.10.0, which is what made the
+rest visible: every other event still took from an arena that is never reset. argonaut 1.19.0 ends
+that on its side and kybernet on its own, and both boot gates now require it. The x86 boot budget no
+longer fails on host contention. Suite 1021 / 1016. Harness 149, aarch64 boot gate 205.
+
+### Corrected — 1.10.0's figures
+
+⚠ 1.10.0 said a failed health probe cost 344 bytes and a restart about 850. Those were totals for a
+tick and for an event's whole run of handlers, read off one log, and the first was wrong in the way
+that mattered: **a passing probe paid too.** Measured per handler, on a real reactor pass:
+
+| Event | Cost | Whose |
+|---|---:|---|
+| A health probe, pass or fail | 48 B | argonaut |
+| A service exit | 384 B | argonaut |
+| A watchdog kill | 168 B | argonaut |
+| A state change | a builder | argonaut |
+| A restart | 136 B, plus those | kybernet |
+
+A healthy service probed every 5 s cost 830 KB a day, for the life of the system.
+
+### Changed — argonaut 1.18.0 → 1.19.0
+
+Moved on the user's tag, `12bf004`, read against every call site. libro, sigil and agnostik do not move.
+
+- **A health tick, an exit, a watchdog kill, a stop and a restart allocate nothing** past their first
+  event, and `argonaut_init_new` sizes everything they reuse from the service count, so nothing in
+  the reactor grows with timing.
+- ⚠ **Breaking for a consumer that keeps a result.** `init_poll_health`, `init_reap_services` and
+  `init_enforce_watchdog` now reuse what they return until the next call. kybernet consumes each at
+  once. What it keeps across calls is `_rq_name`, a name cstr, and that lives in the service definition.
+- **A NUL in an env file value is refused** (exit 126), which closes the one refusal 1.10.0 lost when
+  it moved `env_files` onto argonaut's loader. `test_svc_config_env_files` asserts it.
+
+### Fixed — a restart rebuilt a string it already had
+
+`create_service_cgroup` built the slice path with a `str_builder` on every call, 136 bytes per restart.
+It is kept with the other cgroup paths now, and a cache reset forgets it (standing rule 8).
+
+### Fixed — the x86 boot budget read the host
+
+One tree spanned 561 to 1,333 ms at load 20 from other work on the box, and failed a budget kybernet was
+not near: 531 ms against 1.9.0's 526 on one image. The stamps are the host's, and contention only adds
+time, so a boot over budget now takes up to two more and the best one counts, which is what the bench
+gate does. A boot under budget still costs one boot, and the budget stays at 1,200 ms. A real 800 ms
+slowdown read 1,367, 1,363 and 1,363 and stayed red. A first boot forced over budget recovered on the
+second, at 561 ms.
+
+### Gates
+
+Both boot gates now require that **the last exit, failed probe and restart each spend nothing**, with
+16 bytes allowed for an audit action box new to that event. In loop mode only, each reactor handler
+reports what it took from the arena.
+
+⚠ **The first version of this gate was wrong, and aarch64 found it twice.** It let a handler's first line
+stand for all its lazy setup, which held on x86. Under TCG the first health tick saw no failure, so the
+second tick paid for the first failure's strings, and the gate read 344 bytes as a leak. So it became
+"the last event": a leak spends on every event, so it spends on the last one, and lazy setup spends
+early, so it cannot. That then read 48 bytes on a last failed probe, one pool slot, because TCG's last
+tick happened to have the most probes due. That was the code's defect and not the gate's: a pool that
+grows with timing cannot be told from a leak. argonaut now sizes them at init.
+
+| Defect injected | What went red |
+|---|---|
+| The slice path rebuilt per restart | the last restart: 136 bytes |
+| A probe result fresh per tick (argonaut) | the last failed probe: 96 bytes, on x86 and on aarch64 |
+| A reap pair fresh per exit (argonaut) | the last exit: 32 bytes |
+
+The bench gate ran at load 16 from other work on the box, twice the recorded pace, and history flagged
+11 benchmarks. The same-machine A/B against 1.10.0 cleared all 11, at -1 % to +7 %, including
+`emerg_cred_parse`, the one whose code changed at 1.10.0 (+4 %). The row this records is a loaded one.
+
+### Binary
+
+| Arch | 1.10.0 | 1.10.1 |
+|---|---:|---:|
+| x86_64 | 1,118,744 | 1,123,576 |
+| aarch64 | 2,662,560 | 2,663,264 |
+| agnos-init x86_64 | 565,032 | 565,608 |
+| agnos-init aarch64 | 2,526,736 | 2,592,832 |
+
+⚠ The x86 kybernet (+4,832) and aarch64 agnos-init (+66,096) are mostly alignment. Their code grew about
+3 KB, enough to cross a boundary, so the data segment moved up a whole 4 KiB or 64 KiB. agnos-init is
+not linked into PID 1: it moved because the deps it compiles did.
+
+---
+
 ## [1.10.0] — 2026-11-01
 
 **The service config surface, and a reload that spends nothing.** A SIGHUP now costs PID 1's arena
