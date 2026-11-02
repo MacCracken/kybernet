@@ -24,7 +24,7 @@
 #   "started: kyb-live"              — a LIVE service, so a cgroup is really
 #                                      created and the pid moved into it
 #                                      (a completed oneshot correctly gets none)
-#   "removed service cgroups: 26"    — the shutdown sweep killed and rmdir'd them
+#   "removed service cgroups: 31"    — the shutdown sweep killed and rmdir'd them
 #
 #     ⚠ NINE of NINE. This said EIGHT from 1.5.3 to 1.6.1, with a comment
 #     arguing the shortfall was correct: kyb-orphan backgrounds a child, this
@@ -76,6 +76,11 @@
 
 set -euo pipefail
 
+# ⚠ EVERY PROPERTY BELOW IS `grep -q ... <<< "$OUT"`, NEVER `echo "$OUT" | grep -q`. With
+# `pipefail`, grep -q exits at its first match, a descheduled echo then takes SIGPIPE, and
+# the pipeline fails on a line that is there: a false FAIL at random on a busy machine,
+# for any match that is not the log's last (1.10.0, measured at 1.5-3.5% per check).
+#
 # ⚠ EVERY DIAGNOSTIC `... | grep ... | head -N` BELOW ENDS IN `|| true`, AND IT
 # IS NOT DECORATION. With `pipefail` set, a grep that matches NOTHING makes the
 # whole pipeline exit 1, and with `set -e` that ABORTS THE SCRIPT. Those
@@ -338,7 +343,7 @@ HARNESS_STRICT="${HARNESS_STRICT:-0}"
 # by the passes that were already booting through the same code.
 _assert_no_panic() {
     # $1 = captured output, $2 = label
-    if echo "$1" | grep -aqE "Attempted to kill init|Kernel panic"; then
+    if grep -aqE "Attempted to kill init|Kernel panic" <<< "$1"; then
         echo "  FAIL: [$2] PID 1 panicked"
         echo "$1" | grep -aE "Attempted to kill init|Kernel panic" | head -2 || true
         fail=1
@@ -382,13 +387,13 @@ for marker in \
     "kybernet: services started" \
     "kybernet: harness done" \
     "kybernet: shutdown" \
-    "kybernet: config: services parsed: 27" \
+    "kybernet: config: services parsed: 32" \
     "kybernet:   completed (oneshot): kyb-dep" \
     "kybernet:   completed (oneshot): kyb-svc" \
     "kybernet: boot: skipped (not applicable): Start udev device manager" \
     "kybernet:   started: kyb-live" \
-    "kybernet: removed service cgroups: 26"; do
-    if echo "$RUNTIME_OUT" | grep -aqF "$marker"; then
+    "kybernet: removed service cgroups: 31"; do
+    if grep -aqF "$marker" <<< "$RUNTIME_OUT"; then
         echo "  OK: $marker"
     else
         echo "  FAIL: missing marker — \"$marker\""
@@ -421,7 +426,7 @@ for want in \
     'ST[kyb-env]-ENV-KYB_FROM_CONFIG=config value' \
     'ST[kyb-env]-ENV-KYB_FROM_FILE=file value' \
     'ST[kyb-env]-ENV-KYB_OVERRIDDEN=from file'; do
-    if echo "$RUNTIME_OUT" | grep -aqF "$want"; then
+    if grep -aqF "$want" <<< "$RUNTIME_OUT"; then
         echo "  OK: $want"
     else
         echo "  FAIL: kyb-env did not report $want"
@@ -429,9 +434,56 @@ for want in \
         fail=1
     fi
 done
+# env_files are argonaut's to read, at each start (1.10.0). kyb-envgen writes
+# kyb-env-late's file at boot, so it did not exist when config.json was read: reading it
+# at load refused that service. The other two are what moved with the read: a file that
+# never appears, and a bad variable name, each fail the start and not the load.
+if grep -aqF 'ST[kyb-env-late]-ENV-KYB_LATE=written at boot' <<< "$RUNTIME_OUT"; then
+    echo "  OK: an env file written after config load reached the service that needed it"
+else
+    echo "  FAIL: kyb-env-late did not report the variable from the file kyb-envgen wrote"
+    echo "$RUNTIME_OUT" | grep -aE 'kyb-env-late|kyb-envgen' | head -6 || true
+    fail=1
+fi
+for _svc in kyb-env-gone kyb-env-bad; do
+    if grep -aqF "FAILED to start: ${_svc}" <<< "$RUNTIME_OUT"; then
+        echo "  OK: ${_svc} failed its start"
+    else
+        echo "  FAIL: ${_svc} should fail its start, and the load should accept it"
+        echo "$RUNTIME_OUT" | grep -aF "$_svc" | head -4 || true
+        fail=1
+    fi
+    if grep -aqF "ST[${_svc}]" <<< "$RUNTIME_OUT"; then
+        echo "  FAIL: ${_svc} reported from inside, so it ran without its configured environment"
+        fail=1
+    else
+        echo "  OK: ${_svc} never ran"
+    fi
+done
+# required_for_modes (1.10.0): this board is `recovery`, and argonaut reads the field
+# nowhere that decides a start, so the filter in kybernet's config load is the whole of it.
+if grep -aqF 'ST[kyb-mode-in]-DONE=1' <<< "$RUNTIME_OUT"; then
+    echo "  OK: a service naming this boot's mode ran"
+else
+    echo "  FAIL: kyb-mode-in names recovery and did not run"
+    fail=1
+fi
+if grep -aqF 'not required for this boot mode, not registered: kyb-mode-out' <<< "$RUNTIME_OUT"; then
+    echo "  OK: a service naming another mode was left out, and said so"
+else
+    echo "  FAIL: nothing says kyb-mode-out was left out of this boot"
+    echo "$RUNTIME_OUT" | grep -aF 'kyb-mode-out' | head -4 || true
+    fail=1
+fi
+if grep -aqE 'starting: kyb-mode-out|ST\[kyb-mode-out\]' <<< "$RUNTIME_OUT"; then
+    echo "  FAIL: kyb-mode-out names edge and was started on a recovery board"
+    fail=1
+else
+    echo "  OK: a service naming another mode never started"
+fi
 # The two ready_check services run the same /bin/sleep; only the check differs, so
 # kyb-ready-ok is the control that kyb-ready-fail's failure is the check's.
-if echo "$RUNTIME_OUT" | grep -aqF "started: kyb-ready-ok"; then
+if grep -aqF "started: kyb-ready-ok" <<< "$RUNTIME_OUT"; then
     echo "  OK: a service whose ready_check passes is started"
 else
     echo "  FAIL: kyb-ready-ok did not start (its process-alive ready_check should pass)"
@@ -442,7 +494,7 @@ fi
 # depends on it, lstat()s the result from inside the guest: an observer, not the
 # program's own report. The image's /etc/passwd maps agnos 900, agnos-llm 901 and
 # user 1000 with primary gid 1001, so each owner below comes from that lookup.
-if echo "$RUNTIME_OUT" | grep -aqF "completed (oneshot): agnos-init"; then
+if grep -aqF "completed (oneshot): agnos-init" <<< "$RUNTIME_OUT"; then
     echo "  OK: agnos-init ran as a oneshot and exited 0"
 else
     echo "  FAIL: agnos-init did not complete"
@@ -456,7 +508,7 @@ for want in \
     'STAT-/var/lib/agnos/agents=dir 0755 900:900' \
     'STAT-/var/lib/agnos/models=dir 0755 901:901' \
     'STAT-/var/log/agnos=dir 0750 0:0'; do
-    if echo "$RUNTIME_OUT" | grep -aqF "ST[kyb-agnos-dirs]-$want"; then
+    if grep -aqF "ST[kyb-agnos-dirs]-$want" <<< "$RUNTIME_OUT"; then
         echo "  OK: agnos-init layout: $want"
     else
         echo "  FAIL: agnos-init layout: no $want"
@@ -464,7 +516,7 @@ for want in \
         fail=1
     fi
 done
-if echo "$RUNTIME_OUT" | grep -aqF "FAILED to start: kyb-ready-fail"; then
+if grep -aqF "FAILED to start: kyb-ready-fail" <<< "$RUNTIME_OUT"; then
     echo "  OK: a service whose ready_check cannot pass is reported as failing to start"
 else
     echo "  FAIL: kyb-ready-fail was not failed by its ready_check"
@@ -487,14 +539,14 @@ fi
 # serial CR as a literal two-character "^M" BEFORE the tr, so every line
 # ends in that text rather than in a real \r. Match the 16 hex zeros
 # exactly instead.
-if echo "$RUNTIME_OUT" | grep -qE '^CapEff:[[:space:]]*0{16}'; then
+if grep -qE '^CapEff:[[:space:]]*0{16}' <<< "$RUNTIME_OUT"; then
     echo "  OK: kyb-confined dropped all capabilities (CapEff=0)"
 else
     echo "  FAIL: kyb-confined did not drop capabilities"
     echo "$RUNTIME_OUT" | grep -aE '^CapEff:' | head -2 || true
     fail=1
 fi
-if echo "$RUNTIME_OUT" | grep -qE '^NoNewPrivs:[[:space:]]*1'; then
+if grep -qE '^NoNewPrivs:[[:space:]]*1' <<< "$RUNTIME_OUT"; then
     echo "  OK: kyb-confined has no_new_privs set"
 else
     echo "  FAIL: kyb-confined missing no_new_privs"
@@ -513,7 +565,7 @@ fi
 # kyb-seccomp reports its own /proc/self/status, so both halves are asserted
 # from inside the confined child: that it LIVED (there is output at all), and
 # that the filter was really loaded (Seccomp: 2 = SECCOMP_MODE_FILTER).
-if echo "$RUNTIME_OUT" | grep -qE '^Seccomp:[[:space:]]*2'; then
+if grep -qE '^Seccomp:[[:space:]]*2' <<< "$RUNTIME_OUT"; then
     echo "  OK: kyb-seccomp runs under a loaded filter (Seccomp=2, mode filter)"
 else
     echo "  FAIL: kyb-seccomp produced no Seccomp line — the profile killed it, or was never applied"
@@ -533,7 +585,7 @@ fi
 # tick spacing: timing an interval inside a 5 s VM window would be asserting
 # the outcome of a race (rule 36), whereas the line proves the config value
 # reached timerfd_settime, which is the property that was missing.
-if echo "$RUNTIME_OUT" | grep -aqF "health poll interval (s): 1"; then
+if grep -aqF "health poll interval (s): 1" <<< "$RUNTIME_OUT"; then
     echo "  OK: health_check.interval_ms drove the poll timer (1s, from kyb-health)"
 else
     echo "  FAIL: the health timer was not re-armed from config — interval_ms is ignored again"
@@ -560,9 +612,9 @@ fi
 # surfaces it. The dependency is load-bearing, not decoration: without it the
 # wave order is whatever the resolver produces and the reader can run first
 # (standing rule 36 — the same trap that made kyb-limited pass on luck).
-if echo "$RUNTIME_OUT" | grep -aqE '^NONROOT-Uid:[[:space:]]*65534'; then
+if grep -aqE '^NONROOT-Uid:[[:space:]]*65534' <<< "$RUNTIME_OUT"; then
     echo "  OK: service ran as uid 65534 — privilege drop reached the child"
-elif echo "$RUNTIME_OUT" | grep -aqE '^NONROOT-Uid:[[:space:]]*0'; then
+elif grep -aqE '^NONROOT-Uid:[[:space:]]*0' <<< "$RUNTIME_OUT"; then
     echo "  FAIL: service ran as ROOT despite security.uid — the drop did not happen"
     fail=1
 else
@@ -571,7 +623,7 @@ else
     fail=1
 fi
 
-if echo "$RUNTIME_OUT" | grep -aqE '^NONROOT-Gid:[[:space:]]*65534'; then
+if grep -aqE '^NONROOT-Gid:[[:space:]]*65534' <<< "$RUNTIME_OUT"; then
     echo "  OK: gid dropped to 65534 as well"
 else
     echo "  FAIL: gid was not dropped — setgid must precede setuid or it cannot happen"
@@ -599,9 +651,9 @@ fi
 # CapAmb is the assertion that matters. Permitted alone would not survive
 # execve of a plain binary, so a service can hold a capability in Prm and still
 # reach main() with nothing: the AMBIENT set is what actually delivers it.
-if echo "$RUNTIME_OUT" | grep -aqE '^CAPUID-Uid:[[:space:]]*65534'; then
+if grep -aqE '^CAPUID-Uid:[[:space:]]*65534' <<< "$RUNTIME_OUT"; then
     echo "  OK: capabilities+uid service ran as uid 65534"
-elif echo "$RUNTIME_OUT" | grep -aqE '^CAPUID-Uid:[[:space:]]*0'; then
+elif grep -aqE '^CAPUID-Uid:[[:space:]]*0' <<< "$RUNTIME_OUT"; then
     echo "  FAIL: capabilities+uid service ran as ROOT — the drop did not happen"
     fail=1
 else
@@ -611,7 +663,7 @@ else
 fi
 
 # 0x400 = 1 << 10 = CAP_NET_BIND_SERVICE, and nothing else.
-if echo "$RUNTIME_OUT" | grep -aqE '^CAPUID-CapAmb:[[:space:]]*0*400([^0-9a-fA-F]|$)'; then
+if grep -aqE '^CAPUID-CapAmb:[[:space:]]*0*400([^0-9a-fA-F]|$)' <<< "$RUNTIME_OUT"; then
     echo "  OK: CAP_NET_BIND_SERVICE is AMBIENT — it survives execve to the service"
 else
     echo "  FAIL: the kept capability is not in the ambient set — a non-root service gets nothing"
@@ -619,7 +671,7 @@ else
     fail=1
 fi
 
-if echo "$RUNTIME_OUT" | grep -aqE '^CAPUID-CapBnd:[[:space:]]*0*400([^0-9a-fA-F]|$)'; then
+if grep -aqE '^CAPUID-CapBnd:[[:space:]]*0*400([^0-9a-fA-F]|$)' <<< "$RUNTIME_OUT"; then
     echo "  OK: the bounding set is exactly the keep-list — nothing can be regained"
 else
     echo "  FAIL: the bounding set is not the keep-list"
@@ -648,9 +700,9 @@ fi
 # (pre-5.13). The fixture sets "landlock_optional": false, so on such a kernel
 # kyb_pre_exec fails the service closed rather than starting it unconfined —
 # which surfaces here as the INSIDE read being absent, not as a false pass.
-if echo "$RUNTIME_OUT" | grep -aqF "LL-OUTSIDE=DENIED"; then
+if grep -aqF "LL-OUTSIDE=DENIED" <<< "$RUNTIME_OUT"; then
     echo "  OK: landlock denied a path outside the rule set"
-elif echo "$RUNTIME_OUT" | grep -aqF "LL-OUTSIDE=ALLOWED"; then
+elif grep -aqF "LL-OUTSIDE=ALLOWED" <<< "$RUNTIME_OUT"; then
     echo "  FAIL: landlock did NOT deny a path outside its rule set — the sandbox is inert"
     fail=1
 else
@@ -659,7 +711,7 @@ else
     fail=1
 fi
 
-if echo "$RUNTIME_OUT" | grep -aqF "LL-INSIDE=ALLOWED"; then
+if grep -aqF "LL-INSIDE=ALLOWED" <<< "$RUNTIME_OUT"; then
     echo "  OK: landlock still permitted a path inside the rule set"
 else
     echo "  FAIL: landlock denied a path it was told to allow (or the child never ran)"
@@ -680,9 +732,9 @@ fi
 # Since the uid drop is opt-in, the common shape is a ROOT service under
 # Landlock, for which DAC imposes nothing either — so this reached every file
 # on the filesystem.
-if echo "$RUNTIME_OUT" | grep -aqF "LL-TRUNCATE=DENIED"; then
+if grep -aqF "LL-TRUNCATE=DENIED" <<< "$RUNTIME_OUT"; then
     echo "  OK: landlock denied truncate() on a path outside the rule set"
-elif echo "$RUNTIME_OUT" | grep -aqF "LL-TRUNCATE=ALLOWED"; then
+elif grep -aqF "LL-TRUNCATE=ALLOWED" <<< "$RUNTIME_OUT"; then
     echo "  FAIL: landlock allowed truncate() outside its rule set — file destruction is unconfined"
     fail=1
 else
@@ -705,7 +757,7 @@ fi
 # working filter from a broken environment — if /dev/shm were read-only, the
 # confined mkdirat would fail and a denial-only gate would call that a pass.
 # The SC[0] assertions turn that into a failure. Both arms must be present.
-if echo "$RUNTIME_OUT" | grep -aqF "SC[2]-MODE=2"; then
+if grep -aqF "SC[2]-MODE=2" <<< "$RUNTIME_OUT"; then
     echo "  OK: the seccomp probe ran under a loaded filter and could report (mode 2)"
 else
     echo "  FAIL: no SC[2]-MODE=2 — the confined probe could not open /proc/self/status or /dev/console"
@@ -713,9 +765,9 @@ else
     fail=1
 fi
 
-if echo "$RUNTIME_OUT" | grep -aqF "SC[2]-MKDIRAT=DENIED"; then
+if grep -aqF "SC[2]-MKDIRAT=DENIED" <<< "$RUNTIME_OUT"; then
     echo "  OK: seccomp basic DENIED an off-list syscall (mkdirat) inside the child"
-elif echo "$RUNTIME_OUT" | grep -aqF "SC[2]-MKDIRAT=ALLOWED"; then
+elif grep -aqF "SC[2]-MKDIRAT=ALLOWED" <<< "$RUNTIME_OUT"; then
     echo "  FAIL: seccomp basic PERMITTED mkdirat — the filter is inert"
     fail=1
 else
@@ -743,7 +795,7 @@ fi
 #
 # `([^0-9]|$)` is what is actually wanted — it rejects a longer number while
 # accepting the `^M` that really follows it.
-if echo "$RUNTIME_OUT" | grep -aqE 'SC\[2\]-MKDIRAT_ERRNO=1([^0-9]|$)'; then
+if grep -aqE 'SC\[2\]-MKDIRAT_ERRNO=1([^0-9]|$)' <<< "$RUNTIME_OUT"; then
     echo "  OK: the denial is EPERM (rule 28's ERRNO default), not a kill and not ENOENT"
 else
     echo "  FAIL: seccomp denial did not report EPERM — check which errno came back"
@@ -760,9 +812,9 @@ fi
 # time, so the fixture measures it and this asserts the measurement. Both arms:
 # the control proves 50 ms of sleep is achievable in this environment at all.
 for _sc_arm in 2 0; do
-    if echo "$RUNTIME_OUT" | grep -aqF "SC[${_sc_arm}]-SLEEP=OK"; then
+    if grep -aqF "SC[${_sc_arm}]-SLEEP=OK" <<< "$RUNTIME_OUT"; then
         echo "  OK: SC[${_sc_arm}] slept for the full 50 ms (poll/ppoll reaches the kernel)"
-    elif echo "$RUNTIME_OUT" | grep -aqF "SC[${_sc_arm}]-SLEEP=NOSLEEP"; then
+    elif grep -aqF "SC[${_sc_arm}]-SLEEP=NOSLEEP" <<< "$RUNTIME_OUT"; then
         echo "  FAIL: SC[${_sc_arm}] returned from a 50 ms sleep immediately — it would busy-spin"
         echo "$RUNTIME_OUT" | grep -aF "SLEEP_MS" | head -3 || true
         fail=1
@@ -773,7 +825,7 @@ for _sc_arm in 2 0; do
     fi
 done
 
-if echo "$RUNTIME_OUT" | grep -aqF "SC[2]-GETPID=ALLOWED"; then
+if grep -aqF "SC[2]-GETPID=ALLOWED" <<< "$RUNTIME_OUT"; then
     echo "  OK: seccomp basic still PERMITS an on-list syscall (getpid)"
 else
     echo "  FAIL: seccomp basic denied getpid, which is on its own allowlist"
@@ -782,9 +834,9 @@ else
 fi
 
 # The control arm. Same binary, same probe, no security block.
-if echo "$RUNTIME_OUT" | grep -aqF "SC[0]-MKDIRAT=ALLOWED"; then
+if grep -aqF "SC[0]-MKDIRAT=ALLOWED" <<< "$RUNTIME_OUT"; then
     echo "  OK: control arm (no seccomp) performed the SAME mkdirat successfully"
-elif echo "$RUNTIME_OUT" | grep -aqF "SC[0]-MKDIRAT=DENIED"; then
+elif grep -aqF "SC[0]-MKDIRAT=DENIED" <<< "$RUNTIME_OUT"; then
     echo "  FAIL: mkdirat failed with NO filter applied — the confined denial above proves nothing"
     echo "$RUNTIME_OUT" | grep -aF "SC[0]" | head -4 || true
     fail=1
@@ -794,7 +846,7 @@ else
     fail=1
 fi
 
-if echo "$RUNTIME_OUT" | grep -qE '^Seccomp_filters:[[:space:]]*[1-9]'; then
+if grep -qE '^Seccomp_filters:[[:space:]]*[1-9]' <<< "$RUNTIME_OUT"; then
     echo "  OK: kyb-seccomp has at least one filter installed"
 else
     echo "  FAIL: kyb-seccomp reports no installed seccomp filter"
@@ -818,14 +870,14 @@ fi
 #  - kyb-live carries no limits block, so its memory.max must read "max".
 #    That control is what separates "kybernet wrote the value" from "the
 #    file happened to already contain it".
-if echo "$RUNTIME_OUT" | grep -aqF "LIMIT-cgroup=/kybernet.slice/kyb-limited"; then
+if grep -aqF "LIMIT-cgroup=/kybernet.slice/kyb-limited" <<< "$RUNTIME_OUT"; then
     echo "  OK: oneshot was in its own cgroup before exec"
 else
     echo "  FAIL: kyb-limited not placed in its cgroup"
     echo "$RUNTIME_OUT" | grep -aE '^LIMIT-cgroup' | head -1 || true
     fail=1
 fi
-if echo "$RUNTIME_OUT" | grep -aqF "LIMIT-memmax=67108864"; then
+if grep -aqF "LIMIT-memmax=67108864" <<< "$RUNTIME_OUT"; then
     echo "  OK: memory.max applied (64 MiB, read back from kernel)"
 else
     echo "  FAIL: memory.max not applied"
@@ -860,14 +912,14 @@ fi
 # prepared before argonaut is asked to start it and so owns a cgroup, while the
 # SKIPPED one is caught before `_prepare_service_cgroup` and owns none. That
 # asymmetry is deliberate and is what the count is pinning.
-if echo "$RUNTIME_OUT" | grep -aqF "FAILED to start: kyb-prereq-fail"; then
+if grep -aqF "FAILED to start: kyb-prereq-fail" <<< "$RUNTIME_OUT"; then
     echo "  OK: a service with a missing binary fails to start"
 else
     echo "  FAIL: kyb-prereq-fail did not fail — the fixture no longer proves anything"
     fail=1
 fi
 
-if echo "$RUNTIME_OUT" | grep -aqF "SKIPPED (prerequisite failed): kyb-prereq-dep"; then
+if grep -aqF "SKIPPED (prerequisite failed): kyb-prereq-dep" <<< "$RUNTIME_OUT"; then
     echo "  OK: a dependent of a failed service is SKIPPED, with the blocker named"
 else
     echo "  FAIL: kyb-prereq-dep was not skipped — a failed prerequisite did not block it"
@@ -875,14 +927,14 @@ else
     fail=1
 fi
 
-if echo "$RUNTIME_OUT" | grep -aqF "PREREQ-DEP-RAN"; then
+if grep -aqF "PREREQ-DEP-RAN" <<< "$RUNTIME_OUT"; then
     echo "  FAIL: kyb-prereq-dep RAN despite its prerequisite failing"
     fail=1
 else
     echo "  OK: the dependent never executed — the skip is real, not just logged"
 fi
 
-if echo "$RUNTIME_OUT" | grep -aqE '^LIMIT-cpumax=50000 100000'; then
+if grep -aqE '^LIMIT-cpumax=50000 100000' <<< "$RUNTIME_OUT"; then
     echo "  OK: cpu.max applied (0.5 CPU, read back from kernel)"
 else
     echo "  FAIL: cpu.max not applied — the hard CPU cap did not reach the kernel"
@@ -890,7 +942,7 @@ else
     fail=1
 fi
 
-if echo "$RUNTIME_OUT" | grep -aqF "LIMIT-pidsmax=32"; then
+if grep -aqF "LIMIT-pidsmax=32" <<< "$RUNTIME_OUT"; then
     echo "  OK: pids.max applied (32, read back from kernel)"
 else
     echo "  FAIL: pids.max not applied"
@@ -902,28 +954,28 @@ fi
 # write order is memory.max -> memory.high -> cpu.weight -> pids.max, and
 # before 1.5.5 the first Err abandoned every later file. pids.max asserting
 # above while cpu.weight asserts here means all four were attempted.
-if echo "$RUNTIME_OUT" | grep -aqF "LIMIT-cpuweight=250"; then
+if grep -aqF "LIMIT-cpuweight=250" <<< "$RUNTIME_OUT"; then
     echo "  OK: cpu.weight applied (250, read back from kernel)"
 else
     echo "  FAIL: cpu.weight not applied"
     echo "$RUNTIME_OUT" | grep -aE '^LIMIT-cpuweight' | head -1 || true
     fail=1
 fi
-if echo "$RUNTIME_OUT" | grep -aqF "LIMIT-memhigh=50331648"; then
+if grep -aqF "LIMIT-memhigh=50331648" <<< "$RUNTIME_OUT"; then
     echo "  OK: memory.high applied (48 MiB, read back from kernel)"
 else
     echo "  FAIL: memory.high not applied"
     echo "$RUNTIME_OUT" | grep -aE '^LIMIT-memhigh' | head -1 || true
     fail=1
 fi
-if echo "$RUNTIME_OUT" | grep -aqE '^LIMIT-ctrl=.*memory.*pids'; then
+if grep -aqE '^LIMIT-ctrl=.*memory.*pids' <<< "$RUNTIME_OUT"; then
     echo "  OK: cgroup subtree_control enables memory + pids"
 else
     echo "  FAIL: cgroup controllers not enabled on the slice"
     echo "$RUNTIME_OUT" | grep -aE '^LIMIT-ctrl' | head -1 || true
     fail=1
 fi
-if echo "$RUNTIME_OUT" | grep -aqF "LIMIT-unlimited=max"; then
+if grep -aqF "LIMIT-unlimited=max" <<< "$RUNTIME_OUT"; then
     echo "  OK: unlimited service reads memory.max=max (control case)"
 else
     echo "  FAIL: control case wrong — kyb-live should be unlimited"
@@ -936,7 +988,7 @@ fi
 # init_mark_step_failed was unreachable and a stage failure was structurally
 # impossible to observe. Now that stages do real work, a FATAL here means a
 # stage genuinely did not do its job.
-if echo "$RUNTIME_OUT" | grep -aqF "FATAL: required boot stage failed"; then
+if grep -aqF "FATAL: required boot stage failed" <<< "$RUNTIME_OUT"; then
     echo "  FAIL: a required boot stage failed"
     echo "$RUNTIME_OUT" | grep -aF "FATAL: required boot stage failed" | head -3 || true
     fail=1
@@ -1054,13 +1106,13 @@ fi
 # Pre-1.5.4 the backoff was passed as init_restart_service's
 # stop_timeout_ms and discarded, so a crash-looping service was
 # relaunched as fast as it could die.
-if echo "$LOOP_OUT" | grep -aqF "restart scheduled: kyb-crash"; then
+if grep -aqF "restart scheduled: kyb-crash" <<< "$LOOP_OUT"; then
     echo "  OK: crash restart scheduled (not run inline)"
 else
     echo "  FAIL: no deferred restart scheduled for kyb-crash"
     fail=1
 fi
-if echo "$LOOP_OUT" | grep -aqF "restarted: kyb-crash"; then
+if grep -aqF "restarted: kyb-crash" <<< "$LOOP_OUT"; then
     echo "  OK: restart tick performed the relaunch"
 else
     echo "  FAIL: restart tick never relaunched kyb-crash"
@@ -1118,7 +1170,7 @@ fi
 # SIGCHLD sits queued in the signalfd and is never handled. Asserting it
 # there would fail confidently for a feature that works.
 
-if echo "$LOOP_OUT" | grep -aqE "reaped orphans: [1-9]"; then
+if grep -aqE "reaped orphans: [1-9]" <<< "$LOOP_OUT"; then
     echo "  OK: PID 1 reaped a child it did not start (orphan count surfaced)"
 else
     echo "  FAIL: no orphan reap observed — kyb-orphan's child was not collected,"
@@ -1135,7 +1187,7 @@ fi
 # rules 27 and 41: reactor-driven, so this pass).
 for _want in "ST[kyb-hc-conf]-Seccomp=2" "ST[kyb-hc-conf]-NoNewPrivs=1" \
     "ST[kyb-hc-conf]-CapEff=0000000000000000" "ST[kyb-hc-conf]-DONE=1"; do
-    if echo "$LOOP_OUT" | grep -aqF "$_want"; then
+    if grep -aqF "$_want" <<< "$LOOP_OUT"; then
         echo "  OK: the command check reported from inside its service: $_want"
     else
         echo "  FAIL: no confined report from the command check: $_want"
@@ -1143,7 +1195,7 @@ for _want in "ST[kyb-hc-conf]-Seccomp=2" "ST[kyb-hc-conf]-NoNewPrivs=1" \
         fail=1
     fi
 done
-if echo "$LOOP_OUT" | grep -aqF "health check failed: kyb-hc-conf"; then
+if grep -aqF "health check failed: kyb-hc-conf" <<< "$LOOP_OUT"; then
     echo "  FAIL: the confined command check failed, so the policy broke the check"
     fail=1
 else
@@ -1157,6 +1209,8 @@ fi
 # pointer reload_config reads after the load. The floors sit well under 12 because
 # signals sent before the reactor starts coalesce, which depends on the machine (rule 36).
 # The arena figure is the leak itself: a reload used to add 54,580 bytes on this config.
+# Since 1.10.0 the configs also carry an edge block with baselines, so every pointer a
+# load can keep is exercised.
 _RELOADS=$(echo "$LOOP_OUT" | grep -acF "config reload successful" || true)
 if [ "$_RELOADS" -ge 5 ]; then
     echo "  OK: PID 1 reloaded its config ${_RELOADS} times"
@@ -1195,8 +1249,39 @@ else
     echo "  FAIL: no arena figures from the reloads (${_AC} lines)"
     fail=1
 fi
+# ⚠ ZERO, NOT A CEILING (1.10.0). The figure above spans whatever else the reactor did
+# between two reloads. This one is reload_config's own, read on its way in and out, and
+# past the two reloads that build the generations nothing it does may touch this arena,
+# because the arena is never reset and a SIGHUP has no limit.
+_SPENT=$(echo "$LOOP_OUT" | sed -n 's/.*config reload: arena bytes spent: \([0-9][0-9]*\).*/\1/p')
+_SN=$(echo "$_SPENT" | grep -c . || true)
+_SMAX=$(echo "$_SPENT" | tail -n +3 | sort -n | tail -1)
+if [ "$_SN" -ge 4 ] && [ "${_SMAX:-1}" = "0" ]; then
+    echo "  OK: past the first two, $(( _SN - 2 )) reloads spent no arena at all"
+else
+    echo "  FAIL: a reload spent arena after the generations were built (${_SN} figures, most ${_SMAX:-none}):"
+    echo "$_SPENT" | tr '\n' ' ' || true
+    echo ""
+    fail=1
+fi
+# A reload reaches argonaut's start timeout, and b's 90 is rejected without disturbing
+# what a set: once 120000 is in force no other value may appear (standing rule 25).
+_TMOS=$(echo "$LOOP_OUT" | sed -n 's/.*config: oneshot and forking start timeout (ms): \([0-9][0-9]*\).*/\1/p')
+_TAFTER=$(echo "$_TMOS" | sed -n '/^120000$/,$p' | sort -u)
+if [ "$_TAFTER" = "120000" ]; then
+    echo "  OK: a reload set the start timeout, and a rejected value left it standing"
+else
+    echo "  FAIL: start timeouts across the reloads: $(echo "$_TMOS" | tr '\n' ' ')"
+    fail=1
+fi
+if grep -aqF "start_timeout_ms must be an integer in 1000..3600000 - REJECTED" <<< "$LOOP_OUT"; then
+    echo "  OK: the out-of-range start timeout was rejected with its reason"
+else
+    echo "  FAIL: no reload rejected reload-b's start_timeout_ms"
+    fail=1
+fi
 
-if echo "$LOOP_OUT" | grep -aqF "health check failed: kyb-health"; then
+if grep -aqF "health check failed: kyb-health" <<< "$LOOP_OUT"; then
     echo "  OK: health tick body executed and reported a failing check"
 else
     echo "  FAIL: no health-check failure observed — the tick body never ran"
@@ -1226,7 +1311,7 @@ fi
 # Deliberately NOT asserting "watchdog restart scheduled": measured absent under
 # this fixture and correctly so — the restart half is already covered by the
 # `restarting:` / `restarted:` assertions above.
-if echo "$LOOP_OUT" | grep -aqF "watchdog killed: kyb-wdog"; then
+if grep -aqF "watchdog killed: kyb-wdog" <<< "$LOOP_OUT"; then
     echo "  OK: the watchdog actually KILLED the unhealthy service (kyb-wdog)"
 else
     echo "  FAIL: the watchdog never killed kyb-wdog — its 1.2 s deadline passed and the kill path did not run"
@@ -1264,9 +1349,9 @@ fi
 # left STATE_STARTING and its own authenticated READY=1 is what promotes it.
 # Matching the PROMOTION line rather than the observation line is what makes
 # this prove a state transition instead of a log statement.
-if echo "$LOOP_OUT" | grep -aqF "notify: READY - service is now running: kyb-notify"; then
+if grep -aqF "notify: READY - service is now running: kyb-notify" <<< "$LOOP_OUT"; then
     echo "  OK: READY promoted a type=notify service from STARTING to RUNNING"
-elif echo "$LOOP_OUT" | grep -aqF "notify: ready: kyb-notify"; then
+elif grep -aqF "notify: ready: kyb-notify" <<< "$LOOP_OUT"; then
     echo "  FAIL: READY was logged but did NOT promote the service — is the type notify?"
     fail=1
 else
@@ -1297,7 +1382,7 @@ fi
 #    refreshable deadline is managed_svc_last_hc, which already means "the last
 #    health check PASSED" — refreshing it on a self-reported ping would let a
 #    wedged service silence a probe kybernet actually ran and saw fail.
-if echo "$LOOP_OUT" | grep -aqF "notify: watchdog ping: kyb-notify"; then
+if grep -aqF "notify: watchdog ping: kyb-notify" <<< "$LOOP_OUT"; then
     echo "  OK: WATCHDOG ping accepted and refreshed the notify deadline"
 else
     echo "  FAIL: watchdog ping was not accepted"
@@ -1307,8 +1392,8 @@ fi
 # 4. The status text reached the log SANITISED. The fixture sends an ESC
 #    sequence; a raw ESC byte on the console means attacker-controlled text is
 #    reaching dmesg unfiltered.
-if echo "$LOOP_OUT" | grep -aqF "notify: status: kyb-notify"; then
-    if echo "$LOOP_OUT" | grep -aq 'esc\.\[31mred'; then
+if grep -aqF "notify: status: kyb-notify" <<< "$LOOP_OUT"; then
+    if grep -aq 'esc\.\[31mred' <<< "$LOOP_OUT"; then
         echo "  OK: status text sanitised (ESC replaced)"
     else
         echo "  FAIL: status line present but the ESC byte was not sanitised"
@@ -1331,7 +1416,7 @@ fi
 #
 #     Both must be refused, and the counter proves it rather than the absence
 #     of a crash.
-if echo "$LOOP_OUT" | grep -aqF "notify: MAINPID not in this service's cgroup - REFUSED"; then
+if grep -aqF "notify: MAINPID not in this service's cgroup - REFUSED" <<< "$LOOP_OUT"; then
     echo "  OK: a forged MAINPID (pid 1) was refused on cgroup membership"
 else
     echo "  FAIL: forged MAINPID was not refused — authorisation check missing"
@@ -1339,14 +1424,14 @@ else
     fail=1
 fi
 
-if echo "$LOOP_OUT" | grep -aqF "notify: MAINPID malformed - ignored"; then
+if grep -aqF "notify: MAINPID malformed - ignored" <<< "$LOOP_OUT"; then
     echo "  OK: a malformed MAINPID (-1) was rejected by the bounded parse"
 else
     echo "  FAIL: malformed MAINPID was not rejected — str_to_int would read it as -1"
     fail=1
 fi
 
-if echo "$LOOP_OUT" | grep -aqE "notify: refused-mainpid: [1-9]"; then
+if grep -aqE "notify: refused-mainpid: [1-9]" <<< "$LOOP_OUT"; then
     echo "  OK: refused-MAINPID counter recorded the attempts"
 else
     echo "  FAIL: refused-mainpid counter is zero — were the claims even seen?"
@@ -1356,7 +1441,7 @@ fi
 # 5. Nothing was rejected. Every datagram came from a live service pid, so a
 #    non-zero reject count means authentication is refusing legitimate traffic
 #    — the failure mode where SO_PASSCRED is set but the cmsg parse is wrong.
-if echo "$LOOP_OUT" | grep -aqF "notify: rejected: 0"; then
+if grep -aqF "notify: rejected: 0" <<< "$LOOP_OUT"; then
     echo "  OK: no legitimate datagram was rejected"
 else
     echo "  FAIL: some datagrams were rejected — cmsg parsing or attribution is wrong"
@@ -1392,7 +1477,7 @@ else
         -kernel "$KERNEL" -initrd "$QUIET_INITRD" \
         -append "console=ttyS0 panic=5 rdinit=/sbin/init kybernet.harness=1 loglevel=3" \
         $ACCEL_FLAGS -m 512M -nographic -no-reboot \
-        -serial mon:stdio 2>&1 | cat -v | tr '\r' '\n')
+        -serial mon:stdio 2>&1 | cat -v | tr '\r' '\n') || true
     _assert_no_panic "$QUIET_OUT" "quiet"
 
     QN=$(echo "$QUIET_OUT" | grep -acF "kybernet: " || true)
@@ -1409,7 +1494,7 @@ else
     fi
 
     # The guard: a SERVICE-written console line proves the boot progressed.
-    if echo "$QUIET_OUT" | grep -aqE '^LIMIT-memmax=67108864'; then
+    if grep -aqE '^LIMIT-memmax=67108864' <<< "$QUIET_OUT"; then
         echo "  OK: services still reached the console (the boot was quiet, not dead)"
     else
         echo "  FAIL: no service output — the quiet boot did not progress, so the"
@@ -1418,12 +1503,48 @@ else
     fi
 
     # And the last thing said before the silence must explain it.
-    if echo "$QUIET_OUT" | grep -aqF "console logging OFF"; then
+    if grep -aqF "console logging OFF" <<< "$QUIET_OUT"; then
         echo "  OK: the transition to quiet is announced on the console"
     else
         echo "  FAIL: console went quiet with no line explaining why"
         fail=1
     fi
+fi
+
+# ============================================================
+# Start-timeout gate (1.10.0) — `start_timeout_ms` reaches argonaut's wait.
+#
+# Rule 27: the key reaches a kill. A oneshot that sleeps for ten minutes either fails at
+# two seconds, or the key did nothing, and then this boot never reaches `FAILED to start`
+# before qemu's own timeout. kyb-start-fast is the control: the same binary under the
+# same timeout finishes. kyb-start-after shows the failure is a real one, because a
+# dependent of a failed service is not started.
+# ============================================================
+SLOW_INITRD="${SCRIPT_DIR}/initramfs-slow.cpio.gz"
+echo ""
+echo "=== start-timeout gate (start_timeout_ms) ==="
+if [ ! -f "$SLOW_INITRD" ]; then
+    _skip_or_fail "no start-timeout fixture (start_timeout_ms is ungated)"
+else
+    SLOW_OUT=$(timeout "$TIMEOUT" qemu-system-x86_64 \
+        -kernel "$KERNEL" -initrd "$SLOW_INITRD" \
+        -append "console=ttyS0 panic=5 rdinit=/sbin/init kybernet.harness=1 loglevel=3" \
+        $ACCEL_FLAGS -m 512M -nographic -no-reboot \
+        -serial mon:stdio 2>&1 | cat -v | tr '\r' '\n') || true
+    _assert_no_panic "$SLOW_OUT" "start timeout"
+    for want in \
+        'config: oneshot and forking start timeout (ms): 2000' \
+        'completed (oneshot): kyb-start-fast' \
+        'FAILED to start: kyb-start-slow' \
+        'SKIPPED (prerequisite failed): kyb-start-after'; do
+        if grep -aqF "$want" <<< "$SLOW_OUT"; then
+            echo "  OK: $want"
+        else
+            echo "  FAIL: start-timeout pass did not show: $want"
+            echo "$SLOW_OUT" | grep -aE 'kyb-start|start timeout' | head -6 || true
+            fail=1
+        fi
+    done
 fi
 
 # ============================================================
@@ -1495,7 +1616,7 @@ else
     # skip loudly rather than fail, and never silently pass.
     # Match the klog line, not the kmsg one: kmsg goes to /dev/kmsg and the
     # harness boots with loglevel=3, which keeps it off the serial console.
-    if echo "$GOOD_OUT" | grep -aqF "veritysetup could not run"; then
+    if grep -aqF "veritysetup could not run" <<< "$GOOD_OUT"; then
         # ⚠ ROUTED THROUGH STRICT MODE, with its OWN message. This used to be a
         # bare `echo SKIPPED` that set SKIP_EDGE=1 and nothing else — the one
         # edge path that ignored HARNESS_STRICT. The run still went red, but
@@ -1509,7 +1630,7 @@ else
         SKIP_EDGE=1
     fi
 
-    if [ "$SKIP_EDGE" != "1" ] && echo "$GOOD_OUT" | grep -aqF "dm-verity integrity VERIFIED"; then
+    if [ "$SKIP_EDGE" != "1" ] && grep -aqF "dm-verity integrity VERIFIED" <<< "$GOOD_OUT"; then
         echo "  OK: intact image verifies against its root hash"
     elif [ "$SKIP_EDGE" != "1" ]; then
         echo "  FAIL: intact image did not verify"
@@ -1528,25 +1649,25 @@ else
     #     that path skipped authentication; it was invisible only because busybox
     #     refuses to run as agnoshi. Entering the path is asserted first, so a
     #     boot that never reached it cannot pass the rest by saying nothing.
-    if echo "$GOOD_OUT" | grep -aqF "=== ENTERING EMERGENCY MODE ==="; then
+    if grep -aqF "=== ENTERING EMERGENCY MODE ===" <<< "$GOOD_OUT"; then
         echo "  OK: [intact] the failed daimon stage reached the emergency path"
     else
         echo "  FAIL: [intact] phase 7 never reached the emergency path, so the checks below prove nothing"
         fail=1
     fi
-    if echo "$GOOD_OUT" | grep -aqF "edge board - authentication required regardless of config"; then
+    if grep -aqF "edge board - authentication required regardless of config" <<< "$GOOD_OUT"; then
         echo "  OK: [intact] the edge board required authentication with emergency_require_auth unset"
     else
         echo "  FAIL: [intact] the edge board did not require authentication"
         fail=1
     fi
-    if echo "$GOOD_OUT" | grep -aqF "NO credential configured - shell suppressed"; then
+    if grep -aqF "NO credential configured - shell suppressed" <<< "$GOOD_OUT"; then
         echo "  OK: [intact] with no credential, the shell was suppressed"
     else
         echo "  FAIL: [intact] the shell was not suppressed"
         fail=1
     fi
-    if echo "$GOOD_OUT" | grep -aqF "emergency shell started"; then
+    if grep -aqF "emergency shell started" <<< "$GOOD_OUT"; then
         echo "  FAIL: [intact] an emergency shell was started with no authentication"
         fail=1
     else
@@ -1559,14 +1680,14 @@ else
     printf 'CORRUPTED' | dd of="$CORRUPT_IMG" bs=1 seek=2000 conv=notrunc status=none
     BAD_OUT=$(_edge_boot "$CORRUPT_IMG" "")
     _assert_no_panic "$BAD_OUT" "edge corrupt"
-    if echo "$BAD_OUT" | grep -aqF "dm-verity verification FAILED"; then
+    if grep -aqF "dm-verity verification FAILED" <<< "$BAD_OUT"; then
         echo "  OK: corrupted image fails verification"
     else
         echo "  FAIL: corrupted image was not detected"
         echo "$BAD_OUT" | grep -aiE 'edge boot|verit' | head -5 || true
         fail=1
     fi
-    if echo "$BAD_OUT" | grep -aqF "refusing to continue boot without edge prerequisites"; then
+    if grep -aqF "refusing to continue boot without edge prerequisites" <<< "$BAD_OUT"; then
         echo "  OK: failed verification refuses the boot"
     else
         echo "  FAIL: failed verification did not refuse the boot"
@@ -1581,7 +1702,7 @@ else
     _assert_no_panic "$PERM_OUT" "edge permissive"
     # ASCII-only needle: these logs are rendered through `cat -v`, which
     # escapes the em-dash in the source string into M-BM- byte sequences.
-    if echo "$PERM_OUT" | grep -aqF "continuing despite the above"; then
+    if grep -aqF "continuing despite the above" <<< "$PERM_OUT"; then
         echo "  OK: kybernet.edge=permissive continues past a failed verification"
     else
         echo "  FAIL: permissive mode did not suppress the refusal"
@@ -1594,13 +1715,13 @@ else
     # its result still reaches dmesg. The audit trail is the point.
     OFF_OUT=$(_edge_boot "$CORRUPT_IMG" "kybernet.edge=off")
     _assert_no_panic "$OFF_OUT" "edge off"
-    if echo "$OFF_OUT" | grep -aqF "DOWNGRADED to permissive"; then
+    if grep -aqF "DOWNGRADED to permissive" <<< "$OFF_OUT"; then
         echo "  OK: kybernet.edge=off downgrades on a root_hash-pinned board"
     else
         echo "  FAIL: kybernet.edge=off was honoured as a silent total bypass"
         fail=1
     fi
-    if echo "$OFF_OUT" | grep -aqF "dm-verity verification FAILED"; then
+    if grep -aqF "dm-verity verification FAILED" <<< "$OFF_OUT"; then
         echo "  OK: downgraded off still runs and reports the verification"
     else
         echo "  FAIL: downgraded off skipped the verification"
@@ -1679,7 +1800,7 @@ else
 
         ok_out=$(_auth_boot "hunter2" "$initrd" || true)
         _assert_no_panic "$ok_out" "$label correct-password"
-        if echo "$ok_out" | grep -aqF "emergency shell: authenticated"; then
+        if grep -aqF "emergency shell: authenticated" <<< "$ok_out"; then
             echo "  OK: [$label] correct password authenticates"
         else
             # Discriminate the real regression from a slow VM. Both produce the
@@ -1690,7 +1811,7 @@ else
             # the read hit EOF on fd 0 and treated it as a failed auth. Saying
             # "brick" for the former sends the next person into emergency_auth
             # for what is a timing problem in this script.
-            if echo "$ok_out" | grep -aqF "Password:"; then
+            if grep -aqF "Password:" <<< "$ok_out"; then
                 echo "  FAIL: [$label] prompt appeared but correct password did not authenticate"
                 echo "        (this is the 1.5.4-1.5.7 brick shape — see CLAUDE.md rule 20)"
             else
@@ -1703,7 +1824,7 @@ else
         fi
 
         # The password must not appear anywhere in the serial log.
-        if echo "$ok_out" | grep -aqF "hunter2"; then
+        if grep -aqF "hunter2" <<< "$ok_out"; then
             echo "  FAIL: [$label] password echoed to the console"
             fail=1
         else
@@ -1727,7 +1848,7 @@ else
             'ENV-TERM=linux' \
             'ENV-PS1=kybernet-emergency#' \
             'DONE=1'; do
-            if echo "$ok_out" | grep -aqF "ST[emergency-shell]-$want"; then
+            if grep -aqF "ST[emergency-shell]-$want" <<< "$ok_out"; then
                 echo "  OK: [$label] emergency shell: $want"
             else
                 echo "  FAIL: [$label] emergency shell: no ST[emergency-shell]-$want"
@@ -1737,7 +1858,7 @@ else
         done
         # 1.4.2 HIGH-2: when the shell exits, the refused board powers off rather
         # than going on to boot the system that failed verification.
-        if echo "$ok_out" | grep -aqF "refusing to continue boot without edge prerequisites"; then
+        if grep -aqF "refusing to continue boot without edge prerequisites" <<< "$ok_out"; then
             echo "  OK: [$label] when the shell exits, the edge refusal stands"
         else
             echo "  FAIL: [$label] the edge refusal did not stand after the shell exited"
@@ -1746,7 +1867,7 @@ else
 
         bad_out=$(_auth_boot "wrongpass" "$initrd" || true)
         _assert_no_panic "$bad_out" "$label wrong-password"
-        if echo "$bad_out" | grep -aqF "AUTHENTICATION FAILED"; then
+        if grep -aqF "AUTHENTICATION FAILED" <<< "$bad_out"; then
             echo "  OK: [$label] wrong password is rejected"
         else
             echo "  FAIL: [$label] wrong password was not rejected"
@@ -1755,7 +1876,7 @@ else
 
         # The brick itself: a rejection must HALT, never reboot into the same
         # refusal. "rebooting" in the log is the loop coming back.
-        if echo "$bad_out" | grep -aqiF "rebooting"; then
+        if grep -aqiF "rebooting" <<< "$bad_out"; then
             echo "  FAIL: [$label] rejection reboots — the reboot loop 1.5.8 fixed"
             fail=1
         else
@@ -1769,7 +1890,7 @@ else
     # keeps working for one release; this is what makes that a claim rather
     # than an intention.
     _auth_assert "$AUTH_INITRD" "legacy sha256"
-    if echo "$AUTH_LAST_OK_OUT" | grep -aqF "legacy unsalted SHA-256"; then
+    if grep -aqF "legacy unsalted SHA-256" <<< "$AUTH_LAST_OK_OUT"; then
         echo "  OK: [legacy sha256] boot log names the format as deprecated"
     else
         echo "  FAIL: [legacy sha256] deprecation not surfaced in the boot log"
@@ -1800,7 +1921,7 @@ else
         #
         # This line is the direct evidence, asserted separately so a failure says
         # which half broke: authentication, or the precedence announcement.
-        if echo "$AUTH_LAST_OK_OUT" | grep -aqF "emergency.cred present - the emergency_password_hash key is IGNORED"; then
+        if grep -aqF "emergency.cred present - the emergency_password_hash key is IGNORED" <<< "$AUTH_LAST_OK_OUT"; then
             echo "  OK: [argon2id v1] emergency.cred took precedence over the config key"
         else
             echo "  FAIL: [argon2id v1] the credential file did not take precedence"
@@ -1812,7 +1933,7 @@ else
         # into something an operator sees months before they need the shell,
         # and it is the only externally visible evidence that the KDF path —
         # not the legacy path — is the one that ran.
-        if echo "$AUTH_LAST_OK_OUT" | grep -aqE "argon2id t=[0-9]+ m=[0-9]+KiB p=[0-9]+"; then
+        if grep -aqE "argon2id t=[0-9]+ m=[0-9]+KiB p=[0-9]+" <<< "$AUTH_LAST_OK_OUT"; then
             echo "  OK: [argon2id v1] boot log reports the KDF parameters"
         else
             echo "  FAIL: [argon2id v1] KDF parameters not reported at load"
@@ -1835,10 +1956,10 @@ else
         if [ -z "$KDF_SALT" ] || [ -z "$KDF_TAG" ]; then
             echo "  FAIL: [argon2id v1] could not read the staged credential — leak check did not run"
             fail=1
-        elif echo "$AUTH_LAST_OK_OUT" | grep -aqF "$KDF_SALT"; then
+        elif grep -aqF "$KDF_SALT" <<< "$AUTH_LAST_OK_OUT"; then
             echo "  FAIL: [argon2id v1] the salt was printed to the console"
             fail=1
-        elif echo "$AUTH_LAST_OK_OUT" | grep -aqF "$KDF_TAG"; then
+        elif grep -aqF "$KDF_TAG" <<< "$AUTH_LAST_OK_OUT"; then
             echo "  FAIL: [argon2id v1] the stored tag was printed to the console"
             fail=1
         else
@@ -1863,34 +1984,34 @@ else
         else
             ref_out=$(_auth_boot "hunter2" "$REF_INITRD" || true)
             _assert_no_panic "$ref_out" "refused cred"
-            if echo "$ref_out" | grep -aqF "emergency.cred is group/world readable - REFUSED"; then
+            if grep -aqF "emergency.cred is group/world readable - REFUSED" <<< "$ref_out"; then
                 echo "  OK: [refused cred] the 0644 credential file is refused"
             else
                 echo "  FAIL: [refused cred] the 0644 credential file was not refused (is the fixture 0644?)"
                 echo "$ref_out" | grep -aiE 'emergency.cred|credential' | head -3 || true
                 fail=1
             fi
-            if echo "$ref_out" | grep -aqF "the emergency_password_hash key is NOT used as a fallback"; then
+            if grep -aqF "the emergency_password_hash key is NOT used as a fallback" <<< "$ref_out"; then
                 echo "  OK: [refused cred] the boot log says the config key is not a fallback"
             else
                 echo "  FAIL: [refused cred] nothing says the config key was passed over"
                 echo "$ref_out" | grep -aiE 'emergency.cred|password_hash' | head -3 || true
                 fail=1
             fi
-            if echo "$ref_out" | grep -aqF "emergency credential read from config.json"; then
+            if grep -aqF "emergency credential read from config.json" <<< "$ref_out"; then
                 echo "  FAIL: [refused cred] the config key became the credential after the file was refused"
                 fail=1
             else
                 echo "  OK: [refused cred] the config key did not become the credential"
             fi
-            if echo "$ref_out" | grep -aqF "NOT opening a root shell"; then
+            if grep -aqF "NOT opening a root shell" <<< "$ref_out"; then
                 echo "  OK: [refused cred] phase 6c ran and suppressed the shell"
             else
                 echo "  FAIL: [refused cred] phase 6c did not report the shell suppressed"
                 echo "$ref_out" | grep -aiE 'edge refusal|emergency|phase 6c' | head -3 || true
                 fail=1
             fi
-            if echo "$ref_out" | grep -aqF "emergency shell: authenticated"; then
+            if grep -aqF "emergency shell: authenticated" <<< "$ref_out"; then
                 echo "  FAIL: [refused cred] the password authenticated via the config key (the 1.6.18-1.7.0 fallback)"
                 fail=1
             else

@@ -357,6 +357,10 @@ cat > "${INITRAMFS_DIR}/etc/kybernet/kyb-env.env" << 'ENVEOF'
 KYB_FROM_FILE="file value"
 KYB_OVERRIDDEN=from file
 ENVEOF
+# kyb-env-bad's env_files entry (1.10.0). `export` makes the name "export KYB_BAD".
+cat > "${INITRAMFS_DIR}/etc/kybernet/kyb-env-bad.env" << 'ENVEOF'
+export KYB_BAD=1
+ENVEOF
 cat > "${INITRAMFS_DIR}/etc/kybernet/config.json" << 'CFGEOF'
 {
   "boot_mode": "recovery",
@@ -584,6 +588,60 @@ cat > "${INITRAMFS_DIR}/etc/kybernet/config.json" << 'CFGEOF'
       "env_files": ["/etc/kybernet/kyb-env.env"]
     },
     {
+      "name": "kyb-envgen",
+      "description": "writes kyb-env-late's env file, long after config.json was read (1.10.0)",
+      "binary": "/usr/bin/kyb-svc-fixture",
+      "args": ["write", "/run/kyb-late.env", "KYB_LATE=written at boot"],
+      "type": "oneshot",
+      "restart": "never"
+    },
+    {
+      "name": "kyb-env-late",
+      "description": "an env file that did not exist at config load, read at its start (1.10.0)",
+      "binary": "/usr/bin/kyb-svc-fixture",
+      "args": ["status"],
+      "type": "oneshot",
+      "restart": "never",
+      "depends_on": ["kyb-envgen"],
+      "env_files": ["/run/kyb-late.env"]
+    },
+    {
+      "name": "kyb-env-gone",
+      "description": "an env file nothing writes: its start fails, the load does not (1.10.0)",
+      "binary": "/usr/bin/kyb-svc-fixture",
+      "args": ["status"],
+      "type": "oneshot",
+      "restart": "never",
+      "env_files": ["/run/kyb-never-written.env"]
+    },
+    {
+      "name": "kyb-env-bad",
+      "description": "a bad variable name in an env file fails the child before exec (1.10.0)",
+      "binary": "/usr/bin/kyb-svc-fixture",
+      "args": ["status"],
+      "type": "oneshot",
+      "restart": "never",
+      "env_files": ["/etc/kybernet/kyb-env-bad.env"]
+    },
+    {
+      "name": "kyb-mode-in",
+      "description": "required_for_modes names this boot's mode, so it runs (1.10.0)",
+      "binary": "/usr/bin/kyb-svc-fixture",
+      "args": ["status"],
+      "type": "oneshot",
+      "restart": "never",
+      "required_for_modes": ["server", "recovery"]
+    },
+    {
+      "name": "kyb-mode-out",
+      "description": "required_for_modes names another mode, so it is not registered (1.10.0)",
+      "binary": "/usr/bin/kyb-svc-fixture",
+      "args": ["status"],
+      "type": "oneshot",
+      "restart": "never",
+      "required_for_modes": ["edge"]
+    },
+    {
       "name": "kyb-hc-conf",
       "description": "a command health check, which runs under this service's confinement (1.8.1)",
       "binary": "/usr/bin/kyb-svc-fixture",
@@ -654,11 +712,19 @@ _PAD="$(printf 'kybernet ignores this key; it makes this file larger than 16 KiB
 sed -i "1a\\  \"comment\": \"${_PAD}\"," "${INITRAMFS_DIR}/etc/kybernet/config.json"
 # The two configs kyb-hup rotates between (1.9.0): this one plus a credential, identical
 # but for the tag, so both parse to the same shape. No KDF runs at load, and nothing
-# here requires the credential.
+# here requires the credential. Since 1.10.0 they also carry everything else a reload
+# keeps, an edge block with baselines (a recovery board parses it and acts on none of
+# it), and b's start_timeout_ms is one a reload must reject, leaving a's in force.
 _HUP_REC='v1$1$8192$1$00112233445566778899aabbccddeeff$'
+_HUP_D="$(printf 'd%.0s' $(seq 1 64))"
+_HUP_E="$(printf 'e%.0s' $(seq 1 64))"
+_HUP_F="$(printf 'f%.0s' $(seq 1 64))"
+_HUP_EDGE="\"edge\": {\"pcr_bindings\": \"0+7\", \"root_device\": \"/dev/vda\", \"hash_device\": \"/dev/vdb\", \"root_hash\": \"${_HUP_D}\", \"expected_pcrs\": [\"${_HUP_E}\", \"${_HUP_F}\"]}"
 for _v in a b; do
     _TAG="$(printf "${_v}%.0s" $(seq 1 64))"
-    sed "1a\\  \"emergency_password_hash\": \"${_HUP_REC}${_TAG}\"," \
+    _TMO=120000
+    [ "$_v" = "b" ] && _TMO=90
+    sed "1a\\  \"emergency_password_hash\": \"${_HUP_REC}${_TAG}\", \"start_timeout_ms\": ${_TMO}, ${_HUP_EDGE}," \
         "${INITRAMFS_DIR}/etc/kybernet/config.json" > "${INITRAMFS_DIR}/etc/kybernet/reload-${_v}.json"
 done
 # Counted, not hardcoded — it said "2 services" from 1.5.0 until 1.6.1
@@ -1020,6 +1086,32 @@ p.write_text(json.dumps(d, indent=2))
 QUIETPY
 ( cd "$QUIET_STAGE" && find . | cpio -o -H newc 2>/dev/null | gzip > "${SCRIPT_DIR}/initramfs-quiet.cpio.gz" )
 echo "  staged quiet fixture (log_to_console=false)"
+
+# The start-timeout pass (1.10.0). Its own image and a config of its own, because the
+# timeout is one value for the whole board and its floor is a second: in pass 1's config
+# it would cut every slow fixture short and put its own wait on pass 1's boot budget.
+SLOW_STAGE="${SCRIPT_DIR}/initramfs-slow"
+rm -rf "$SLOW_STAGE"
+cp -a "${INITRAMFS_DIR}" "$SLOW_STAGE" 2>/dev/null || {
+    mkdir -p "$SLOW_STAGE"
+    ( cd "${INITRAMFS_DIR}" && tar cf - --exclude=./dev . ) | ( cd "$SLOW_STAGE" && tar xf - )
+}
+cat > "${SLOW_STAGE}/etc/kybernet/config.json" << 'SLOWEOF'
+{
+  "boot_mode": "recovery",
+  "start_timeout_ms": 2000,
+  "services": [
+    { "name": "kyb-start-fast", "binary": "/usr/bin/kyb-svc-fixture", "args": ["true"],
+      "type": "oneshot", "restart": "never" },
+    { "name": "kyb-start-slow", "binary": "/usr/bin/kyb-svc-fixture", "args": ["sleep", "600"],
+      "type": "oneshot", "restart": "never" },
+    { "name": "kyb-start-after", "binary": "/usr/bin/kyb-svc-fixture", "args": ["true"],
+      "type": "oneshot", "restart": "never", "depends_on": ["kyb-start-slow"] }
+  ]
+}
+SLOWEOF
+( cd "$SLOW_STAGE" && find . | cpio -o -H newc 2>/dev/null | gzip > "${SCRIPT_DIR}/initramfs-slow.cpio.gz" )
+echo "  staged start-timeout fixture (start_timeout_ms=2000)"
 
 cd "${INITRAMFS_DIR}"
 # GNU cpio only. This used to prefer bsdcpio (libarchive) where present and

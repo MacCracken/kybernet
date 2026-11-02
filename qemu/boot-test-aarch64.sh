@@ -348,6 +348,20 @@ cat > "$ROOT/etc/kybernet/config.json" << 'CFGEOF'
       "type": "oneshot", "restart": "never",
       "environment": { "KYB_FROM_CONFIG": "config value", "KYB_OVERRIDDEN": "from config" },
       "env_files": ["/etc/kybernet/kyb-env.env"] },
+    { "name": "kyb-envgen", "binary": "/usr/bin/kyb-svc-fixture",
+      "args": ["write", "/run/kyb-late.env", "KYB_LATE=written at boot"],
+      "type": "oneshot", "restart": "never" },
+    { "name": "kyb-env-late", "binary": "/usr/bin/kyb-svc-fixture", "args": ["status"],
+      "type": "oneshot", "restart": "never", "depends_on": ["kyb-envgen"],
+      "env_files": ["/run/kyb-late.env"] },
+    { "name": "kyb-env-gone", "binary": "/usr/bin/kyb-svc-fixture", "args": ["status"],
+      "type": "oneshot", "restart": "never", "env_files": ["/run/kyb-never-written.env"] },
+    { "name": "kyb-env-bad", "binary": "/usr/bin/kyb-svc-fixture", "args": ["status"],
+      "type": "oneshot", "restart": "never", "env_files": ["/etc/kybernet/kyb-env-bad.env"] },
+    { "name": "kyb-mode-in", "binary": "/usr/bin/kyb-svc-fixture", "args": ["status"],
+      "type": "oneshot", "restart": "never", "required_for_modes": ["server", "recovery"] },
+    { "name": "kyb-mode-out", "binary": "/usr/bin/kyb-svc-fixture", "args": ["status"],
+      "type": "oneshot", "restart": "never", "required_for_modes": ["edge"] },
     { "name": "kyb-ready-ok", "binary": "/usr/bin/kyb-svc-fixture", "args": ["sleep", "30"],
       "type": "simple", "restart": "never",
       "ready_check": { "type": "process-alive", "timeout_ms": 2000, "retries": 3, "retry_delay_ms": 100 } },
@@ -372,11 +386,19 @@ _PAD="$(printf 'kybernet ignores this key; it makes this file larger than 16 KiB
 sed -i "1a\\  \"comment\": \"${_PAD}\"," "$ROOT/etc/kybernet/config.json"
 # The two configs kyb-hup rotates between (1.9.0): this one plus a credential, identical
 # but for the tag, so both parse to the same shape. No KDF runs at load, and nothing
-# here requires the credential.
+# here requires the credential. Since 1.10.0 they also carry everything else a reload
+# keeps, an edge block with baselines (a recovery board parses it and acts on none of
+# it), and b's start_timeout_ms is one a reload must reject, leaving a's in force.
 _HUP_REC='v1$1$8192$1$00112233445566778899aabbccddeeff$'
+_HUP_D="$(printf 'd%.0s' $(seq 1 64))"
+_HUP_E="$(printf 'e%.0s' $(seq 1 64))"
+_HUP_F="$(printf 'f%.0s' $(seq 1 64))"
+_HUP_EDGE="\"edge\": {\"pcr_bindings\": \"0+7\", \"root_device\": \"/dev/vda\", \"hash_device\": \"/dev/vdb\", \"root_hash\": \"${_HUP_D}\", \"expected_pcrs\": [\"${_HUP_E}\", \"${_HUP_F}\"]}"
 for _v in a b; do
     _TAG="$(printf "${_v}%.0s" $(seq 1 64))"
-    sed "1a\\  \"emergency_password_hash\": \"${_HUP_REC}${_TAG}\"," \
+    _TMO=120000
+    [ "$_v" = "b" ] && _TMO=90
+    sed "1a\\  \"emergency_password_hash\": \"${_HUP_REC}${_TAG}\", \"start_timeout_ms\": ${_TMO}, ${_HUP_EDGE}," \
         "$ROOT/etc/kybernet/config.json" > "$ROOT/etc/kybernet/reload-${_v}.json"
 done
 # kyb-env's env_files entry (1.7.5), the same file the x86 image stages.
@@ -384,6 +406,10 @@ cat > "$ROOT/etc/kybernet/kyb-env.env" << 'ENVEOF'
 # kyb-env's environment file
 KYB_FROM_FILE="file value"
 KYB_OVERRIDDEN=from file
+ENVEOF
+# kyb-env-bad's env_files entry (1.10.0). `export` makes the name "export KYB_BAD".
+cat > "$ROOT/etc/kybernet/kyb-env-bad.env" << 'ENVEOF'
+export KYB_BAD=1
 ENVEOF
 # ⚠ DO NOT DISCARD cpio's STDERR, AND DO NOT ASSUME cpio EXISTS. The first
 # version was `cpio ... 2> /dev/null`, which turns a missing or failing archiver
@@ -439,6 +465,29 @@ if ! grep -q '"log_to_console": false' "$QROOT/etc/kybernet/config.json"; then
     exit 1
 fi
 _mk_cpio "$QROOT" "$QCPIO"
+
+# --- pass 6's image: a config of its own, for start_timeout_ms (1.10.0) --------
+# The timeout is one value for the whole board and its floor is a second, so in pass
+# 1's config it would cut every slow fixture short.
+SROOT="${CACHE}/root-a64-slow"
+SCPIO="${CACHE}/initramfs-a64-slow.cpio.gz"
+rm -rf "$SROOT"
+cp -a "$ROOT" "$SROOT"
+cat > "$SROOT/etc/kybernet/config.json" << 'SLOWEOF'
+{
+  "boot_mode": "recovery",
+  "start_timeout_ms": 2000,
+  "services": [
+    { "name": "kyb-start-fast", "binary": "/usr/bin/kyb-svc-fixture", "args": ["true"],
+      "type": "oneshot", "restart": "never" },
+    { "name": "kyb-start-slow", "binary": "/usr/bin/kyb-svc-fixture", "args": ["sleep", "600"],
+      "type": "oneshot", "restart": "never" },
+    { "name": "kyb-start-after", "binary": "/usr/bin/kyb-svc-fixture", "args": ["true"],
+      "type": "oneshot", "restart": "never", "depends_on": ["kyb-start-slow"] }
+  ]
+}
+SLOWEOF
+_mk_cpio "$SROOT" "$SCPIO"
 
 # --- passes 3 and 4: the edge board (1.7.3) -----------------------------------
 # One dm-verity image, formatted by the host's REAL veritysetup, and a copy with
@@ -818,8 +867,8 @@ fi
 # Each assertion mirrors the x86 harness's assertion of the same name. The reasoning
 # behind each one lives there; what is new here is that it RUNS on aarch64, where
 # the syscall numbers, the seccomp allowlist and the struct layouts differ.
-_prop "config: services parsed: 26" \
-    'kybernet: config: services parsed: 26([^0-9]|$)' "$OUT1"
+_prop "config: services parsed: 31" \
+    'kybernet: config: services parsed: 31([^0-9]|$)' "$OUT1"
 # 1.7.8: the config above is padded past the old 16 KiB limit. Check the size kybernet
 # itself reports, so a fixture that shrank back under 16 KiB fails here rather than
 # proving nothing.
@@ -835,8 +884,8 @@ _prop "completed (oneshot): kyb-dep" 'completed \(oneshot\): kyb-dep' "$OUT1"
 _prop "completed (oneshot): kyb-svc, after its dependency" 'completed \(oneshot\): kyb-svc' "$OUT1"
 _prop "started: kyb-live" 'started: kyb-live' "$OUT1"
 # 23, not 24: kyb-prereq-dep is skipped, so no cgroup is ever made for it.
-_prop "removed service cgroups: 25 (every started service, torn down)" \
-    'kybernet: removed service cgroups: 25([^0-9]|$)' "$OUT1" 'removed service cgroups'
+_prop "removed service cgroups: 30 (every started service, torn down)" \
+    'kybernet: removed service cgroups: 30([^0-9]|$)' "$OUT1" 'removed service cgroups'
 
 # ⚠ THE LABEL IS THE PLACEMENT CHECK. svc-fixture labels its report with the leaf
 # of its OWN cgroup path, so a service whose child-side join failed (standing rule
@@ -887,6 +936,20 @@ _prop "env_files reached the child, quotes stripped (KYB_FROM_FILE)" \
     'ST\[kyb-env\]-ENV-KYB_FROM_FILE=file value' "$OUT1" 'ST\[kyb-env\]'
 _prop "an env file overrides environment (KYB_OVERRIDDEN)" \
     'ST\[kyb-env\]-ENV-KYB_OVERRIDDEN=from file' "$OUT1" 'ST\[kyb-env\]'
+# env_files are argonaut's to read, at each start (1.10.0). kyb-envgen writes
+# kyb-env-late's file at boot, so it did not exist when config.json was read. The other
+# two are what moved with the read: each fails the start, and the load accepts it.
+_prop "an env file written after config load reached the service that needed it" \
+    'ST\[kyb-env-late\]-ENV-KYB_LATE=written at boot' "$OUT1" 'kyb-env-late|kyb-envgen'
+_prop "an env file nothing writes fails the start" 'FAILED to start: kyb-env-gone' "$OUT1" 'kyb-env-gone'
+_prop_absent "a service with no env file never ran" 'ST\[kyb-env-gone\]' "$OUT1"
+_prop "a bad variable name in an env file fails the start" 'FAILED to start: kyb-env-bad' "$OUT1" 'kyb-env-bad'
+_prop_absent "a service with a bad env file never ran" 'ST\[kyb-env-bad\]' "$OUT1"
+# required_for_modes (1.10.0): this board is `recovery`.
+_prop "a service naming this boot's mode ran" 'ST\[kyb-mode-in\]-DONE=1' "$OUT1" 'kyb-mode'
+_prop "a service naming another mode was left out, and said so" \
+    'not required for this boot mode, not registered: kyb-mode-out' "$OUT1" 'kyb-mode'
+_prop_absent "a service naming another mode never started" 'starting: kyb-mode-out|ST\[kyb-mode-out\]' "$OUT1"
 _prop "a service whose ready_check passes is started" 'started: kyb-ready-ok' "$OUT1" 'kyb-ready'
 _prop "a service whose ready_check cannot pass is failed" 'FAILED to start: kyb-ready-fail' "$OUT1" 'kyb-ready'
 # agnos-init (1.7.6): the real binary as a oneshot, and an observer that depends on it
@@ -1040,6 +1103,32 @@ else
     echo "  FAIL: no arena figures from the reloads (${_AC:-0} lines)"
     fail=1
 fi
+# ⚠ ZERO, NOT A CEILING (1.10.0). The figure above spans whatever else the reactor did
+# between two reloads. This one is reload_config's own, and past the two reloads that
+# build the generations nothing it does may touch an arena that is never reset.
+_SPENT="$(sed -n 's/.*config reload: arena bytes spent: \([0-9][0-9]*\).*/\1/p' "$OUT2")"
+_SN="$(echo "$_SPENT" | grep -c . || true)"
+_SMAX="$(echo "$_SPENT" | tail -n +3 | sort -n | tail -1)"
+if [ "${_SN:-0}" -ge 4 ] && [ "${_SMAX:-1}" = "0" ]; then
+    echo "  OK: past the first two, $(( _SN - 2 )) reloads spent no arena at all"
+else
+    echo "  FAIL: a reload spent arena after the generations were built (${_SN:-0} figures, most ${_SMAX:-none}):"
+    echo "$_SPENT" | tr '\n' ' ' || true
+    echo ""
+    fail=1
+fi
+# A reload reaches argonaut's start timeout, and b's 90 is rejected without disturbing
+# what a set: once 120000 is in force no other value may appear (standing rule 25).
+_TMOS="$(sed -n 's/.*config: oneshot and forking start timeout (ms): \([0-9][0-9]*\).*/\1/p' "$OUT2")"
+_TAFTER="$(echo "$_TMOS" | sed -n '/^120000$/,$p' | sort -u)"
+if [ "$_TAFTER" = "120000" ]; then
+    echo "  OK: a reload set the start timeout, and a rejected value left it standing"
+else
+    echo "  FAIL: start timeouts across the reloads: $(echo "$_TMOS" | tr '\n' ' ')"
+    fail=1
+fi
+_prop "the out-of-range start timeout was rejected with its reason" \
+    'start_timeout_ms must be an integer in 1000\.\.3600000 - REJECTED' "$OUT2" 'start_timeout|start timeout'
 # A command check runs under its service's confinement (argonaut 1.18.0), through
 # kyb_pre_exec. The service only sleeps, so these can come only from its check, and the
 # ST label is the check's own cgroup. Same assertions as the x86 reactor gate.
@@ -1336,6 +1425,23 @@ _prop "services still reached the console (the boot was quiet, not dead)" \
     'ST\[kyb-limited\]-memory\.max=67108864([^0-9]|$)' "$OUT5" 'ST\['
 _prop "the switch to quiet is announced on the console" 'console logging OFF' "$OUT5"
 _prop "the quiet boot powered down under its own control" 'reboot: Power down' "$OUT5"
+
+# ============================================================================
+# pass 6: start_timeout_ms reaches argonaut's wait (1.10.0)
+# ============================================================================
+# Rule 27: the key reaches a kill. A oneshot that sleeps for ten minutes either fails at
+# two seconds, or the key did nothing and this boot never reaches `FAILED to start`.
+# kyb-start-fast is the control, and a dependent of a failed service is not started.
+echo
+echo "=== pass 6: aarch64 start timeout (start_timeout_ms) ==="
+OUT6="${CACHE}/a64-slow.log"
+_boot_img "$SCPIO" "console=ttyAMA0 kybernet.harness=1 panic=1" "$OUT6"
+_assert_no_panic "$OUT6" "start timeout"
+_prop "the key reached argonaut" 'config: oneshot and forking start timeout \(ms\): 2000' "$OUT6" 'start timeout|kyb-start'
+_prop "the control finished under the timeout" 'completed \(oneshot\): kyb-start-fast' "$OUT6" 'kyb-start'
+_prop "a oneshot past the timeout was killed and failed" 'FAILED to start: kyb-start-slow' "$OUT6" 'kyb-start'
+_prop "its dependent was not started" 'SKIPPED \(prerequisite failed\): kyb-start-after' "$OUT6" 'kyb-start'
+_prop "the board powered down under its own control" 'reboot: Power down' "$OUT6"
 
 echo
 if [ "$fail" -eq 0 ]; then

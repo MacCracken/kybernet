@@ -20,6 +20,8 @@
 #   orphan           fork a child that outlives this process, then exit 0
 #   hup <n> <a> <b>  send PID 1 SIGHUP n times, 300 ms apart, putting config a, then
 #                    b, then a, in place first (1.9.0)
+#   write <path> <line>  write that line to a file, for a service that starts later
+#                    (1.10.0)
 #   status           report this process's own confinement, see below
 #   relay <file>     copy a status report from a file to the console
 #   stat <path>...   report each path as `STAT-<path>=<kind> <mode> <uid>:<gid>`, kind
@@ -355,6 +357,21 @@ fn do_hup(n, a, b) {
     return 0;
 }
 
+# Write `line` and a newline to `path`. It is how the env file a later service starts
+# with comes to exist only after config.json has been read. A step that fails exits
+# non-zero (standing rule 48).
+fn do_write(path, line) {
+    if (path == 0 || line == 0) { return 3; }
+    var fd = sys_open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 420);   # 0644
+    if (fd < 0) { return 3; }
+    var n = strlen(line);
+    var w = sys_write(fd, line, n);
+    var nl = sys_write(fd, "\n", 1);
+    sys_close(fd);
+    if (w != n || nl != 1) { return 3; }
+    return 0;
+}
+
 # Where descriptor `n` points, from the /proc/self/fd/<n> symlink. CLOSED when
 # there is no such descriptor.
 fn report_fd(n, key) {
@@ -523,6 +540,7 @@ fn main() {
         if (hups < 0) { return 3; }
         return do_hup(hups, argv_at(3), argv_at(4));
     }
+    if (streq(mode, "write") == 1) { return do_write(argv_at(2), argv_at(3)); }
     if (streq(mode, "status") == 1) { return do_status(); }
     if (streq(mode, "stat") == 1) {
         load_cgroup();

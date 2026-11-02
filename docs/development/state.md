@@ -6,6 +6,14 @@
 
 ## Version
 
+**1.10.0**: the service config surface, and a reload that spends nothing. Past the two reloads that
+build the generations, a SIGHUP spends exactly 0 bytes of the arena PID 1 never resets, and both
+harnesses require that. `env_files` are read by argonaut at each start, so a oneshot can write a later
+service's file, a missing file fails that start and not the load, and PID 1 no longer parses or keeps
+the bytes. `start_timeout_ms` (1,000..3,600,000 ms, one value for the board) and `required_for_modes`
+are new keys. `socket_activation` and `log_config` got none, because nothing reads either: both are
+Gated. Suite 1015 / 1010. Harness 145, aarch64 boot gate 201, six passes each.
+
 **1.9.0**: what PID 1 pays. A SIGHUP parses into one of two generations instead of the arena PID 1
 never resets, so a reload adds 1,476 bytes, not 54,580, and `kyb-hup`, the first gate ever to run
 `reload_config`, rotates the credential across twelve of them on both arches. The Argon2id arm
@@ -296,8 +304,8 @@ and byte-identical, and the warning still fires.
 
 | Arch | Bytes | `e_machine` |
 |---|---|---|
-| x86_64 (`CYRIUS_DCE=1`) | 1,114,096 | `0x3e` |
-| aarch64 (`CYRIUS_DCE=1`) | 2,662,000 | `0xb7` |
+| x86_64 (`CYRIUS_DCE=1`) | 1,118,744 | `0x3e` |
+| aarch64 (`CYRIUS_DCE=1`) | 2,662,560 | `0xb7` |
 | agnos-init x86_64 (`CYRIUS_DCE=1`) | 565,032 | `0x3e` |
 | agnos-init aarch64 (`CYRIUS_DCE=1`) | 2,526,736 | `0xb7` |
 
@@ -319,21 +327,21 @@ the build; that is standing rule 32.
 
 | Gate | Count | Enforcement |
 |---|---|---|
-| `cyrius test src/test.cyr` | **932** assertions | floor read from CLAUDE.md; a shrinking suite fails |
-| `bash scripts/aarch64-exec-gate.sh` | **927** assertions + 5 syscall probes | executes aarch64 under `qemu-user`; its own declared floor |
-| `bash qemu/boot-test-aarch64.sh` | **184** properties, all 5 passes, 26 services | boots `kybernet-aarch64` as PID 1 (TCG), entropy-starved; needs host `veritysetup` |
-| `bash qemu/boot-test.sh` | **130** properties, 5 passes | `HARNESS_STRICT=1` in CI makes a skip a failure |
+| `cyrius test src/test.cyr` | **1015** assertions | floor read from CLAUDE.md; a shrinking suite fails |
+| `bash scripts/aarch64-exec-gate.sh` | **1010** assertions + 5 syscall probes | executes aarch64 under `qemu-user`; its own declared floor |
+| `bash qemu/boot-test-aarch64.sh` | **201** properties, all 6 passes, 32 services | boots `kybernet-aarch64` as PID 1 (TCG), entropy-starved; needs host `veritysetup` |
+| `bash qemu/boot-test.sh` | **145** properties, 6 passes | `HARNESS_STRICT=1` in CI makes a skip a failure |
 | `bash scripts/verify-lock.sh` | 2 halves, 5 commit pins | the committed lock (HEAD's, not the working tree's) vs a fresh resolve |
 | `bash scripts/bench-history.sh` | **56** benchmarks (1 reported-not-gated) | ≥15% flag against history, decided by a same-machine A/B against the previous tag; `LAYOUT_SENSITIVE` names the two exempt ones |
 | `cyrius lint` | 0 warnings, **0 untracked deferrals** | HARD GATE, both halves |
 | `cyrius fmt --check` | clean | non-mutating; never `diff <(cyrius fmt …)` |
 
-⚠ **932 and 927 are both correct, and neither floor gates the other.** Six assertions are
+⚠ **1015 and 1010 are both correct, and neither floor gates the other.** Six assertions are
 x86-only (`BS_OPEN`/`BS_STAT`/`BS_LSTAT`/`BS_PIPE`/`BS_POLL`/`BS_NANOSLEEP`) and one is
 aarch64-only (`BS_PPOLL`). Both floors are declared in CLAUDE.md and must be bumped
 together. **Do not pad the short arch to equalise them.**
 
-21 modules in `src/lib/`. 27 services in the x86 harness and 26 in the aarch64 gate. 8 `.cyr` files under `qemu/`.
+21 modules in `src/lib/`. 33 services in the x86 harness and 32 in the aarch64 gate, one of each left out by `required_for_modes`. 8 `.cyr` files under `qemu/`.
 
 ## Verification posture
 
@@ -364,18 +372,17 @@ stricter bar on the next sweep.**
 
 ## In flight
 
-1.9.0 is cut in the working tree, not yet committed or tagged. 1.8.3 is tagged and on the
-remote. Two issue files sit uncommitted in sibling repos: sigil's Unicode-tables issue and libro's
-`uuid_v4` issue.
+1.10.0 is cut in the working tree, not yet committed or tagged. 1.9.0 is tagged. Two issue files sit
+uncommitted in sibling repos: sigil's Unicode-tables issue and libro's `uuid_v4` issue.
 
 ## Next
 
-**1.10.0, the service config surface**, then the rest of the release plan in
-[roadmap.md](roadmap.md), where each of the 15 open items has a target release or a named gate.
+**1.10.1, the reactor arena and the boot budget**, then the rest of the release plan in
+[roadmap.md](roadmap.md), where each of the 16 open items has a target release or a named gate.
 
 | Release | Theme |
 |---|---|
-| 1.10.0 | Service config surface |
+| 1.10.1 | Reactor arena and the boot budget |
 | 1.11.0 | Edge boot under emulation |
 | 1.12.0 | Non-root default services |
 

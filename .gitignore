@@ -35,6 +35,8 @@
 # proves the key actually suppresses console output.
 /qemu/initramfs-quiet/
 /qemu/initramfs-quiet.cpio.gz
+/qemu/initramfs-slow/
+/qemu/initramfs-slow.cpio.gz
 /qemu/edge/
 
 # IDE

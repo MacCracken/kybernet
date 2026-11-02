@@ -458,32 +458,82 @@ fn test_svc_config_environment() {
     return 0;
 }
 
+# What a service's child would see: argonaut's merge of `environment` and `env_files`,
+# which runs at spawn. -1 when a file cannot be loaded.
+fn _spawn_env_is(sd, key, want) {
+    var m = _service_env_map(sd);
+    if (m < 0) { return 0; }
+    var v = map_get(m, key);
+    if (v == 0) { return 0; }
+    return str_eq_cstr(v, want);
+}
+
+# 1.7.5, and since 1.10.0 read by argonaut at every start. So the config load accepts any
+# file that could exist, and these assert both halves: what the load refuses, and what
+# argonaut's preflight and merge do with what it accepted.
 fn test_svc_config_env_files() {
-    println("--- service env_files (1.7.5) ---");
+    println("--- service env_files (1.7.5, read at spawn since 1.10.0) ---");
     _write_file("/tmp/kyb-envf-a.env", "# a comment\nKYB_F=\"file value\"\nKYB_O=from file a\n", 420);
     _write_file("/tmp/kyb-envf-b.env", "KYB_O=from file b\n", 420);
     _write_file("/tmp/kyb-envf-empty.env", "", 420);
     _write_file("/tmp/kyb-envf-bad.env", "BAD NAME=x\n", 420);
+    sys_unlink("/tmp/kyb-envf-late.env");
 
     var sd = _svc_one(_doc3("{\"services\":[{\"name\":\"f\",\"binary\":\"/bin/f\",",
         "\"environment\":{\"KYB_O\":\"from config\",\"KYB_C\":\"config\"},",
         "\"env_files\":[\"/tmp/kyb-envf-a.env\",\"/tmp/kyb-envf-b.env\"]}]}"));
     assert(sd != 0, "envf: two files and an environment block parse");
-    assert(_env_is(sd, "KYB_F", "file value") == 1, "envf: a file's variable arrives, quotes stripped");
-    assert(_env_is(sd, "KYB_C", "config") == 1, "envf: environment entries the files do not name survive");
-    assert(_env_is(sd, "KYB_O", "from file b") == 1,
+    assert_eq(vec_len(svc_def_env_files(sd)), 2, "envf: both paths reach argonaut's field, in order");
+    assert_eq(map_get(svc_def_env(sd), "KYB_F"), 0, "envf: the load does not read a file");
+    assert(_env_is(sd, "KYB_O", "from config") == 1, "envf: the load leaves environment as written");
+    assert_eq(_env_files_preflight(svc_def_env_files(sd)), 0, "envf: preflight passes two good files");
+    assert(_spawn_env_is(sd, "KYB_F", "file value") == 1, "envf: a file's variable arrives, quotes stripped");
+    assert(_spawn_env_is(sd, "KYB_C", "config") == 1, "envf: environment entries the files do not name survive");
+    assert(_spawn_env_is(sd, "KYB_O", "from file b") == 1,
       "envf: a file overrides environment, and a later file an earlier one");
+    # An edit reaches the next start, which is what reading at load could not do.
+    _write_file("/tmp/kyb-envf-b.env", "KYB_O=edited\n", 420);
+    assert(_spawn_env_is(sd, "KYB_O", "edited") == 1, "envf: the next start sees an edited file");
 
-    assert(_svc_one(_doc2("{\"services\":[{\"name\":\"f\",\"binary\":\"/bin/f\",",
-          "\"env_files\":[\"/tmp/kyb-envf-empty.env\"]}]}")) != 0, "envf: an empty file is an empty environment");
-    assert(_svc_one(_doc2("{\"services\":[{\"name\":\"f\",\"binary\":\"/bin/f\",",
-          "\"env_files\":[\"/tmp/kyb-envf-missing.env\"]}]}")) == 0, "envf: a missing file refuses the service");
-    assert(_svc_one(_doc2("{\"services\":[{\"name\":\"f\",\"binary\":\"/bin/f\",",
-          "\"env_files\":[\"kyb-envf-a.env\"]}]}")) == 0, "envf: a relative path is refused");
-    assert(_svc_one(_doc2("{\"services\":[{\"name\":\"f\",\"binary\":\"/bin/f\",",
-          "\"env_files\":[\"/tmp/kyb-envf-bad.env\"]}]}")) == 0, "envf: a bad variable name in a file is refused");
-    assert(_svc_one(_doc2("{\"services\":[{\"name\":\"f\",\"binary\":\"/bin/f\",",
-          "\"env_files\":\"/tmp/kyb-envf-a.env\"}]}")) == 0, "envf: a string instead of an array is refused");
+    var empty = _svc_one(_doc2("{\"services\":[{\"name\":\"f\",\"binary\":\"/bin/f\",",
+        "\"env_files\":[\"/tmp/kyb-envf-empty.env\"]}]}"));
+    assert(empty != 0, "envf: an empty file parses");
+    assert_eq(_env_files_preflight(svc_def_env_files(empty)), 0, "envf: an empty file is an empty environment");
+    assert_eq(_service_env_map(empty) > 0, 1, "envf: an empty file merges to nothing");
+
+    # A file a oneshot writes for a later service: not there at load, there at its start.
+    var late = _svc_one(_doc2("{\"services\":[{\"name\":\"f\",\"binary\":\"/bin/f\",",
+        "\"env_files\":[\"/tmp/kyb-envf-late.env\"]}]}"));
+    assert(late != 0, "envf: a file that does not exist yet does not refuse the service");
+    assert_eq(_env_files_preflight(svc_def_env_files(late)), 0 - 1, "envf: while it is missing, its start is refused");
+    _write_file("/tmp/kyb-envf-late.env", "KYB_L=written later\n", 420);
+    assert_eq(_env_files_preflight(svc_def_env_files(late)), 0, "envf: once it exists, its start passes");
+    assert(_spawn_env_is(late, "KYB_L", "written later") == 1, "envf: and its variable arrives");
+
+    assert_eq(_svc_one(_doc2("{\"services\":[{\"name\":\"f\",\"binary\":\"/bin/f\",",
+          "\"env_files\":[\"kyb-envf-a.env\"]}]}")), 0, "envf: a relative path is refused");
+    assert_eq(_svc_one(_doc2("{\"services\":[{\"name\":\"f\",\"binary\":\"/bin/f\",",
+          "\"env_files\":[\"/\"]}]}")), 0, "envf: a path too short to name a file is refused");
+    assert_eq(_svc_one(_doc2("{\"services\":[{\"name\":\"f\",\"binary\":\"/bin/f\",",
+          "\"env_files\":[\"/tmp/a\\u0000b\"]}]}")), 0, "envf: a path holding a NUL is refused");
+    assert_eq(_svc_one(_doc3("{\"services\":[{\"name\":\"f\",\"binary\":\"/bin/f\",\"env_files\":[\"/",
+          _rep(97, 4095), "\"]}]}")), 0, "envf: a path past 4,095 bytes is refused");
+    assert(_svc_one(_doc3("{\"services\":[{\"name\":\"f\",\"binary\":\"/bin/f\",\"env_files\":[\"/",
+          _rep(97, 4094), "\"]}]}")) != 0, "envf: a path of exactly 4,095 bytes is accepted");
+    assert_eq(_svc_one(_doc2("{\"services\":[{\"name\":\"f\",\"binary\":\"/bin/f\",",
+          "\"env_files\":[7]}]}")), 0, "envf: a non-string entry is refused");
+    assert_eq(_svc_one(_doc2("{\"services\":[{\"name\":\"f\",\"binary\":\"/bin/f\",",
+          "\"env_files\":\"/tmp/kyb-envf-a.env\"}]}")), 0, "envf: a string instead of an array is refused");
+
+    # A bad name in a file fails the child (exit 126), not the parent's preflight.
+    var bad = _svc_one(_doc2("{\"services\":[{\"name\":\"f\",\"binary\":\"/bin/f\",",
+        "\"env_files\":[\"/tmp/kyb-envf-bad.env\"]}]}"));
+    assert(bad != 0, "envf: a bad variable name is not a load error");
+    assert_eq(_service_env_map(bad), 0 - 1, "envf: a bad variable name fails the merge, so the start");
+
+    var dir = _svc_one(_doc2("{\"services\":[{\"name\":\"f\",\"binary\":\"/bin/f\",",
+        "\"env_files\":[\"/tmp\"]}]}"));
+    assert_eq(_env_files_preflight(svc_def_env_files(dir)), 0 - 1, "envf: a directory fails the preflight");
 
     # argonaut's loader caps a file at 8 KiB rather than truncate it.
     var big = alloc(9001);
@@ -491,14 +541,93 @@ fn test_svc_config_env_files() {
     memcpy(big, "KYB_BIG=", 8);
     store8(big + 9000, 0);
     _write_file("/tmp/kyb-envf-big.env", big, 420);
-    assert(_svc_one(_doc2("{\"services\":[{\"name\":\"f\",\"binary\":\"/bin/f\",",
-          "\"env_files\":[\"/tmp/kyb-envf-big.env\"]}]}")) == 0, "envf: a file over 8 KiB is refused");
+    var bigsd = _svc_one(_doc2("{\"services\":[{\"name\":\"f\",\"binary\":\"/bin/f\",",
+        "\"env_files\":[\"/tmp/kyb-envf-big.env\"]}]}"));
+    assert_eq(_env_files_preflight(svc_def_env_files(bigsd)), 0 - 1, "envf: a file over 8 KiB fails the preflight");
 
     sys_unlink("/tmp/kyb-envf-a.env");
     sys_unlink("/tmp/kyb-envf-b.env");
     sys_unlink("/tmp/kyb-envf-empty.env");
     sys_unlink("/tmp/kyb-envf-bad.env");
     sys_unlink("/tmp/kyb-envf-big.env");
+    sys_unlink("/tmp/kyb-envf-late.env");
+    return 0;
+}
+
+# 1.10.0. argonaut stores `required_for_modes` and reads it nowhere that decides a start,
+# so cfg_services_for_mode is the reader and these check what it selects.
+fn _modes_svc(modes_json) {
+    return _svc_one(_doc3("{\"services\":[{\"name\":\"m\",\"binary\":\"/bin/m\",", modes_json, "}]}"));
+}
+
+fn _runs_in(sd, mode) {
+    var v = vec_new();
+    vec_push(v, sd);
+    return vec_len(cfg_services_for_mode(v, mode));
+}
+
+fn test_svc_config_modes() {
+    println("--- service required_for_modes (1.10.0) ---");
+    var any = _modes_svc("\"description\":\"no key\"");
+    assert(any != 0, "modes: no key parses");
+    assert_eq(_runs_in(any, BOOT_SERVER), 1, "modes: no key runs in server");
+    assert_eq(_runs_in(any, BOOT_RECOVERY), 1, "modes: no key runs in recovery");
+    assert_eq(_runs_in(any, BOOT_EDGE), 1, "modes: no key runs in edge");
+
+    var two = _modes_svc("\"required_for_modes\":[\"edge\",\"server\"]");
+    assert(two != 0, "modes: a valid list parses");
+    assert_eq(vec_len(svc_def_modes(two)), 2, "modes: both reach the definition");
+    assert_eq(_runs_in(two, BOOT_EDGE), 1, "modes: a listed mode runs");
+    assert_eq(_runs_in(two, BOOT_SERVER), 1, "modes: so does the other, BOOT_SERVER being 0");
+    assert_eq(_runs_in(two, BOOT_DESKTOP), 0, "modes: an unlisted mode does not");
+    assert_eq(_runs_in(two, BOOT_RECOVERY), 0, "modes: nor does recovery");
+    var one = _modes_svc("\"required_for_modes\":[\"recovery\"]");
+    assert_eq(_runs_in(one, BOOT_RECOVERY), 1, "modes: a single mode runs in that mode");
+    assert_eq(_runs_in(one, BOOT_SERVER), 0, "modes: and not in the zero mode");
+
+    assert_eq(_modes_svc("\"required_for_modes\":[]"), 0, "modes: an empty list is refused");
+    assert_eq(_modes_svc("\"required_for_modes\":[\"edge\",\"servr\"]"), 0, "modes: an unknown mode is refused");
+    assert_eq(_modes_svc("\"required_for_modes\":[\"Edge\"]"), 0, "modes: a mode in the wrong case is refused");
+    assert_eq(_modes_svc("\"required_for_modes\":[3]"), 0, "modes: a non-string entry is refused");
+    assert_eq(_modes_svc("\"required_for_modes\":\"edge\""), 0, "modes: a string instead of an array is refused");
+
+    var v = vec_new();
+    vec_push(v, any);
+    vec_push(v, two);
+    vec_push(v, one);
+    var sel = cfg_services_for_mode(v, BOOT_RECOVERY);
+    assert_eq(vec_len(sel), 2, "modes: the filter keeps what runs and drops the rest");
+    assert_eq(vec_get(sel, 0), any, "modes: the first survivor keeps its place");
+    assert_eq(vec_get(sel, 1), one, "modes: the second survivor keeps its place");
+    return 0;
+}
+
+# 1.10.0. The bounds are a refusal, and the value is argonaut's global: this asserts what
+# a call to the real setter leaves in force. The suite must leave the default behind.
+fn _tmo(doc) { return cfg_start_timeout(json_v_parse(str_from(doc))); }
+
+fn test_start_timeout_key() {
+    println("--- start_timeout_ms (1.10.0) ---");
+    assert_eq(_tmo("{}"), 0, "start timeout: an absent key is 0");
+    assert_eq(_tmo("{\"start_timeout_ms\":0}"), 0, "start timeout: 0 is the default");
+    assert_eq(_tmo("{\"start_timeout_ms\":1000}"), 1000, "start timeout: the floor is accepted");
+    assert_eq(_tmo("{\"start_timeout_ms\":3600000}"), 3600000,
+      "start timeout: the ceiling is accepted");
+    assert_eq(_tmo("{\"start_timeout_ms\":999}"), 0 - 1, "start timeout: under the floor is rejected");
+    assert_eq(_tmo("{\"start_timeout_ms\":90}"), 0 - 1,
+      "start timeout: a value in seconds is rejected");
+    assert_eq(_tmo("{\"start_timeout_ms\":3600001}"), 0 - 1,
+      "start timeout: over the ceiling is rejected");
+    assert_eq(_tmo("{\"start_timeout_ms\":-5}"), 0 - 1, "start timeout: a negative is rejected");
+    assert_eq(_tmo("{\"start_timeout_ms\":\"120000\"}"), 0 - 1,
+      "start timeout: a quoted number is rejected, not read as absent");
+    assert_eq(_tmo("{\"start_timeout_ms\":true}"), 0 - 1, "start timeout: a bool is rejected");
+
+    assert_eq(argonaut_start_timeout_ms(), 90000, "start timeout: argonaut's default is what the suite starts from");
+    assert_eq(argonaut_set_start_timeout_ms(_tmo("{\"start_timeout_ms\":120000}")), 120000,
+      "start timeout: an accepted value reaches argonaut");
+    assert_eq(argonaut_set_start_timeout_ms(_tmo("{}")), 90000,
+      "start timeout: removing the key restores the default");
     return 0;
 }
 
@@ -1247,6 +1376,8 @@ fn test_console_io_helpers() {
     assert(streq(_u64_str(7), "7") == 1, "u64_str: 7");
     assert(streq(_u64_str(608), "608") == 1, "u64_str: 608");
     assert(streq(_u64_str(4294967296), "4294967296") == 1, "u64_str: past 32 bits");
+    # One buffer since 1.10.0, so a short answer must end where it ends.
+    assert(streq(_u64_str(7), "7") == 1, "u64_str: nothing is left of a longer answer");
 
     # --- _read_line_fd, driven through a real pipe ---------------------
     var fds = alloc(16);
@@ -3230,6 +3361,128 @@ fn test_config_reload_generations() {
     }
     assert_eq(ok, 1, "reload: fifty more reloads parse");
     assert_eq(alloc_used() - before, 0, "reload: fifty reloads allocate nothing from the arena");
+    cfg_reload_end();
+    return 0;
+}
+
+# What the boot log and a reload print. 1.10.0 moved this off the arena, so its answers
+# are asserted byte for byte: nothing else had ever read them.
+fn test_emerg_describe() {
+    println("--- credential description (1.10.0) ---");
+    assert(streq(emerg_cred_describe(0), "none") == 1, "describe: no credential");
+    assert(streq(emerg_cred_describe(str_from("")), "none") == 1, "describe: an empty credential");
+    assert(streq(emerg_cred_describe(str_from("nonsense")), "malformed") == 1, "describe: a malformed record");
+    assert(strstr(emerg_cred_describe(str_from(_rep(97, 64))), "legacy") == 0, "describe: a legacy digest");
+    assert(streq(emerg_cred_describe(TV_REAL()), "argon2id t=2 m=19456KiB p=1 salt=16B tag=32B") == 1,
+      "describe: a v1 record's parameters");
+    var longest = _rec5("8", "16384", "1", _rep(97, 128), _rep(98, 128));
+    assert(streq(emerg_cred_describe(longest), "argon2id t=8 m=16384KiB p=1 salt=64B tag=64B") == 1,
+      "describe: the longest legal parameters fit");
+    # One buffer, so a shorter answer must end where it ends.
+    var shorter = _rec5("1", "8192", "1", _rep(97, 32), _rep(98, 64));
+    assert(streq(emerg_cred_describe(shorter), "argon2id t=1 m=8192KiB p=1 salt=16B tag=32B") == 1,
+      "describe: nothing is left of a longer answer");
+    var d = emerg_cred_describe(TV_REAL());
+    assert_eq(strstr(d, TV_SALT_HEX), 0 - 1, "describe: never the salt");
+    assert_eq(strstr(d, TV_TAG_19456), 0 - 1, "describe: never the tag");
+    var before = alloc_used();
+    var cred = TV_REAL();
+    var mid = alloc_used();
+    emerg_cred_describe(cred);
+    emerg_cred_usable(cred);
+    assert_eq(alloc_used() - mid, 0, "describe: describing and classifying spend no arena");
+    assert_eq(mid - before > 0, 1, "describe: the counter this reads does move");
+    return 0;
+}
+
+# A reload's whole keep list, the way _load_config_inner runs it, minus what only
+# main.cyr can reach (the reactor pass requires the same zero of the real thing). Every
+# pointer a load keeps is here: the config and its edge block, the credential file's copy,
+# the device strings, the baselines and the indices.
+fn _reload_round(buf, n, cred_path, prev) {
+    var root = cfg_reload_parse(buf, n);
+    if (root == 0) { return 0; }
+    var cfg = cfg_reload_config();
+    if (edge_config_from_json(root, config_edge(cfg)) == 0) { return 0; }
+    var cred = emerg_resolve_cred_at(cred_path, _cfg_str(root, "emergency_password_hash", 0));
+    if (emerg_cred_usable(cred) == 0) { return 0; }
+    emerg_cred_describe(cred);
+    if (prev != 0) { emerg_cred_same(prev, cred); }
+    cfg_reload_commit();
+    cfg_reload_end();
+    return cred;
+}
+
+fn test_reload_spends_nothing() {
+    println("--- a reload spends nothing (1.10.0) ---");
+    var path = "/tmp/kyb_reload_cred";
+    sys_unlink(path);
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"emergency_password_hash\":\"");
+    str_builder_add_str(sb, TV_REAL());
+    str_builder_add_cstr(sb, "\",\"edge\":{\"pcr_bindings\":\"0+7+14\",\"root_device\":\"/dev/vda\",");
+    str_builder_add_cstr(sb, "\"hash_device\":\"/dev/vdb\",\"luks_device\":\"/dev/vdc\",\"root_hash\":\"");
+    str_builder_add_cstr(sb, _rep(97, 64));
+    # Twenty baselines, past the vec's first allocation: its growth has to land there too.
+    str_builder_add_cstr(sb, "\",\"expected_pcrs\":[");
+    for (var b = 0; b < 20; b = b + 1) {
+        if (b > 0) { str_builder_add_cstr(sb, ","); }
+        str_builder_add_cstr(sb, "\"");
+        str_builder_add_cstr(sb, _rep(98, 64));
+        str_builder_add_cstr(sb, "\"");
+    }
+    str_builder_add_cstr(sb, "]}}");
+    var doc = str_builder_build(sb);
+    var buf = str_data(doc);
+    var n = str_len(doc);
+
+    # The first arm reads the credential from the config, the second from the file.
+    var prev = 0;
+    for (var arm = 0; arm < 2; arm = arm + 1) {
+        if (arm == 1) { _write_file(path, str_data(TV_REAL()), 384); }
+        prev = _reload_round(buf, n, path, prev);
+        prev = _reload_round(buf, n, path, prev);
+        assert(prev != 0, "reload spend: both warm-up reloads complete");
+        var before = alloc_used();
+        var ok = 1;
+        for (var r = 0; r < 40; r = r + 1) {
+            prev = _reload_round(buf, n, path, prev);
+            if (prev == 0) { ok = 0; }
+        }
+        assert_eq(ok, 1, "reload spend: forty more reloads complete");
+        assert_eq(alloc_used() - before, 0, "reload spend: forty reloads spend no arena");
+    }
+    assert_eq(str_eq(prev, TV_REAL()), 1, "reload spend: the last credential is the file's, intact");
+    assert(_eb_expected_pcrs != 0, "reload spend: the baselines were kept");
+    assert_eq(vec_len(_eb_expected_pcrs), 20, "reload spend: all of them");
+    edge_reset_devices();
+    sys_unlink(path);
+    return 0;
+}
+
+# The config a reload fills is its own: the defaults arrive by copy, and a write to it
+# reaches neither the shared defaults nor another reload's config.
+fn test_reload_config_is_private() {
+    println("--- a reload's config (1.10.0) ---");
+    var d = argonaut_config_default();
+    var a = "{}";
+    assert(cfg_reload_parse(a, strlen(a)) != 0, "reload cfg: a document parses");
+    var c1 = cfg_reload_config();
+    assert_eq(config_boot_mode(c1), config_boot_mode(d), "reload cfg: the default boot mode");
+    assert_eq(config_boot_timeout(c1), config_boot_timeout(d), "reload cfg: the default boot timeout");
+    assert_eq(config_shutdown_timeout(c1), config_shutdown_timeout(d), "reload cfg: the default shutdown timeout");
+    assert_eq(config_log_console(c1), config_log_console(d), "reload cfg: the default console setting");
+    assert_eq(config_verify_boot(c1), config_verify_boot(d), "reload cfg: the default verify setting");
+    assert_eq(load64(config_edge(c1)), load64(config_edge(d)), "reload cfg: the default edge block");
+    assert_eq(config_edge(c1) != config_edge(cfg_reload_defaults()), 1, "reload cfg: the edge block is its own");
+    store64(c1 + 16, 12345);
+    store64(config_edge(c1), 0);
+    var c2 = cfg_reload_defaults();
+    assert_eq(config_boot_timeout(c2), config_boot_timeout(d), "reload cfg: a write stays out of the defaults");
+    assert_eq(load64(config_edge(c2)), load64(config_edge(d)), "reload cfg: so does a write to its edge block");
+    assert_eq(cfg_reload_defaults(), c2, "reload cfg: the defaults are built once");
+    cfg_reload_end();
+    assert_eq(cfg_keep(), default_alloc(), "reload cfg: outside a reload, things land in the default arena");
     return 0;
 }
 
@@ -3937,6 +4190,8 @@ fn main() {
     test_svc_config_cpu_max();
     test_svc_config_environment();
     test_svc_config_env_files();
+    test_svc_config_modes();
+    test_start_timeout_key();
     test_svc_config_ready_check();
     test_svc_config_health_check();
     test_config_services_reach_argonaut();
@@ -3999,6 +4254,9 @@ fn main() {
     test_config_merge_services();
     test_emerg_classifiers_agree();
     test_config_reload_generations();
+    test_emerg_describe();
+    test_reload_spends_nothing();
+    test_reload_config_is_private();
     return assert_summary();
 }
 var exit_code = main();

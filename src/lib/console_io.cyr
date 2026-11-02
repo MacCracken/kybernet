@@ -11,21 +11,18 @@
 # pure enough to test directly, and one of them carries a bound that a 1.6.0
 # defect turned out to depend on — `_read_line_fd`'s overflow answer.
 
-# Small decimal formatter for log lines — fmt_int_buf writes digits without
-# a NUL, and every cstr logging path here calls strlen.
+# Small decimal formatter for log lines: every cstr logging path here calls strlen,
+# and fmt_int_buf terminates what it writes.
+#
+# ⚠ THE RESULT LASTS UNTIL THE NEXT CALL. It was 24 bytes of arena per call, in the arena
+# PID 1 never resets, and it runs on reactor paths: every SIGHUP, every orphan reap. So
+# the caller hands it straight to klog2 and keeps nothing. Global scope: [3] is 3 SLOTS =
+# 24 bytes, room for 20 digits, a sign and the NUL. 1.10.0.
+var _U64_BUF[3];
+
 fn _u64_str(n) {
-    var b = alloc(24);
-    # ⚠ CHECKED. `alloc` returns 0 on exhaustion (alloc.cyr:188/235), and the
-    # next two statements write through it — in PID 1 a null store is a kernel
-    # panic, not an error return. This is the identical unchecked-alloc shape
-    # 1.6.3 removed from `notify_read`, one file over, and it is reached from
-    # every klog2 that formats a number (boot stages, the cgroup teardown
-    # count, the notify tallies). Degrade to a literal rather than fault: a log
-    # line that says "?" is strictly better than a board that dies printing it.
-    if (b == 0) { return "?"; }
-    var l = fmt_int_buf(n, b);
-    store8(b + l, 0);
-    return b;
+    fmt_int_buf(n, &_U64_BUF);
+    return &_U64_BUF;
 }
 
 # ================================================================

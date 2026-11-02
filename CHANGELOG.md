@@ -7,6 +7,167 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.10.0] — 2026-11-01
+
+**The service config surface, and a reload that spends nothing.** A SIGHUP now costs PID 1's arena
+exactly zero bytes once its two generations exist. `env_files` moved onto argonaut's loader, read at
+each start. `start_timeout_ms` and `required_for_modes` are new keys. `socket_activation` and
+`log_config` did not get keys, because nothing would read them. Suite 1015 / 1010. Harness 145, aarch64
+boot gate 201.
+
+### Fixed — a reload spends nothing
+
+1.9.0 moved the parse out of the arena PID 1 never resets and left 574 to 1,476 bytes a SIGHUP around
+it. Past the two reloads that build the generations, `reload_config` now spends none: the reactor pass
+of both harnesses requires exactly 0 of it, read on the way into and out of the function, on ten
+reloads out of twelve, and the configs it reloads now carry an edge block with baselines. The roadmap's
+figures came from a config with no edge block, so they understated an edge board.
+
+Everything a reload keeps has the parse tree's lifetime, so it goes where the tree goes, through
+`cfg_keep()`:
+
+| What it was | Now |
+|---|---|
+| A new `ArgonautConfig` and edge block per reload | `cfg_reload_config`, in the generation, filled from one default built once |
+| A new default config per SIGHUP with no config file | `cfg_reload_defaults`, the same one |
+| `emergency.cred`'s copy and its view | `str_new_a` / `str_clone_a` into the generation |
+| `expected_pcrs` and the `pcr_bindings` check, a vec each | `vec_new_a` / `vec_push_a` into the generation |
+| `_emerg_field`, 16 bytes per field, several parses per reload | A view in the caller's buffer |
+| `emerg_cred_describe`, a builder and a Str per call | A cstr in one fixed buffer |
+| `_u64_str`, 24 bytes per call | One fixed buffer, also on the reap and shutdown paths |
+
+⚠ **The last one was found by the test, not by reading.** `test_reload_spends_nothing` walks the whole
+keep list forty times and came back 48 bytes a reload short of zero with every listed site fixed. It
+was `str_starts_with(p, "/dev/")` in `edge_device_path_ok`: a literal handed to a `Str` parameter is
+boxed in the arena, 16 bytes per device path, and the call site shows nothing. It is `memeq` now.
+
+⚠ **`_u64_str` and `emerg_cred_describe` now return storage that lasts until the next call.** Every
+caller hands the result straight to `klog2`, and no two calls share an expression.
+
+Between reloads the arena still moves, by a failed health probe and by a restart. Idle ticks add
+nothing, which is what made that visible (roadmap, 1.10.1).
+
+### Changed — `env_files` are read at each start, by argonaut
+
+From 1.7.5 kybernet read them at config load and merged them into `environment`, because argonaut did
+not read them at all. argonaut 1.17.0 does, at spawn, and that is the right time:
+
+- A file a oneshot writes for a later service exists at its start and not at config load, and so does
+  anything on a filesystem mounted after phase 6. Read at load, that service was refused.
+- An edit reaches the next restart. The roadmap said the next reload, but a reload never re-reads
+  services, so it was the next boot.
+- The bytes are parsed in the forked child, so a malformed file cannot fault PID 1, and a value a
+  service keeps secret no longer stays in an arena that is never reset.
+- The parent opens and fstats each file on every start, which allocates nothing, and refuses a FIFO
+  without blocking.
+
+⚠ **What moved with it.** A missing, oversized or non-regular file now fails that service's start, not
+the load, so the service stays registered. A bad variable name exits the child 126 before exec. A
+command health check is a spawn too, so it reads the files on every probe, and one it cannot read
+fails the check. The load still refuses what cannot depend on a file: a non-array, a non-string, a
+relative path, a path over 4,095 bytes, a NUL.
+
+⚠ **One refusal did not survive.** kybernet refused a NUL in a value and argonaut's loader does not, so
+execve stops at it and the service gets part of the value (roadmap, Gated). A value of that shape in a
+text file is unusual, and fixing it takes an argonaut tag, so it did not hold this release.
+
+### Added — `start_timeout_ms`
+
+A top-level key for argonaut's oneshot and forking start timeout. Wanted, because argonaut 1.16.1's
+90 s kills a oneshot that legitimately runs longer, and nothing could say so. It is 1,000..3,600,000
+ms, refused, never clamped, and strict about type: a quoted number is rejected, not read as absent. 0
+or no key is the 90 s default, and removing the key on a reload restores it.
+
+A rejected value leaves what is in force standing: the default at boot, the running value on a reload.
+The floor catches a value written in seconds, which would kill every oneshot in milliseconds.
+
+⚠ **It is one value for the whole board, and the wait blocks PID 1.** argonaut holds it in a global,
+because `ServiceDefinition` has no slot for it. At phase 8 nothing else starts until the wait ends, and
+on a restart inside the reactor nothing is reaped and no signal is handled, shutdown included. So
+raising it for one slow oneshot raises every oneshot's and forking service's worst case. `type:
+notify` waits without blocking.
+
+### Added — `required_for_modes`
+
+`"required_for_modes": ["server", "desktop"]` names the boot modes a service runs in, so one config can
+serve boards of different modes. No key means every mode, as before. argonaut stores the field and
+reads it nowhere that decides a start, so `cfg_services_for_mode` is the reader. A service left out is
+not registered, so it owns no cgroup, probe or restart, and the log says so. A `depends_on` naming it
+takes the existing path for a name this boot does not have: a warning, and an ordering edge that goes
+nowhere. An unknown mode and an empty list refuse the service, since each would otherwise be a service
+that silently never starts.
+
+### Not done — `socket_activation` and `log_config`
+
+The roadmap asked for keys. Neither has a setter or a reader in argonaut, so a key would be the
+"parsed and never consulted" defect this repo has found three times. Nothing creates or passes a
+socket, no AGNOS service reads `LISTEN_FDS` (daimon's fd-3 note is a comment), and `LISTEN_PID` needs
+the child's pid in an envp that is built before `kyb_pre_exec` runs. A service's stdout and stderr go
+to `/dev/null`, so there is nothing to rotate. Both moved to Gated, each with what would open it,
+matching argonaut's own roadmap.
+
+### Gates
+
+Six services in both harnesses. `kyb-envgen` writes the env file `kyb-env-late` starts with, which is
+the property a read at load could not have. `kyb-env-gone` and `kyb-env-bad` fail their starts and
+report nothing from inside. `kyb-mode-in` and `kyb-mode-out` name this boot's mode and another. A sixth
+pass boots a config of its own with `start_timeout_ms: 2000`, because the floor is a second and in pass
+1's config it would cut slow fixtures short and spend the boot budget: a ten-minute oneshot must fail,
+its control must finish, and its dependent must be skipped. `kyb-hup` now rotates a valid timeout
+against a rejected one and asserts the valid one stands.
+
+Each new check was shown to fail. In the unit suite, 39 defects: 36 went red at once; two survived
+because of the test, and do not now (a vec that never outgrew its first allocation, and an order that
+hid a stale tail in a reused buffer); and one was equivalent, which showed a line was redundant, so the
+line is gone. On a real boot:
+
+| Defect injected | What went red |
+|---|---|
+| `start_timeout_ms` not applied | the start-timeout pass: the ten-minute oneshot never fails; and the reactor's timeout check |
+| A rejected value replaces the running one | the reactor pass: 90000 120000 90000 120000 |
+| A reload's config back in the arena | the zero: 464 bytes a reload |
+| `_u64_str` back in the arena | the zero: 48 bytes a reload |
+| The boot-mode filter removed | `services parsed`, `removed service cgroups`, and `kyb-mode-out` started on a recovery board |
+| An env file checked at load again | `kyb-env-late` refused, and `kyb-env-gone` never reaches its start |
+
+A PID 1 built with `CYRIUS_POISON` passed the full x86 harness, 145 of 145. With the commit removed on
+that build, ten of eleven reloads read the fill through the old config and reported a `boot_mode`
+change nobody made, so the poison does reach the config that now lives in a generation.
+
+The x86 boot span did not move for code. Interleaved on one box with one image, 1.9.0 and 1.10.0 read
+526 and 531 ms at the median. The five new services take it to about 640 ms against the 1,200 ms
+budget. ⚠ One run of the final tree read 1,333 ms and failed that budget, at load 20 from other work on
+the box, and the next read 738. The budget stays (roadmap, 1.10.1).
+
+The bench gate found no regression of 15% or more, on a quiet box, so this row also replaces the loaded
+one 1.9.0 recorded (`_calibration` 266 → 129 ns).
+
+### Fixed — two ways the harness could report the wrong thing
+
+⚠ **`qemu/boot-test.sh` could fail on a line that was present.** Every property was `echo "$OUT" |
+grep -q`, and under `pipefail` a `grep -q` that exits at its first match leaves an `echo` still writing
+to take SIGPIPE, so the pipeline fails. Idle it never showed: 0 misses in 600 on the reactor log.
+Under CPU contention it missed 7 and 3 in 200, and never for a match at the log's very end. The boot
+mutations are what caught it: three of the six runs also failed unrelated notify and restart
+properties, and one failed text on a line another check had just matched, which no race in the guest
+can do. All 99 sites are `grep -q ... <<< "$OUT"`, which missed 0 in 600 under the same load. This has
+been able to fail on any busy machine, CI included, since a capture passed one stdio buffer.
+
+A `timeout` capture also ended the run. Pass 6's hang, which is its failure mode, exited 124 through
+`set -e`, so a key that did nothing printed no failure of its own and skipped the edge and auth
+passes. Pass 6 and the quiet pass now survive it (standing rule 40).
+
+### Binary
+
+| Arch | 1.9.0 | 1.10.0 |
+|---|---|---|
+| x86_64 | 1,114,200 | 1,118,744 |
+| aarch64 | 2,662,120 | 2,662,560 |
+
+agnos-init is byte-identical on both arches.
+
+---
+
 ## [1.9.0] — 2026-11-01
 
 **What PID 1 pays.** A SIGHUP stops leaking its parse tree, an emergency login stops leaving

@@ -160,7 +160,8 @@ var g_notify_badpid = 0;        # MAINPID malformed, or outside the sender's cgr
 # measurement, resolved in 6.6.7). 256 KiB is about 700 services at the
 # harness's density. It also bounds the parse, which costs 2 to 4 bytes per config
 # byte (35,904 bytes for 8,983 and 53,104 for 23,076, measured). A reload pays that
-# into a generation it reuses, not into this arena: see cfg_reload_parse.
+# into a generation it reuses, not into this arena: see cfg_reload_parse. Everything else
+# a reload keeps goes there too, through cfg_keep().
 #
 # Standing rule 8 note: this caches an arena pointer in a global, which is unsafe
 # across `alloc_reset()`. PID 1 never resets, and neither the test nor the bench
@@ -193,6 +194,8 @@ fn _load_config_inner(want_services) {
     var rc = cfg_read_class(n, cap);
     if (rc == CFG_READ_ABSENT) {
         klog("no config found, using defaults");
+        argonaut_set_start_timeout_ms(0);
+        if (want_services == 0) { return cfg_reload_defaults(); }
         return argonaut_config_default();
     }
     if (rc == CFG_READ_UNREADABLE) {
@@ -236,7 +239,12 @@ fn _load_config_inner(want_services) {
         return 0;
     }
 
-    var cfg = argonaut_config_default();
+    var cfg = 0;
+    if (want_services == 0) {
+        cfg = cfg_reload_config();
+    } else {
+        cfg = argonaut_config_default();
+    }
 
     # boot_mode — via argonaut's parser (1.10.0) rather than a hand-rolled
     # if-ladder. An unrecognised mode keeps the default instead of silently
@@ -255,6 +263,12 @@ fn _load_config_inner(want_services) {
     if (bt > 0) { store64(cfg + 16, bt); }
     var st = _cfg_int(root, "shutdown_timeout_ms", 0);
     if (st > 0) { store64(cfg + 24, st); }
+
+    # A global of argonaut's, not a field of cfg, so a rejected value leaves whatever
+    # is in force standing: the 90 s default at boot, the running value on a reload.
+    var sto = cfg_start_timeout(root);
+    if (sto >= 0) { argonaut_set_start_timeout_ms(sto); }
+    klog2("config: oneshot and forking start timeout (ms): ", _u64_str(argonaut_start_timeout_ms()));
 
     # log_to_console is a real JSON bool now. The old code compared it
     # against the STRING "false", so `"log_to_console": false` — the
@@ -348,7 +362,7 @@ fn _load_config_inner(want_services) {
             }
             g_emerg_hash = 0;
         } else {
-            klog2("config: emergency credential: ", str_data(emerg_cred_describe(g_emerg_hash)));
+            klog2("config: emergency credential: ", emerg_cred_describe(g_emerg_hash));
         }
     }
 
@@ -401,7 +415,7 @@ fn _load_config_inner(want_services) {
         return cfg;
     }
 
-    var svcs = svc_defs_from_json(root);
+    var svcs = cfg_services_for_mode(svc_defs_from_json(root), config_boot_mode(cfg));
     var scount = vec_len(svcs);
     _cfg_saw_services = scount;
     if (scount > 0) {
@@ -449,8 +463,10 @@ fn reload_config() {
     # Capture the old value so the change can be named.
     var prev_hash = g_emerg_hash;
     var prev_req = g_emerg_require_auth;
+    var used_before = alloc_used();
 
     var new_cfg = _load_config_inner(0);
+    cfg_reload_end();
     if (new_cfg == 0) {
         # ⚠ KEEP THE RUNNING CONFIG. load_config used to answer
         # `argonaut_config_default()` here, so a SIGHUP with a truncated or
@@ -476,8 +492,7 @@ fn reload_config() {
     if (emerg_cred_same(prev_hash, g_emerg_hash) == 0) {
         # The describe() output is parameters only — never the salt, never
         # the tag. See emerg_cred_describe.
-        klog2("config reload: emergency credential CHANGED: ",
-          str_data(emerg_cred_describe(g_emerg_hash)));
+        klog2("config reload: emergency credential CHANGED: ", emerg_cred_describe(g_emerg_hash));
     }
 
     if (g_init != 0) {
@@ -506,8 +521,10 @@ fn reload_config() {
     }
 
     klog("config reloaded (timeouts + logging; structural changes need a reboot)");
-    # What the reactor pass bounds across repeated reloads, because this arena is
-    # never reset, and what proves each reload moved to its new generation.
+    # What the reactor pass checks across repeated reloads, because this arena is never
+    # reset, and what proves each reload moved to its new generation. The first two
+    # build the generations; every reload after that must spend nothing here.
+    klog2("config reload: arena bytes spent: ", _u64_str(alloc_used() - used_before));
     klog2("config reload: arena bytes in use: ", _u64_str(alloc_used()));
     klog2("config reload: generations committed: ", _u64_str(cfg_reload_commits()));
     return 1;

@@ -32,7 +32,8 @@
 #       "ready_check":  { "type": "tcp", "target": "127.0.0.1", "port": 8090,
 #                         "timeout_ms": 10000, "retries": 10, "retry_delay_ms": 500 },
 #       "environment":  { "RUST_LOG": "info" },
-#       "env_files":    ["/etc/daimon/daimon.env"]
+#       "env_files":    ["/etc/daimon/daimon.env"],
+#       "required_for_modes": ["server", "desktop"]
 #     }
 #   ]
 #
@@ -314,22 +315,30 @@ fn _cfg_environment_into(obj, sd) {
 }
 
 # `"env_files": ["/etc/foo.env", ...]`, in argonaut's `load_env_file` format:
-# KEY=VALUE lines, `#` comments, optional quotes, 8 KiB at most per file.
+# KEY=VALUE lines, `#` comments, optional quotes, 8 KiB at most per file. Applied after
+# `environment`, so a file overrides it and a later file an earlier one, which is
+# systemd's EnvironmentFile= order.
 #
-# ⚠ READ BY KYBERNET, AT CONFIG LOAD. argonaut's own `env_files` field is read by
-# nothing on the spawn path, so a key that only set it would do nothing. The files
-# are merged into the same map as `environment`, AFTER it: a file overrides an
-# `environment` entry of the same name, and a later file an earlier one, which is
-# systemd's EnvironmentFile= order. They are read once, when the config loads, so
-# an edit takes effect at the next boot like every other service field. A file
-# that is missing, unreadable, too large or holds a bad name refuses the service:
-# one started without part of its configured environment is one nobody configured.
-# An empty file is an empty environment, not an error. 1.7.5.
+# ⚠ READ BY ARGONAUT AT EVERY START, NOT BY KYBERNET AT LOAD, SINCE 1.10.0. From 1.7.5 to
+# 1.9.0 kybernet read them here, because argonaut did not, and merged them into
+# `environment`. argonaut 1.17.0 reads them at spawn, and that is the right time:
+#   - a file a oneshot writes for a later service exists at its start and not at this
+#     load, and a filesystem mounted after phase 6 is the same case;
+#   - an edit reaches the next restart. Services are never reloaded, so read here it
+#     waited for a reboot;
+#   - the bytes are parsed in the forked child, not in PID 1, where a value a service
+#     keeps secret stayed in an arena that is never reset;
+#   - the parent only opens and fstats each file, which allocates nothing.
+#
+# What moved with it: a missing, oversized or non-regular file now fails that service's
+# start (`FAILED to start`), not the load, and a bad variable name exits the child 126.
+# Only what cannot depend on the file is checked here. A path that can never open is a
+# config error, and a file that is not there yet is not.
 fn _cfg_env_files_into(obj, sd) {
     var a = bayan_json_v_obj_get_by_cstr(obj, "env_files");
     if (a == 0) { return 1; }
     if (json_v_is_arr(a) == 0) { return _cfg_refuse(sd, "config: env_files is not an array - service REFUSED: "); }
-    var env = svc_def_env(sd);
+    var files = svc_def_env_files(sd);
     var n = json_v_arr_len(a);
     for (var i = 0; i < n; i = i + 1) {
         var pv = json_v_arr_get(a, i);
@@ -337,38 +346,45 @@ fn _cfg_env_files_into(obj, sd) {
             return _cfg_refuse(sd, "config: env_files entries must be strings - service REFUSED: ");
         }
         var ps = json_v_str(pv);
-        if (str_len(ps) < 2 || load8(str_data(ps)) != 47) {
+        # argonaut's preflight refuses these at every start. Here is where it is cheap.
+        if (str_len(ps) < 2 || str_len(ps) > 4095 || load8(str_data(ps)) != 47) {
             return _cfg_refuse(sd, "config: env_files paths must be absolute - service REFUSED: ");
         }
-        var pc = str_clone(ps);
-        if (pc == 0) { return _cfg_refuse(sd, "config: out of memory reading env_files - service REFUSED: "); }
-        var st[STAT_BUFSZ];
-        if (sys_stat(str_data(pc), &st) != 0) {
-            return _cfg_refuse(sd, "config: an env_files file is missing or unreadable - service REFUSED: ");
+        if (_cfg_has_nul(str_data(ps), str_len(ps)) == 1) {
+            return _cfg_refuse(sd, "config: an env_files path holds a NUL - service REFUSED: ");
         }
-        var size = load64(&st + STAT_SIZE);
-        if (size > 0) {
-            var tmp = map_new();
-            var rc = load_env_file(pc, tmp);
-            if (rc == 0 - 2) {
-                return _cfg_refuse(sd, "config: an env_files file is over 8 KiB - service REFUSED: ");
-            }
-            if (rc != 0) {
-                return _cfg_refuse(sd, "config: an env_files file could not be read - service REFUSED: ");
-            }
-            var keys = map_keys(tmp);
-            for (var j = 0; j < vec_len(keys); j = j + 1) {
-                var k = vec_get(keys, j);
-                var v = map_get(tmp, k);
-                if (_cfg_env_name_ok(k, strlen(k)) == 0) {
-                    return _cfg_refuse(sd, "config: an env_files file has a bad variable name - service REFUSED: ");
-                }
-                if (_cfg_has_nul(str_data(v), str_len(v)) == 1) {
-                    return _cfg_refuse(sd, "config: an env_files value holds a NUL - service REFUSED: ");
-                }
-                map_set(env, k, v);
-            }
+        vec_push(files, ps);
+    }
+    return 1;
+}
+
+# `"required_for_modes": ["server", "desktop"]`: the boot modes this service runs in.
+# Absent is every mode. argonaut stores the field and nothing there reads it, so
+# cfg_services_for_mode is the reader. One config.json can then serve boards of different
+# modes. Returns 1 on success or no key, 0 to refuse the service. A mode that does not
+# exist would otherwise be a service that silently never starts, and an empty list says
+# the same thing `"enabled": false` says, less clearly. 1.10.0.
+fn _cfg_modes_into(obj, sd) {
+    var a = bayan_json_v_obj_get_by_cstr(obj, "required_for_modes");
+    if (a == 0) { return 1; }
+    if (json_v_is_arr(a) == 0) {
+        return _cfg_refuse(sd, "config: required_for_modes is not an array - service REFUSED: ");
+    }
+    var n = json_v_arr_len(a);
+    if (n == 0) {
+        return _cfg_refuse(sd, "config: required_for_modes is empty, use enabled: false - service REFUSED: ");
+    }
+    var modes = svc_def_modes(sd);
+    for (var i = 0; i < n; i = i + 1) {
+        var e = json_v_arr_get(a, i);
+        if (e == 0 || json_v_is_str(e) == 0) {
+            return _cfg_refuse(sd, "config: required_for_modes entries must be strings - service REFUSED: ");
         }
+        var mrt, mrv = boot_mode_parse(json_v_str(e));
+        if (is_err_result(mrt) == 1) {
+            return _cfg_refuse(sd, "config: required_for_modes names an unknown boot mode - service REFUSED: ");
+        }
+        vec_push(modes, result_unwrap(mrt, mrv));
     }
     return 1;
 }
@@ -475,9 +491,8 @@ fn svc_def_from_json(obj) {
     #   - `ready_check` -> IS live (`init.cyr:467,875`) but argonaut ships no
     #     `svc_def_set_ready_check`, so there is no way to set it from here.
     # 1.7.5 exposes all three. argonaut 1.15.0 merged `environment` into the
-    # child's envp and added `svc_def_set_ready_check`. `env_files` is still read
-    # by nothing in argonaut, so kybernet reads those files itself, at load, into
-    # the same map (see `_cfg_env_files_into`).
+    # child's envp and added `svc_def_set_ready_check`, and 1.17.0 reads `env_files`
+    # at spawn (see `_cfg_env_files_into`).
     #
     # Deliberately NOT exposed at all, with reasons rather than silence:
     #   - `resource_limits` — ⚠ NEVER. `struct ResourceLimits` is defined TWICE
@@ -485,14 +500,15 @@ fn svc_def_from_json(obj) {
     #     does not warn; agnostik's wins, so reading argonaut's fill with an
     #     `ResourceLimits_*` accessor returns the wrong field entirely. Standing rule 14.
     #     Per-service limits go through `cgroup_limits`, which has no twin.
-    #   - `socket_activation` — a listening-socket protocol, not a scalar. It wants
-    #     a design, not a config key.
-    #   - `log_config` / `required_for_modes` — argonaut's defaults are correct for
-    #     every shape kybernet ships, and an unused key is a maintenance surface.
+    #   - `socket_activation`, `log_config` — ⚠ A KEY WOULD DO NOTHING. argonaut has no
+    #     setter for either and reads neither: nothing creates or passes a socket, and
+    #     a service's stdout and stderr go to /dev/null whatever a LogConfig says. No
+    #     AGNOS service reads LISTEN_FDS and no log sink exists. Both are on the
+    #     roadmap under the gates that would give them a reader (1.10.0).
     if (_cfg_restart_config_into(obj, sd) == 0) { return 0; }
-    # Files after `environment`, so a file overrides it (systemd's order).
     if (_cfg_environment_into(obj, sd) == 0) { return 0; }
     if (_cfg_env_files_into(obj, sd) == 0) { return 0; }
+    if (_cfg_modes_into(obj, sd) == 0) { return 0; }
     var rck = _cfg_ready_check(obj, sd);
     if (rck == 0 - 1) { return 0; }
     if (rck != 0) { svc_def_set_ready_check(sd, rck); }
@@ -805,7 +821,7 @@ fn edge_config_from_json(root, ec) {
         # an attestation path "read nothing, found nothing wrong" is the
         # same failure shape as 1.4.2's MEDIUM-2 (a tool that never ran
         # counting as a pass).
-        var idx = _eb_parse_pcr_indices(spec);
+        var idx = _eb_parse_pcr_indices_a(cfg_keep(), spec);
         for (var i = 0; i < vec_len(idx); i = i + 1) {
             var v = vec_get(idx, i);
             if (v < 0 || v > 23) { return 0; }
@@ -856,7 +872,7 @@ fn edge_config_from_json(root, ec) {
     var ex = bayan_json_v_obj_get_by_cstr(eb, "expected_pcrs");
     if (ex != 0) {
         if (json_v_is_arr(ex) == 0) { return 0; }
-        pv = vec_new();
+        pv = vec_new_a(cfg_keep());
         var n = json_v_arr_len(ex);
         for (var k = 0; k < n; k = k + 1) {
             var e = json_v_arr_get(ex, k);
@@ -866,7 +882,7 @@ fn edge_config_from_json(root, ec) {
             # An all-zero baseline would match sigil's zero-fill for a PCR
             # it could not read — attestation that can never fail.
             if (edge_is_all_zero_hex(d) == 1) { return 0; }
-            vec_push(pv, d);
+            vec_push_a(cfg_keep(), pv, d);
         }
     }
 
@@ -1316,6 +1332,61 @@ fn cfg_warn_missing_depends(dst, defaults) {
     return missing;
 }
 
+# The services of `svcs` that run in boot mode `mode`, as a new vec. A service that does
+# not is not registered at all: it owns no cgroup, no health probe and no restart, and a
+# `depends_on` naming it is reported as a name this boot does not have, which is the case
+# cfg_warn_missing_depends already describes. Built-ins need no filter: default_services
+# builds its list per mode. 1.10.0.
+fn cfg_services_for_mode(svcs, mode) {
+    var out = vec_new();
+    for (var i = 0; i < vec_len(svcs); i = i + 1) {
+        var sd = vec_get(svcs, i);
+        var modes = svc_def_modes(sd);
+        var runs = 0;
+        if (vec_len(modes) == 0) { runs = 1; }
+        for (var m = 0; m < vec_len(modes); m = m + 1) {
+            if (vec_get(modes, m) == mode) { runs = 1; }
+        }
+        if (runs == 1) {
+            vec_push(out, sd);
+        } else {
+            klog2("config: not required for this boot mode, not registered: ", str_data(svc_def_name(sd)));
+        }
+    }
+    return out;
+}
+
+# `"start_timeout_ms"`, top level: how long argonaut waits for a oneshot to finish or a
+# forking service's parent to exit before it kills the group and fails the start. Its
+# default is 90 s, systemd's DefaultTimeoutStartSec, and a oneshot that legitimately
+# needs longer (a first-boot migration, a filesystem resize) failed with no way to say so.
+#
+# ⚠ IT IS ONE VALUE FOR THE WHOLE BOARD, AND THE WAIT BLOCKS PID 1. argonaut holds it in a
+# global because ServiceDefinition has no slot for it, and the wait is synchronous: at
+# phase 8 nothing else starts until it ends, and on a restart inside the reactor nothing
+# is reaped and no signal is handled, shutdown included. So raising it for one slow
+# oneshot raises every oneshot's and forking service's worst case. A service that takes
+# long to come up belongs in `type: notify`, which waits without blocking.
+#
+# Returns the value, 0 when absent or 0 (argonaut's own spelling of "the default"), and
+# -1 to reject it. Refused, never clamped, like every other bound here (standing rule
+# 25), and strict about type: a quoted number must not read as "absent". The floor
+# catches a value written in seconds: 90 would kill every oneshot at 90 ms. The ceiling
+# is the one edge.verify_timeout_ms uses, for the same reason. 1.10.0.
+var CFG_START_TIMEOUT_MIN = 1000;
+var CFG_START_TIMEOUT_MAX = 3600000;
+
+fn cfg_start_timeout(root) {
+    var v = _cfg_sec_int(root, "start_timeout_ms", 0);
+    if (v == 0) { return 0; }
+    if (v < CFG_START_TIMEOUT_MIN || v > CFG_START_TIMEOUT_MAX) {
+        klog("config: start_timeout_ms must be an integer in 1000..3600000 - REJECTED, the timeout is unchanged");
+        kmsg("kybernet: config: start_timeout_ms out of range, rejected");
+        return 0 - 1;
+    }
+    return v;
+}
+
 # ================================================================
 # Two generations of parse tree, for a reload (1.9.0)
 # ================================================================
@@ -1341,10 +1412,25 @@ fn cfg_warn_missing_depends(dst, defaults) {
 # The boot parse stays in the default arena: ServiceDefinitions keep its strings for
 # life. The cost is bounded by two trees, about 2 MiB at the 256 KiB config limit,
 # and an arena rewinds to its first chunk and reuses the chain, so it stops growing.
+#
+# ⚠ EVERYTHING A RELOAD KEEPS LIVES IN ITS GENERATION, NOT JUST THE TREE (1.10.0). 1.9.0
+# moved the parse and left 574 to 1,476 bytes a SIGHUP around it: a whole ArgonautConfig,
+# its edge block, the copy of emergency.cred, and the baseline and index vecs. Each has the
+# tree's lifetime, so each now goes where the tree goes, through cfg_keep(), and past the
+# two reloads that build the generations a reload spends nothing in the arena PID 1 never
+# resets. The reactor pass requires exactly zero.
 var CFG_GEN_CHUNK = 65536;
 var _cfg_gen[2];         # one allocator per generation; 0 until the first reload
 var _cfg_gen_live = 0;
 var _cfg_gen_commits = 0;
+var _cfg_keep = 0;       # the allocator of the load in progress; 0 outside a reload
+var _cfg_pristine = 0;   # argonaut's defaults, never written, for cfg_reload_config
+
+# Where a load puts what it keeps: the reload's generation, or the default arena at boot.
+fn cfg_keep() {
+    if (_cfg_keep != 0) { return _cfg_keep; }
+    return default_alloc();
+}
 
 fn cfg_reload_parse(buf, n) {
     var next = 1 - _cfg_gen_live;
@@ -1356,7 +1442,36 @@ fn cfg_reload_parse(buf, n) {
         store64(&_cfg_gen + next * 8, a);
     }
     reset_via(a);
+    _cfg_keep = a;
     return bayan_json_v_parse_buf_a(a, buf, n);
+}
+
+# Called once the load has finished, however it finished.
+fn cfg_reload_end() {
+    _cfg_keep = 0;
+    return 0;
+}
+
+# argonaut's defaults, built once. Read-only: what a reload with no config file installs.
+fn cfg_reload_defaults() {
+    if (_cfg_pristine == 0) { _cfg_pristine = argonaut_config_default(); }
+    return _cfg_pristine;
+}
+
+# A config for this reload to fill, in its generation: argonaut's defaults, with an edge
+# block of its own because edge_config_from_json writes into it. The two vecs and the
+# audit path are shared with _cfg_pristine, and a reload touches none of them: it applies
+# no service, and argonaut read the audit settings once at boot.
+fn cfg_reload_config() {
+    var src = cfg_reload_defaults();
+    var keep = cfg_keep();
+    var cfg = alloc_via(keep, sizeof(ArgonautConfig));
+    var ec = alloc_via(keep, sizeof(EdgeBootConfig));
+    if (cfg == 0 || ec == 0) { return argonaut_config_default(); }
+    memcpy(cfg, src, sizeof(ArgonautConfig));
+    memcpy(ec, config_edge(src), sizeof(EdgeBootConfig));
+    store64(cfg + 48, ec);
+    return cfg;
 }
 
 fn cfg_reload_commit() {

@@ -161,20 +161,22 @@ var EMERG_ARGON_P_DEFAULT = 1;
 # Record parsing
 # ================================================================
 
-# The `want`-th `$`-separated field of a record, or 0 when the record has no
-# such field. Returning 0 for "absent" rather than an empty Str is what lets
-# every caller below null-check before use — a truncated record is a real
-# input here (a half-written config, a truncated image), and `str_len(0)`
-# reads through a null Str header, which in PID 1 is a kernel panic. (`str_sub`
-# can also return 0 on allocator failure, so the same null-check covers that.)
+# Fill `out`, 16 bytes the caller owns, as a Str viewing the `want`-th `$`-separated
+# field of a record, and return it, or return 0 when the record has no such field.
+# Returning 0 for "absent" rather than an empty Str is what lets every caller below
+# null-check before use — a truncated record is a real input here (a half-written
+# config, a truncated image), and `str_len(0)` reads through a null Str header, which
+# in PID 1 is a kernel panic.
 #
-# ⚠ THE RETURNED FIELD IS NOT NUL-TERMINATED. `str_sub` → `str_new` stores the
-# pointer and length without copying (`str.cyr:42-52`), so a field aliases the
-# middle of the record and the byte after it is the `$` separator — or, for the
-# last field, whatever follows the record in the arena. **Every use must carry
-# an explicit length**: `str_len`-bounded loops, or `hex_decode_into(ptr, len,
-# out)`. Never hand a field to anything that reads to a NUL.
-fn _emerg_field(stored, want) {
+# ⚠ THE VIEW IS IN THE CALLER'S BUFFER, NOT THE ARENA (1.10.0). This was `str_sub`, 16
+# bytes of arena per field, and a reload classifies the record several times, in an
+# arena PID 1 never resets. A Str is { data, len } (`str.cyr:52`).
+#
+# ⚠ THE FIELD IS NOT NUL-TERMINATED. It aliases the middle of the record and the
+# byte after it is the `$` separator — or, for the last field, whatever follows the
+# record. **Every use must carry an explicit length**: `str_len`-bounded loops, or
+# `hex_decode_into(ptr, len, out)`. Never hand a field to anything that reads to a NUL.
+fn _emerg_field(stored, want, out) {
     if (stored == 0) { return 0; }
     var n = str_len(stored);
     var d = str_data(stored);
@@ -186,7 +188,11 @@ fn _emerg_field(stored, want) {
         if (i == n) { at_end = 1; }
         else { if ((load8(d + i) & 255) == 36) { at_end = 1; } }   # '$'
         if (at_end == 1) {
-            if (field == want) { return str_sub(stored, start, i - start); }
+            if (field == want) {
+                store64(out, d + start);
+                store64(out + 8, i - start);
+                return out;
+            }
             field = field + 1;
             start = i + 1;
         }
@@ -280,18 +286,23 @@ fn emerg_cred_parse(h, out) {
     # Exactly six fields. A seventh means the record carries something this
     # version does not understand, and guessing at it is how a format grows a
     # silent second meaning — refuse instead.
-    if (_emerg_field(h, 6) != 0) { return 0; }
+    var xf[16];
+    if (_emerg_field(h, 6, &xf) != 0) { return 0; }
 
-    var tf = _emerg_field(h, 1);
-    var mf = _emerg_field(h, 2);
-    var pf = _emerg_field(h, 3);
-    var sf = _emerg_field(h, 4);
-    var gf = _emerg_field(h, 5);
-    if (tf == 0 || mf == 0 || pf == 0 || sf == 0 || gf == 0) { return 0; }
+    var tf[16];
+    var mf[16];
+    var pf[16];
+    var sf[16];
+    var gf[16];
+    if (_emerg_field(h, 1, &tf) == 0) { return 0; }
+    if (_emerg_field(h, 2, &mf) == 0) { return 0; }
+    if (_emerg_field(h, 3, &pf) == 0) { return 0; }
+    if (_emerg_field(h, 4, &sf) == 0) { return 0; }
+    if (_emerg_field(h, 5, &gf) == 0) { return 0; }
 
-    var t = _emerg_parse_bounded(tf, EMERG_ARGON_T_MAX);
-    var m = _emerg_parse_bounded(mf, EMERG_ARGON_M_MAX);
-    var p = _emerg_parse_bounded(pf, EMERG_ARGON_P_MAX);
+    var t = _emerg_parse_bounded(&tf, EMERG_ARGON_T_MAX);
+    var m = _emerg_parse_bounded(&mf, EMERG_ARGON_M_MAX);
+    var p = _emerg_parse_bounded(&pf, EMERG_ARGON_P_MAX);
     if (t < EMERG_ARGON_T_MIN) { return 0; }
     if (m < EMERG_ARGON_M_MIN) { return 0; }
     if (p < EMERG_ARGON_P_MIN) { return 0; }
@@ -305,10 +316,10 @@ fn emerg_cred_parse(h, out) {
     # this product cannot overflow (65536 * 8 = 524,288).
     if (m * t > EMERG_ARGON_WORK_MAX) { return 0; }
 
-    if (_emerg_is_hex(sf) == 0) { return 0; }
-    if (_emerg_is_hex(gf) == 0) { return 0; }
-    var slen = str_len(sf) / 2;
-    var glen = str_len(gf) / 2;
+    if (_emerg_is_hex(&sf) == 0) { return 0; }
+    if (_emerg_is_hex(&gf) == 0) { return 0; }
+    var slen = str_len(&sf) / 2;
+    var glen = str_len(&gf) / 2;
     if (slen < EMERG_SALT_MIN || slen > EMERG_SALT_MAX) { return 0; }
     if (glen < EMERG_TAG_MIN  || glen > EMERG_TAG_MAX)  { return 0; }
 
@@ -418,30 +429,42 @@ fn kyb_verify_emergency_auth(esc, password_input) {
 # Logging the parameters is what makes a typo visible at boot instead of at
 # the prompt: an operator who meant m=19456 and wrote m=1945 sees it in
 # dmesg, months before the night they need the shell.
+#
+# ⚠ A CSTR THAT LASTS UNTIL THE NEXT CALL (1.10.0). It runs on a reload, so it can spend
+# no arena. Global scope: [12] is 12 SLOTS = 96 bytes, and the longest answer is 44.
+var _EMERG_DESC[12];
+
+fn _emerg_desc_add(pos, s) {
+    var n = strlen(s);
+    memcpy(&_EMERG_DESC + pos, s, n);
+    return pos + n;
+}
+
+fn _emerg_desc_int(pos, v) { return pos + fmt_int_buf(v, &_EMERG_DESC + pos); }
+
 fn emerg_cred_describe(h) {
     var kind = emerg_cred_kind(h);
-    if (kind == EMERG_CRED_NONE) { return str_from("none"); }
+    if (kind == EMERG_CRED_NONE) { return "none"; }
     if (kind == EMERG_CRED_LEGACY) {
-        return str_from("legacy unsalted SHA-256 (DEPRECATED — see scripts/mkcred.sh)");
+        return "legacy unsalted SHA-256 (DEPRECATED — see scripts/mkcred.sh)";
     }
-    if (kind == EMERG_CRED_INVALID) { return str_from("malformed"); }
+    if (kind == EMERG_CRED_INVALID) { return "malformed"; }
 
-    var prm = alloc(40);
-    if (prm == 0) { return str_from("argon2id"); }
-    if (emerg_cred_parse(h, prm) == 0) { return str_from("argon2id"); }
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "argon2id t=");
-    str_builder_add_int(sb, load64(prm));
-    str_builder_add_cstr(sb, " m=");
-    str_builder_add_int(sb, load64(prm + 8));
-    str_builder_add_cstr(sb, "KiB p=");
-    str_builder_add_int(sb, load64(prm + 16));
-    str_builder_add_cstr(sb, " salt=");
-    str_builder_add_int(sb, load64(prm + 24));
-    str_builder_add_cstr(sb, "B tag=");
-    str_builder_add_int(sb, load64(prm + 32));
-    str_builder_add_cstr(sb, "B");
-    return str_builder_build(sb);
+    var prm[40];
+    if (emerg_cred_parse(h, &prm) == 0) { return "argon2id"; }
+    var pos = _emerg_desc_add(0, "argon2id t=");
+    pos = _emerg_desc_int(pos, load64(&prm));
+    pos = _emerg_desc_add(pos, " m=");
+    pos = _emerg_desc_int(pos, load64(&prm + 8));
+    pos = _emerg_desc_add(pos, "KiB p=");
+    pos = _emerg_desc_int(pos, load64(&prm + 16));
+    pos = _emerg_desc_add(pos, " salt=");
+    pos = _emerg_desc_int(pos, load64(&prm + 24));
+    pos = _emerg_desc_add(pos, "B tag=");
+    pos = _emerg_desc_int(pos, load64(&prm + 32));
+    pos = _emerg_desc_add(pos, "B");
+    store8(&_EMERG_DESC + pos, 0);
+    return &_EMERG_DESC;
 }
 
 # 1 when two stored credentials are the SAME credential.
@@ -574,10 +597,12 @@ fn emerg_load_cred_file_at(path) {
     # the new one, but by then the reload had overwritten the bytes both of them
     # pointed at: a rotated record of the same length (same parameters, new salt
     # and tag, which is the normal rotation) compared equal to itself, and the
-    # rotation was never announced.
-    var view = str_new(&_cred_buf, n);
+    # rotation was never announced. The copy lands where this load keeps things, so a
+    # reload does not spend the arena PID 1 never resets (1.10.0).
+    var keep = cfg_keep();
+    var view = str_new_a(keep, &_cred_buf, n);
     var owned = 0;
-    if (view != 0) { owned = str_clone(view); }
+    if (view != 0) { owned = str_clone_a(keep, view); }
     if (owned == 0) {
         klog("config: emergency.cred could not be copied (out of memory) - REFUSED");
         kmsg("kybernet: config: emergency.cred copy failed; refusing to use it");
