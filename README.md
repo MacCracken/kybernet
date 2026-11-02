@@ -46,7 +46,7 @@ Requires Cyrius 6.7.18 (`cyriusly install 6.7.18 && cyriusly use 6.7.18`).
 cyrius deps                                # Resolve deps from cyrius.cyml into lib/
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet   # Build (DCE recommended)
 CYRIUS_DCE=1 cyrius build src/agnos_init.cyr build/agnos-init   # agnos-init (see below)
-cyrius test src/test.cyr                   # Run 910 tests
+cyrius test src/test.cyr                   # Run 932 tests
 cyrius bench src/bench.cyr                 # Run benchmarks
 ```
 
@@ -60,21 +60,21 @@ services expect at boot: `/run` is a fresh tmpfs every boot, so `/run/agnos/agen
 
 | Module | Lines | What |
 |--------|-------|------|
-| main | 2150 | Boot sequence, argonaut init, event loop, emergency shell, shutdown |
-| svc_config | 1228 | JSON → ServiceDefinition; security, limits and edge blocks; config-read classification |
-| edge_boot | 777 | Verified-boot pre-flight: TPM PCR, dm-verity verification |
-| emergency_auth | 707 | Argon2id credential: record format, parameter bounds, legacy migration, file-vs-key source |
+| main | 2072 | Boot sequence, argonaut init, event loop, emergency shell, shutdown |
+| svc_config | 1371 | JSON → ServiceDefinition; security, limits and edge blocks; config-read classification |
+| edge_boot | 762 | Verified-boot pre-flight: TPM PCR, dm-verity verification |
+| emergency_auth | 660 | Argon2id credential: record format, parameter bounds, legacy migration, file-vs-key source |
 | cgroup | 623 | Cgroup v2 controllers, paths, limits, move, kill, teardown |
 | notify | 517 | sd_notify socket (READY, STOPPING, WATCHDOG, STATUS, RELOADING) |
 | seccomp | 516 | Seccomp BPF filter builder + loader |
 | privdrop | 408 | Capability dropping + no_new_privs + agnostik bridge |
 | sandbox | 351 | Landlock filesystem sandboxing (builder pattern) |
 | eventloop | 294 | epoll, timerfds, arch-gated `struct epoll_event` ABI |
-| service_sandbox | 238 | Per-service pre-exec: cgroup join → no_new_privs → caps → Landlock → seccomp |
+| service_sandbox | 244 | Per-service pre-exec: cgroup join → no_new_privs → caps → Landlock → seccomp |
 | log | 224 | klog / klog2 / kmsg / slog |
-| boot_stages | 216 | Per-stage work with OK / SKIP / FAIL status |
+| boot_stages | 218 | Per-stage work with OK / SKIP / FAIL status |
 | mount | 205 | Data-driven essential mount table; the mount-table cache |
-| termios | 120 | Console echo suppression (hand-rolled ioctl/termios) |
+| termios | 109 | Console echo suppression (hand-rolled ioctl/termios) |
 | console | 113 | stdio redirect; interactive `/dev/console` open |
 | reaper | 109 | Non-blocking waitpid loop, structured results |
 | restart_queue | 100 | Deferred restarts, static storage |
@@ -143,7 +143,7 @@ services expect at boot: `/run` is a fresh tmpfs every boot, so `/run/agnos/agen
 - **Data-driven mount table** — not hardcoded per-mount calls
 - **sd_notify compatible** — READY, STOPPING, WATCHDOG, STATUS, RELOADING messages via epoll
 - **String builder** for path construction and logging
-- **910 tests** (905 on aarch64 — the seccomp allowlist is arch-specific), 56 benchmarks
+- **932 tests** (927 on aarch64 — the seccomp allowlist is arch-specific), 56 benchmarks
 
 ## Dependencies
 
@@ -182,14 +182,14 @@ boot. With the working lane moved onto the caller's arena it costs +25 KB.
 ## Testing
 
 ```sh
-cyrius test src/test.cyr            # 910 assertions (905 on aarch64)
+cyrius test src/test.cyr            # 932 assertions (927 on aarch64)
 bash scripts/bench-history.sh       # 56 benchmarks, load-tolerant regression gate
 bash qemu/boot-test.sh              # PID-1 boot harness, x86_64 (needs KVM)
 bash qemu/boot-test-aarch64.sh      # PID-1 boot harness, aarch64 (TCG, no KVM)
 ```
 
 The QEMU harness is the gate that matters: it boots kybernet as real PID 1 and
-asserts 126 properties across five passes — the boot sequence, the reactor
+asserts 130 properties across five passes — the boot sequence, the reactor
 (that it sleeps rather than spins), dm-verity verification against a real
 image pair on virtio disks, and the emergency-auth prompt with a password fed
 over the serial line. Pass 4 runs against **both** credential formats: the
@@ -200,11 +200,11 @@ file leaves no credential, and the config key is never its fallback. After a
 correct password, the shell kybernet execs is a probe that reports its own
 descriptors, signal mask and environment, and the gate checks each one.
 
-The aarch64 harness asserts 180 properties and exists because **a cross-build
+The aarch64 harness asserts 184 properties and exists because **a cross-build
 exiting 0 is not evidence**. It boots `kybernet-aarch64` as PID 1 under TCG —
 an x86 host cannot accelerate aarch64 — against a pinned, sha256-checked kernel.
 Besides the boot sequence, cgroup controllers, a real reactor iteration and a
-clean power down, it runs 25 services built only from this repo's Cyrius fixtures,
+clean power down, it runs 26 services built only from this repo's Cyrius fixtures,
 and asserts on aarch64 what the x86 harness asserts about services: cgroup
 placement and limits, dropped and kept capabilities, the uid drop, seccomp
 `basic` with its control arm, Landlock, prerequisite blocking, restart backoff,
@@ -221,7 +221,7 @@ The edge pass therefore proves kybernet's half on aarch64 (the config, the exec,
 verdict, the refusal), not the real veritysetup on aarch64.
 
 ⚠ That Argon2id record is minted by `qemu/mkcred-fixture.cyr`, using sigil's
-Argon2id — the same implementation `emergency_auth.cyr` verifies with. It is
+Argon2id — the same implementation argonaut verifies with at the prompt. It is
 therefore **not** a cross-check, and this paragraph used to claim it was: the
 fixture came from `scripts/mkcred.sh` (OpenSSL), which made the pass a genuine
 interop test between two implementations. That dependency was removed at 1.6.1

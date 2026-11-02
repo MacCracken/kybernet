@@ -1712,13 +1712,16 @@ fn test_emergency_cred_verify() {
     assert_eq(kyb_verify_emergency_auth(esc, str_from("hunter22")), 0,
       "verify: password with a trailing byte denied");
 
-    # The real parameters, once. This is the 19 MiB / ~230 ms arena the
-    # roadmap's fl_alloc item is about: it comes from alloc(), sized by
-    # argon2_mem_bytes, and it is the only place the suite proves the
-    # default-cost path actually runs inside kybernet.
+    # The real parameters, once: the 19 MiB, ~230 ms cost, and the only place the
+    # suite proves it runs inside kybernet. Since 1.9.0 that memory is argonaut's
+    # private mapping, gone before the verdict, and PID 1's arena does not move.
     store64(esc + 32, TV_REAL());
+    var used0 = alloc_used();
     assert_eq(kyb_verify_emergency_auth(esc, str_from("hunter2")), 1,
-      "verify: m=19456 t=2 p=1 record verifies (19 MiB arena via alloc)");
+      "verify: m=19456 t=2 p=1 record verifies");
+    assert_eq(alloc_used() - used0 < 1024, 1, "verify: a verification leaves PID 1's arena alone");
+    assert_eq(emergency_auth_arena_live(), 0, "verify: the KDF mapping is gone before the verdict");
+    assert_eq(emergency_auth_arena_peak() >= 19456 * 1024, 1, "verify: the KDF really had its memory");
     assert_eq(kyb_verify_emergency_auth(esc, str_from("hunter3")), 0,
       "verify: m=19456 wrong password denied");
 
@@ -3109,6 +3112,127 @@ fn test_config_merge_services() {
     return 0;
 }
 
+# A run of `n` copies of one character, as a cstr.
+fn _rep(c, n) {
+    var p = alloc(n + 1);
+    memset(p, c, n);
+    store8(p + n, 0);
+    return p;
+}
+
+# ⚠ TWO CLASSIFIERS, ONE CONTRACT. kybernet decides at load that a record is usable and
+# argonaut verifies it at the prompt, so a record only kybernet accepts is a correct
+# password denied, and a failed authentication halts PID 1. They were written apart and
+# look alike. That is what this compares, on every combination at and around each bound.
+fn _emerg_kinds_agree(s) {
+    var ky = emerg_cred_kind(s);
+    var ar = emergency_cred_kind(s);
+    if (ky == EMERG_CRED_ARGON2ID) { return ar == ECRED_ARGON2ID; }
+    # kybernet lowercases a legacy digest before argonaut sees it.
+    if (ky == EMERG_CRED_LEGACY) { return emergency_cred_kind(_emerg_hex_lower(s)) == ECRED_LEGACY; }
+    return ar != ECRED_ARGON2ID && ar != ECRED_LEGACY;
+}
+
+fn test_emerg_classifiers_agree() {
+    println("--- emergency classifiers agree (1.9.0) ---");
+    var ts = vec_new(); var ms = vec_new(); var ps = vec_new(); var salts = vec_new(); var tags = vec_new();
+    vec_push(ts, "0"); vec_push(ts, "1"); vec_push(ts, "2"); vec_push(ts, "8"); vec_push(ts, "9"); vec_push(ts, "01");
+    vec_push(ms, "8191"); vec_push(ms, "8192"); vec_push(ms, "19456"); vec_push(ms, "65536"); vec_push(ms, "65537");
+    vec_push(ms, "08192"); vec_push(ms, "0000000000000000019456"); vec_push(ms, "131073");
+    vec_push(ps, "0"); vec_push(ps, "1"); vec_push(ps, "2"); vec_push(ps, "01");
+    vec_push(salts, _rep(97, 30)); vec_push(salts, _rep(97, 32)); vec_push(salts, _rep(97, 33));
+    vec_push(salts, _rep(97, 128)); vec_push(salts, _rep(97, 130)); vec_push(salts, _rep(65, 32));
+    vec_push(salts, _rep(122, 32));
+    vec_push(tags, _rep(98, 62)); vec_push(tags, _rep(98, 64)); vec_push(tags, _rep(98, 65));
+    vec_push(tags, _rep(98, 128)); vec_push(tags, _rep(98, 130)); vec_push(tags, _rep(66, 64));
+    var seen = 0; var usable = 0; var bad = 0;
+    for (var a = 0; a < vec_len(ts); a = a + 1) {
+        for (var b = 0; b < vec_len(ms); b = b + 1) {
+            for (var c = 0; c < vec_len(ps); c = c + 1) {
+                for (var d = 0; d < vec_len(salts); d = d + 1) {
+                    for (var e = 0; e < vec_len(tags); e = e + 1) {
+                        var r = _rec5(vec_get(ts, a), vec_get(ms, b), vec_get(ps, c),
+                          vec_get(salts, d), vec_get(tags, e));
+                        seen = seen + 1;
+                        if (emerg_cred_kind(r) == EMERG_CRED_ARGON2ID) { usable = usable + 1; }
+                        if (_emerg_kinds_agree(r) == 0) { bad = bad + 1; }
+                    }
+                }
+            }
+        }
+    }
+    assert_eq(bad, 0, "classifiers: kybernet and argonaut agree on every v1 record");
+    assert_eq(usable > 0 && usable < seen, 1, "classifiers: the corpus holds usable and unusable records");
+    var odd = vec_new();
+    vec_push(odd, "v1$"); vec_push(odd, "v1$$$$$");
+    vec_push(odd, "V1$1$8192$1$aa$bb"); vec_push(odd, "v2$1$8192$1$aa$bb");
+    vec_push(odd, "v1"); vec_push(odd, "$"); vec_push(odd, _rep(97, 63)); vec_push(odd, _rep(97, 64));
+    vec_push(odd, _rep(65, 64)); vec_push(odd, _rep(97, 65)); vec_push(odd, _rep(122, 64));
+    bad = 0;
+    for (var i = 0; i < vec_len(odd); i = i + 1) {
+        if (_emerg_kinds_agree(str_from(vec_get(odd, i))) == 0) { bad = bad + 1; }
+    }
+    assert_eq(bad, 0, "classifiers: they agree on legacy digests and malformed shapes");
+    var tail = str_cat(_rec5("1", "8192", "1", _rep(97, 32), _rep(98, 64)), str_from("$"));
+    assert_eq(_emerg_kinds_agree(tail), 1, "classifiers: they agree on a seventh field");
+    return 0;
+}
+
+# reload's two generations. A use-after-free here would be in PID 1, so each promise in
+# cfg_reload_parse's header gets an assertion. The parsed values are one length, so a
+# generation reset under a live pointer overwrites it instead of going unnoticed.
+fn test_config_reload_generations() {
+    println("--- config reload generations (1.9.0) ---");
+    var a = "{\"k\":\"first-value\"}";
+    var ra = cfg_reload_parse(a, strlen(a));
+    assert_eq(ra != 0, 1, "reload: a document parses");
+    var sa = _cfg_str(ra, "k", 0);
+    cfg_reload_commit();
+
+    var bad = "{\"k\":";
+    assert_eq(cfg_reload_parse(bad, strlen(bad)), 0, "reload: a bad document parses to nothing");
+    assert_eq(str_eq_cstr(sa, "first-value"), 1, "reload: a refused reload leaves the live tree alone");
+
+    var b = "{\"k\":\"secnd-value\"}";
+    var rb = cfg_reload_parse(b, strlen(b));
+    var sb = _cfg_str(rb, "k", 0);
+    assert_eq(str_eq_cstr(sa, "first-value"), 1, "reload: the live tree survives the next parse");
+    cfg_reload_commit();
+    assert_eq(str_eq_cstr(sa, "first-value"), 1, "reload: the old tree survives the commit, for the compare");
+    assert_eq(str_eq_cstr(sb, "secnd-value"), 1, "reload: the new tree is intact");
+
+    var c = "{\"k\":\"third-value\"}";
+    var rc = cfg_reload_parse(c, strlen(c));
+    var sc = _cfg_str(rc, "k", 0);
+    assert_eq(str_eq_cstr(sb, "secnd-value"), 1, "reload: a third parse leaves the live tree alone");
+    assert_eq(str_eq_cstr(sc, "third-value"), 1, "reload: a third parse reuses the older generation");
+    cfg_reload_commit();
+
+    # The point of it all: reloads stop costing arena, even past the first chunk.
+    var sb2 = str_builder_new();
+    str_builder_add_cstr(sb2, "{\"services\":[");
+    for (var i = 0; i < 2000; i = i + 1) {
+        if (i > 0) { str_builder_add_cstr(sb2, ","); }
+        str_builder_add_cstr(sb2, "{\"name\":\"kyb-gen\",\"binary\":\"/bin/true\",\"args\":[\"a\",\"b\"]}");
+    }
+    str_builder_add_cstr(sb2, "]}");
+    var big = str_builder_build(sb2);
+    assert_eq(str_len(big) > 100000, 1, "reload: the large document outgrows one chunk");
+    for (var w = 0; w < 4; w = w + 1) {
+        assert_eq(cfg_reload_parse(str_data(big), str_len(big)) != 0, 1, "reload: the large document parses");
+        cfg_reload_commit();
+    }
+    var before = alloc_used();
+    var ok = 1;
+    for (var r = 0; r < 50; r = r + 1) {
+        if (cfg_reload_parse(str_data(big), str_len(big)) == 0) { ok = 0; }
+        cfg_reload_commit();
+    }
+    assert_eq(ok, 1, "reload: fifty more reloads parse");
+    assert_eq(alloc_used() - before, 0, "reload: fifty reloads allocate nothing from the arena");
+    return 0;
+}
+
 fn test_cfg_read_class() {
     println("--- config read classification (1.7.0) ---");
     var cap = 16384;
@@ -3873,6 +3997,8 @@ fn main() {
     test_config_json_strictness();
     test_config_strings_are_cstrs();
     test_config_merge_services();
+    test_emerg_classifiers_agree();
+    test_config_reload_generations();
     return assert_summary();
 }
 var exit_code = main();

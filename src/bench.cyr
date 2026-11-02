@@ -652,10 +652,11 @@ fn bench_memeq() {
 
 fn bench_strlen() {
     var iters = 1000000;
+    var s = _bench_aligned("/sys/fs/cgroup/kybernet.slice/myservice/cgroup.procs");
     var start = now_ns();
     var k = 0;
     while (k < iters) {
-        strlen("/sys/fs/cgroup/kybernet.slice/myservice/cgroup.procs");
+        strlen(s);
         k = k + 1;
     }
     report("strlen(52 chars)", now_ns() - start, iters);

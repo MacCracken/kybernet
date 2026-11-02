@@ -75,7 +75,11 @@ RUNS="${RUNS:-3}"
 
 # ⚠ LAYOUT-SENSITIVE BENCHMARKS: REPORTED, NOT GATED. 1.6.14.
 #
-# These two measure where the LINKER put things, not what the code does, and
+# `strlen(52 chars)` left this list at 1.9.0: a literal sweep showed its cost was
+# its input's alignment, period 8 bytes, so src/bench.cyr feeds it an aligned copy.
+# Reach for that kind of fix first. What is left here is `is_mounted`.
+#
+# These measured where the LINKER put things, not what the code does, and
 # that was demonstrated rather than assumed. Experiment, on one box, one
 # binary, with `cyrius bench` directly rather than through this script:
 # inserting a purely INERT BSS pad into src/bench.cyr — an array nothing reads,
@@ -101,8 +105,7 @@ RUNS="${RUNS:-3}"
 # check), and they are printed as `layout` on every run so nobody forgets they
 # are unguarded. This is not a general escape hatch: adding a name here needs
 # the same inert-padding experiment, in the commit that adds it.
-LAYOUT_SENSITIVE="is_mounted(/proc, 2KiB fixed table)
-strlen(52 chars)"
+LAYOUT_SENSITIVE="is_mounted(/proc, 2KiB fixed table)"
 
 _is_layout_sensitive() {
     printf '%s\n' "$LAYOUT_SENSITIVE" | grep -qxF "$1"

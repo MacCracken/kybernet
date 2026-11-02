@@ -1315,3 +1315,57 @@ fn cfg_warn_missing_depends(dst, defaults) {
     }
     return missing;
 }
+
+# ================================================================
+# Two generations of parse tree, for a reload (1.9.0)
+# ================================================================
+#
+# ⚠ A SIGHUP COST 54,580 BYTES OF ARENA FOREVER on a 23,076-byte config, because the
+# tree landed in the arena PID 1 never resets. Parsing into a region and resetting it is
+# the obvious fix, and a reset right after the load would be a use-after-free in
+# PID 1: the tree does not end with the load. `g_emerg_hash` can point straight into
+# it, and so can `_eb_root_device` and the other edge device globals, the baselines in
+# `_eb_expected_pcrs`, and `pcr_bindings` in the new config's edge block. And
+# reload_config compares the old credential with the new one after loading.
+#
+# So nothing is copied out and nothing is reset under a live pointer. There are two
+# generations. A reload resets the one that is NOT live and parses into it, and
+# becomes live only at cfg_reload_commit, once the load has replaced every one of
+# those pointers. So:
+#   - the previous tree survives the load, which is what the credential compare reads;
+#   - a refused reload commits nothing, so the running config's tree is never touched;
+#   - a load that replaces nothing, the file being ABSENT, must not commit either, which
+#     is why the commit sits on the reload path after the parse and not in reload_config;
+#   - a pointer added to that list later is safe without anyone remembering to copy it.
+#
+# The boot parse stays in the default arena: ServiceDefinitions keep its strings for
+# life. The cost is bounded by two trees, about 2 MiB at the 256 KiB config limit,
+# and an arena rewinds to its first chunk and reuses the chain, so it stops growing.
+var CFG_GEN_CHUNK = 65536;
+var _cfg_gen[2];         # one allocator per generation; 0 until the first reload
+var _cfg_gen_live = 0;
+var _cfg_gen_commits = 0;
+
+fn cfg_reload_parse(buf, n) {
+    var next = 1 - _cfg_gen_live;
+    var a = load64(&_cfg_gen + next * 8);
+    if (a == 0) {
+        a = arena_allocator_growable(CFG_GEN_CHUNK);
+        # No arena is no reason to refuse a reload. The tree lands where it always did.
+        if (a == 0) { return json_v_parse_buf(buf, n); }
+        store64(&_cfg_gen + next * 8, a);
+    }
+    reset_via(a);
+    return bayan_json_v_parse_buf_a(a, buf, n);
+}
+
+fn cfg_reload_commit() {
+    _cfg_gen_live = 1 - _cfg_gen_live;
+    _cfg_gen_commits = _cfg_gen_commits + 1;
+    return 0;
+}
+
+# The commit is in main.cyr, where the suite cannot reach it, and losing it breaks
+# nothing visibly: the next reload resets the tree in use. So the reactor pass compares
+# this with the reloads that succeeded.
+fn cfg_reload_commits() { return _cfg_gen_commits; }

@@ -158,9 +158,9 @@ var g_notify_badpid = 0;        # MAINPID malformed, or outside the sender's cgr
 # rather than read until PID 1 runs out of memory (cyrius issue
 # 2026-09-23-kybernet-file-read-whole-no-ceiling-unchecked-growth-alloc.md has the
 # measurement, resolved in 6.6.7). 256 KiB is about 700 services at the
-# harness's density. It also bounds the parse, which costs about 4 bytes of arena per
-# config byte on every load, SIGHUP included (35,904 bytes for an 8,983-byte config,
-# measured).
+# harness's density. It also bounds the parse, which costs 2 to 4 bytes per config
+# byte (35,904 bytes for 8,983 and 53,104 for 23,076, measured). A reload pays that
+# into a generation it reuses, not into this arena: see cfg_reload_parse.
 #
 # Standing rule 8 note: this caches an arena pointer in a global, which is unsafe
 # across `alloc_reset()`. PID 1 never resets, and neither the test nor the bench
@@ -218,7 +218,13 @@ fn _load_config_inner(want_services) {
     # `json_parse` only yields top-level scalars, which is why services
     # could never be read — the array was structurally out of reach. bayan
     # has had `json_v_parse` + arr/obj accessors the whole time.
-    var root = json_v_parse_buf(buf, n);
+    # A reload parses into a generation it can release, see cfg_reload_parse.
+    var root = 0;
+    if (want_services == 0) {
+        root = cfg_reload_parse(buf, n);
+    } else {
+        root = json_v_parse_buf(buf, n);
+    }
     if (root == 0) {
         klog("config: parse FAILED - the file is present and not valid JSON");
         kmsg("kybernet: config parse failed");
@@ -389,6 +395,9 @@ fn _load_config_inner(want_services) {
     if (want_services == 0) {
         var raw = bayan_json_v_obj_get_by_cstr(root, "services");
         if (raw != 0 && json_v_is_arr(raw) == 1) { _cfg_saw_services = json_v_arr_len(raw); }
+        # Everything above that keeps a pointer into a parse tree has been
+        # replaced from this one, so its generation is now the live one.
+        cfg_reload_commit();
         return cfg;
     }
 
@@ -497,6 +506,10 @@ fn reload_config() {
     }
 
     klog("config reloaded (timeouts + logging; structural changes need a reboot)");
+    # What the reactor pass bounds across repeated reloads, because this arena is
+    # never reset, and what proves each reload moved to its new generation.
+    klog2("config reload: arena bytes in use: ", _u64_str(alloc_used()));
+    klog2("config reload: generations committed: ", _u64_str(cfg_reload_commits()));
     return 1;
 }
 

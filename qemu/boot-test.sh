@@ -24,7 +24,7 @@
 #   "started: kyb-live"              — a LIVE service, so a cgroup is really
 #                                      created and the pid moved into it
 #                                      (a completed oneshot correctly gets none)
-#   "removed service cgroups: 25"    — the shutdown sweep killed and rmdir'd them
+#   "removed service cgroups: 26"    — the shutdown sweep killed and rmdir'd them
 #
 #     ⚠ NINE of NINE. This said EIGHT from 1.5.3 to 1.6.1, with a comment
 #     arguing the shortfall was correct: kyb-orphan backgrounds a child, this
@@ -382,12 +382,12 @@ for marker in \
     "kybernet: services started" \
     "kybernet: harness done" \
     "kybernet: shutdown" \
-    "kybernet: config: services parsed: 26" \
+    "kybernet: config: services parsed: 27" \
     "kybernet:   completed (oneshot): kyb-dep" \
     "kybernet:   completed (oneshot): kyb-svc" \
     "kybernet: boot: skipped (not applicable): Start udev device manager" \
     "kybernet:   started: kyb-live" \
-    "kybernet: removed service cgroups: 25"; do
+    "kybernet: removed service cgroups: 26"; do
     if echo "$RUNTIME_OUT" | grep -aqF "$marker"; then
         echo "  OK: $marker"
     else
@@ -1148,6 +1148,52 @@ if echo "$LOOP_OUT" | grep -aqF "health check failed: kyb-hc-conf"; then
     fail=1
 else
     echo "  OK: the confined command check passed"
+fi
+
+# ⚠ THE RELOAD PATH. Until 1.9.0 no gate had ever run reload_config, on either arch.
+# kyb-hup sends SIGHUP twelve times, swapping between two configs that differ only in
+# their credential. The tree of each reload now lives in a generation that gets reset,
+# so a pointer left behind is a use-after-free in PID 1, and the credential is the
+# pointer reload_config reads after the load. The floors sit well under 12 because
+# signals sent before the reactor starts coalesce, which depends on the machine (rule 36).
+# The arena figure is the leak itself: a reload used to add 54,580 bytes on this config.
+_RELOADS=$(echo "$LOOP_OUT" | grep -acF "config reload successful" || true)
+if [ "$_RELOADS" -ge 5 ]; then
+    echo "  OK: PID 1 reloaded its config ${_RELOADS} times"
+else
+    echo "  FAIL: expected at least 5 reloads, saw ${_RELOADS}"
+    echo "$LOOP_OUT" | grep -aE 'SIGHUP|reload' | head -6 || true
+    fail=1
+fi
+_COMMITS=$(echo "$LOOP_OUT" | sed -n 's/.*config reload: generations committed: \([0-9][0-9]*\).*/\1/p' | tail -1)
+if [ "${_COMMITS:-0}" = "$_RELOADS" ]; then
+    echo "  OK: every reload moved to its new generation (${_COMMITS})"
+else
+    echo "  FAIL: ${_RELOADS} reloads but ${_COMMITS:-0} generation commits; the next one resets a tree in use"
+    fail=1
+fi
+_ROTATED=$(echo "$LOOP_OUT" | grep -acF "config reload: emergency credential CHANGED" || true)
+if [ "$_ROTATED" -ge 4 ]; then
+    echo "  OK: reloads saw the credential change ${_ROTATED} times, the old one read from the previous tree"
+else
+    echo "  FAIL: the credential changed on ${_ROTATED} reloads; a tree reset too early reads the new record as the old one"
+    fail=1
+fi
+_ARENA=$(echo "$LOOP_OUT" | sed -n 's/.*config reload: arena bytes in use: \([0-9][0-9]*\).*/\1/p')
+_A2=$(echo "$_ARENA" | sed -n 2p)
+_AN=$(echo "$_ARENA" | tail -1)
+_AC=$(echo "$_ARENA" | grep -c . || true)
+if [ -n "$_A2" ] && [ "$_AC" -ge 3 ]; then
+    _PER=$(( (_AN - _A2) / (_AC - 2) ))
+    if [ "$_PER" -le 8192 ]; then
+        echo "  OK: a reload adds ${_PER} bytes to PID 1's arena (ceiling 8192)"
+    else
+        echo "  FAIL: a reload adds ${_PER} bytes to PID 1's arena, the parse is leaking again"
+        fail=1
+    fi
+else
+    echo "  FAIL: no arena figures from the reloads (${_AC} lines)"
+    fail=1
 fi
 
 if echo "$LOOP_OUT" | grep -aqF "health check failed: kyb-health"; then

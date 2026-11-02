@@ -18,6 +18,8 @@
 #   false            exit 1
 #   sleep <seconds>  stay alive for that long
 #   orphan           fork a child that outlives this process, then exit 0
+#   hup <n> <a> <b>  send PID 1 SIGHUP n times, 300 ms apart, putting config a, then
+#                    b, then a, in place first (1.9.0)
 #   status           report this process's own confinement, see below
 #   relay <file>     copy a status report from a file to the console
 #   stat <path>...   report each path as `STAT-<path>=<kind> <mode> <uid>:<gid>`, kind
@@ -329,6 +331,30 @@ fn do_sleep(secs) {
     return 0;
 }
 
+# The only thing that runs reload_config in a gate. Paced, because signalfd coalesces:
+# two SIGHUPs that land before the reactor drains read as one reload. SIGHUP is 1 on
+# both arches. A step that fails exits non-zero (standing rule 48).
+#
+# The two configs differ only in their credential. reload_config reads the old one out
+# of the previous parse tree after loading the new one, so a reload is only a test of
+# that tree's lifetime if the credential moved. Otherwise the old bytes and whatever
+# replaced them are the same, and a tree reset too early looks fine.
+fn do_hup(n, a, b) {
+    if (a == 0 || b == 0) { return 3; }
+    var i = 0;
+    while (i < n) {
+        sleep_ms(300);
+        var src = a;
+        if (i % 2 == 1) { src = b; }
+        # A link and a rename, so a reload can never read half a file.
+        if (sys_link(src, "/etc/kybernet/reload.tmp") != 0) { return 3; }
+        if (sys_rename("/etc/kybernet/reload.tmp", "/etc/kybernet/config.json") != 0) { return 3; }
+        if (sys_kill(1, 1) != 0) { return 3; }
+        i = i + 1;
+    }
+    return 0;
+}
+
 # Where descriptor `n` points, from the /proc/self/fd/<n> symlink. CLOSED when
 # there is no such descriptor.
 fn report_fd(n, key) {
@@ -492,6 +518,11 @@ fn main() {
         return do_sleep(secs);
     }
     if (streq(mode, "orphan") == 1) { return do_orphan(); }
+    if (streq(mode, "hup") == 1) {
+        var hups = parse_uint(argv_at(2));
+        if (hups < 0) { return 3; }
+        return do_hup(hups, argv_at(3), argv_at(4));
+    }
     if (streq(mode, "status") == 1) { return do_status(); }
     if (streq(mode, "stat") == 1) {
         load_cgroup();

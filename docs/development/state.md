@@ -6,6 +6,13 @@
 
 ## Version
 
+**1.9.0**: what PID 1 pays. A SIGHUP parses into one of two generations instead of the arena PID 1
+never resets, so a reload adds 1,476 bytes, not 54,580, and `kyb-hup`, the first gate ever to run
+`reload_config`, rotates the credential across twelve of them on both arches. The Argon2id arm
+delegates to argonaut, whose mapping is gone before the verdict, and `test_emerg_classifiers_agree`
+holds the two classifiers together. `strlen(52 chars)` is gated again. The Unicode and entropy items
+moved to Gated and were filed in sigil and libro. Suite 932 / 927. Harness 130, aarch64 boot gate 184.
+
 **1.8.3**: the gates measure the code. Three benchmarks that looked alike had three causes, each
 now fixed in the bench: `_calibration` followed its own code address, so it sits above
 kybernet's modules, where kybernet's changes cannot move it; `agent_config` followed its literal's
@@ -302,7 +309,8 @@ an empty dep cache and produced byte-identical binaries on both arches, agnos-in
 byte-identical lock.
 
 ⚠ Binary layout is a benchmark input. `strlen(52 chars)` moved +42% at the 1.8.0 bump and −37% at
-1.8.1, and it is one of the two benchmarks declared layout-sensitive (reported, not gated).
+1.8.1 by its literal's alignment; since 1.9.0 it reads an aligned copy and is gated. `is_mounted` is
+the one benchmark still declared layout-sensitive (reported, not gated).
 
 ## Gate counts
 
@@ -311,21 +319,21 @@ the build; that is standing rule 32.
 
 | Gate | Count | Enforcement |
 |---|---|---|
-| `cyrius test src/test.cyr` | **910** assertions | floor read from CLAUDE.md; a shrinking suite fails |
-| `bash scripts/aarch64-exec-gate.sh` | **905** assertions + 5 syscall probes | executes aarch64 under `qemu-user`; its own declared floor |
-| `bash qemu/boot-test-aarch64.sh` | **180** properties, all 5 passes, 25 services | boots `kybernet-aarch64` as PID 1 (TCG), entropy-starved; needs host `veritysetup` |
-| `bash qemu/boot-test.sh` | **126** properties, 5 passes | `HARNESS_STRICT=1` in CI makes a skip a failure |
+| `cyrius test src/test.cyr` | **932** assertions | floor read from CLAUDE.md; a shrinking suite fails |
+| `bash scripts/aarch64-exec-gate.sh` | **927** assertions + 5 syscall probes | executes aarch64 under `qemu-user`; its own declared floor |
+| `bash qemu/boot-test-aarch64.sh` | **184** properties, all 5 passes, 26 services | boots `kybernet-aarch64` as PID 1 (TCG), entropy-starved; needs host `veritysetup` |
+| `bash qemu/boot-test.sh` | **130** properties, 5 passes | `HARNESS_STRICT=1` in CI makes a skip a failure |
 | `bash scripts/verify-lock.sh` | 2 halves, 5 commit pins | the committed lock (HEAD's, not the working tree's) vs a fresh resolve |
-| `bash scripts/bench-history.sh` | **56** benchmarks (2 reported-not-gated) | ≥15% flag against history, decided by a same-machine A/B against the previous tag; `LAYOUT_SENSITIVE` names the two exempt ones |
+| `bash scripts/bench-history.sh` | **56** benchmarks (1 reported-not-gated) | ≥15% flag against history, decided by a same-machine A/B against the previous tag; `LAYOUT_SENSITIVE` names the two exempt ones |
 | `cyrius lint` | 0 warnings, **0 untracked deferrals** | HARD GATE, both halves |
 | `cyrius fmt --check` | clean | non-mutating; never `diff <(cyrius fmt …)` |
 
-⚠ **910 and 905 are both correct, and neither floor gates the other.** Six assertions are
+⚠ **932 and 927 are both correct, and neither floor gates the other.** Six assertions are
 x86-only (`BS_OPEN`/`BS_STAT`/`BS_LSTAT`/`BS_PIPE`/`BS_POLL`/`BS_NANOSLEEP`) and one is
 aarch64-only (`BS_PPOLL`). Both floors are declared in CLAUDE.md and must be bumped
 together. **Do not pad the short arch to equalise them.**
 
-21 modules in `src/lib/`. 26 services in the x86 harness and 25 in the aarch64 gate. 8 `.cyr` files under `qemu/`.
+21 modules in `src/lib/`. 27 services in the x86 harness and 26 in the aarch64 gate. 8 `.cyr` files under `qemu/`.
 
 ## Verification posture
 
@@ -356,17 +364,17 @@ stricter bar on the next sweep.**
 
 ## In flight
 
-1.8.3 is cut in the working tree, not yet committed or tagged. 1.8.2 is tagged and on the
-remote.
+1.9.0 is cut in the working tree, not yet committed or tagged. 1.8.3 is tagged and on the
+remote. Two issue files sit uncommitted in sibling repos: sigil's Unicode-tables issue and libro's
+`uuid_v4` issue.
 
 ## Next
 
-**1.9.0, what PID 1 pays**, then the rest of the release plan in
-[roadmap.md](roadmap.md), where every one of the 17 open items has a target release.
+**1.10.0, the service config surface**, then the rest of the release plan in
+[roadmap.md](roadmap.md), where each of the 15 open items has a target release or a named gate.
 
 | Release | Theme |
 |---|---|
-| 1.9.0 | What PID 1 pays: memory, size, boot wait |
 | 1.10.0 | Service config surface |
 | 1.11.0 | Edge boot under emulation |
 | 1.12.0 | Non-root default services |

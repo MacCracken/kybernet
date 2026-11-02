@@ -94,7 +94,9 @@ var EMERG_CRED_INVALID = 3;   # present but unparseable — always denies
 # band. Worse still: `m = 2^54 + 1024` wraps `argon2_mem_bytes` to 1 MiB, so
 # `alloc()` succeeds and the fill runs far outside it — a wild write from one
 # config integer. `_emerg_parse_bounded` refuses during digit accumulation, so
-# no such value is ever constructed.
+# no such value is ever constructed. Since 1.9.0 the verification's memory is
+# argonaut's private mapping rather than `alloc()`; the band and the wrap are the
+# same, because both size with `argon2_mem_bytes` and neither mapping refuses it.
 #
 # The timings, measured on this dev host (x86_64, sigil 3.12.x). ARM figures
 # are EXTRAPOLATED — there is no ARM measurement in this repo, and a board
@@ -324,69 +326,23 @@ fn emerg_cred_parse(h, out) {
 # Verification
 # ================================================================
 
-# Verify `password` (raw bytes + length) against a v1 record. 1 on match.
-#
-# Every failure returns 0 and none of them says why — this is the
-# authentication path, and the record's shape is already public but the
-# verdict is not.
-fn _emerg_verify_argon2id(h, pw_data, pw_len) {
-    var prm = alloc(40);
-    if (prm == 0) { return 0; }
-    if (emerg_cred_parse(h, prm) == 0) { return 0; }
-    var t = load64(prm);
-    var m = load64(prm + 8);
-    var p = load64(prm + 16);
-    var slen = load64(prm + 24);
-    var glen = load64(prm + 32);
-
-    var sf = _emerg_field(h, 4);
-    var gf = _emerg_field(h, 5);
-    if (sf == 0 || gf == 0) { return 0; }
-
-    var salt = alloc(slen);
-    var want = alloc(glen);
-    var got  = alloc(glen);
-    if (salt == 0 || want == 0 || got == 0) { return 0; }
-    if (hex_decode_into(str_data(sf), str_len(sf), salt) == 0) { return 0; }
-    if (hex_decode_into(str_data(gf), str_len(gf), want) == 0) { return 0; }
-
-    # ⚠ `argon2id_into`, never `argon2id`. The convenience wrapper allocates
-    # through `fl_alloc`, whose large path (freelist.cyr:401-407) does
-    # `store64(blk, 0)` on the raw `_fl_mmap` return — and `_fl_mmap` returns
-    # a small negative errno on failure, not 0. So on exhaustion it writes
-    # through address -12 and faults BEFORE `argon2id`'s own `if (mem == 0)`
-    # guard can fire. In PID 1 that is a kernel panic. `alloc()` checks its
-    # mmap and returns 0 (alloc.cyr:236), which is why the arena comes from
-    # here.
-    var need = argon2_mem_bytes(m, p);
-    if (need <= 0) { return 0; }
-    var mem = alloc(need);
-    if (mem == 0) { return 0; }
-
-    var rc = argon2id_into(mem, pw_data, pw_len, salt, slen, t, m, p, got, glen);
-    if (rc != 0) { return 0; }
-
-    # Constant-time on the digest compare and only there. The record's
-    # version, parameters and field lengths are public; branching on those
-    # leaks nothing. `ct_eq_bytes` is the stdlib primitive (ct.cyr:45) —
-    # note argonaut's `verify_emergency_auth` reaches for
-    # `constant_time_eq_str`, which is LIBRO's, an undeclared cross-repo
-    # dependency this path deliberately does not inherit.
-    return ct_eq_bytes(got, want, glen);
-}
-
-# The verification kybernet's drop_to_emergency calls, replacing argonaut's
-# `verify_emergency_auth` at the one production call site.
+# The verification kybernet's drop_to_emergency calls, in front of argonaut's
+# `verify_emergency_auth`.
 #
 # The contract is argonaut's, unchanged — same struct, same offsets, same
 # 1 = granted / 0 = denied, same fail-closed behaviour when `require_auth` is
 # set with no credential (argonaut 1.8.6 MEDIUM-3).
 #
-# ⚠ The LEGACY arm delegates to argonaut's function verbatim rather than
-# reimplementing SHA-256 here. That is the strongest migration guarantee
-# available: the deprecated path is not "compatible with" the 1.5.8 code, it
-# IS the 1.5.8 code, and the qemu gate that has asserted it since 1.5.8 keeps
-# asserting the same instructions.
+# ⚠ BOTH ARMS DELEGATE. The legacy arm always has: the deprecated path is not
+# "compatible with" the 1.5.8 code, it IS the 1.5.8 code. The Argon2id arm has since
+# 1.9.0. kybernet's own copy took its working memory from alloc(), which PID 1 never
+# gets back, so each verification left up to 64 MiB of touched pages resident for
+# the life of the system. argonaut's uses a private mapping and unmaps it before the
+# verdict. What stays here is everything that decides a record is usable, at load,
+# with a reason (standing rules 19 and 25). ⚠ That makes the two classifiers one
+# contract: a record this file blesses and argonaut refuses is a correct password
+# denied, and a failed authentication halts PID 1. test_emerg_classifiers_agree
+# compares them across thousands of records.
 # A lowercase copy of a hex Str.
 #
 # ⚠ THIS EXISTS BECAUSE HEX IS CASE-INSENSITIVE AND argonaut's COMPARE IS NOT.
@@ -437,8 +393,7 @@ fn kyb_verify_emergency_auth(esc, password_input) {
 
     var kind = emerg_cred_kind(stored);
     if (kind == EMERG_CRED_ARGON2ID) {
-        return _emerg_verify_argon2id(stored, str_data(password_input),
-          str_len(password_input));
+        return verify_emergency_auth(esc, password_input);
     }
     if (kind == EMERG_CRED_LEGACY) {
         var canon = _emerg_hex_lower(stored);

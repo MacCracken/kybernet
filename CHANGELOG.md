@@ -7,6 +7,111 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.9.0] — 2026-11-01
+
+**What PID 1 pays.** A SIGHUP stops leaking its parse tree, an emergency login stops leaving
+its KDF memory resident, and `strlen` loses its benchmark exemption. Two of the roadmap's five
+items turned out to belong to deps and moved to Gated. Suite 932 / 927. Harness 130, aarch64 boot
+gate 184.
+
+### Fixed — a reload no longer costs its config
+
+Every SIGHUP parsed the config into the arena PID 1 never resets, for the life of the system:
+54,580 bytes per reload on the x86 harness's 23,076-byte config. It now adds 1,476 bytes, measured
+across twelve reloads, and 1,474 on aarch64. What remains is allocated around the parse, not by it:
+574 bytes with no credential configured (roadmap, 1.10.0).
+
+The roadmap's plan was to parse into a region and reset it once the scalars and credential were
+copied out. That plan had a hole: the tree does not end with the load. `g_emerg_hash` can point
+straight into it, and so can the edge device globals, the baselines and `pcr_bindings`, and
+`reload_config` compares the old credential with the new one after loading. A reset there is a
+use-after-free in PID 1, and copying means listing every such pointer now and remembering every
+new one.
+
+So there are two generations (`cfg_reload_parse`, `svc_config.cyr`). A reload resets the one that
+is not live and parses into it, and it goes live at `cfg_reload_commit`, once the load has replaced
+every pointer. The previous tree survives for the compare, a refused reload touches nothing, and
+nothing is copied. Memory is bounded by two trees, about 2 MiB at the 256 KiB config limit. Every
+path through the load that replaces a pointer reaches the commit, and an absent file, which replaces
+none, does not.
+
+⚠ **The new constraint is in standing rule 30.** A global pointing into a tree must be replaced on
+every load, even when the key is absent. One set only when the key is present dangles two reloads
+later. Every current one is replaced; 1.10.0's new keys have to be.
+
+### Fixed — an emergency login no longer keeps its memory
+
+`kyb_verify_emergency_auth`'s Argon2id arm took its working memory from `alloc()`, so a
+verification left up to 64 MiB of touched pages resident for the life of the system. argonaut 1.16.2
+already verifies the same record on a private mapping it unmaps before the verdict. kybernet now
+delegates, and `_emerg_verify_argon2id` is gone. A verification moves PID 1's arena by nothing, and
+the suite asserts that, with the mapping gone and at least 19 MiB of peak.
+
+⚠ **That makes two classifiers one contract.** kybernet decides a record is usable at load and
+argonaut decides again at the prompt, so a record only kybernet accepts is a correct password denied,
+and a failed authentication halts. They were written apart and look alike, which proves nothing, so
+`test_emerg_classifiers_agree` compares them on 8,064 records at and around every bound, plus legacy
+digests and malformed shapes. No disagreement was found. Moving any one of ten bounds on kybernet's
+side turns it red.
+
+### Changed — `strlen(52 chars)` is gated again
+
+Sweeping a literal through 16 byte offsets, run interleaved on one core, the old bench read 24-39 ns
+with a period of 8 bytes, 62% apart, and one fed `_bench_aligned` reads 24-26. So it left
+`LAYOUT_SENSITIVE`, and `is_mounted` is the only exempt benchmark.
+
+⚠ A first sweep read 60 ns at three offsets, which looked like a second cause. It was contention on
+that core: the same layouts read 27-28 when re-measured one process at a time, and the buffer's
+cache-line offset, which changes per process, makes no difference. A min of 36 samples did not rule
+that out, because one contended run covers them all. Repeat a surprising row before explaining it.
+
+The gate held up at the cut: the box ran at twice its recorded pace, history flagged 15 benchmarks,
+`strlen` among them, and the same-machine A/B against 1.8.3 cleared all 15.
+
+### Added — the first gate that runs a reload
+
+⚠ **Nothing had ever executed `reload_config`, on either arch, in any release.** `grep -rn SIGHUP
+qemu/` found one comment. A change that makes a reset in this path a use-after-free could not ship on
+that, so `kyb-hup` is a new service in the reactor pass of both harnesses: it sends PID 1 twelve
+SIGHUPs, 300 ms apart.
+
+⚠ **Its first version was not enough.** The config had no credential, so the one read the two
+generations exist to protect had never run, and with identical configs a stale pointer reads the
+same bytes as a fresh one. `kyb-hup` now swaps between two configs that differ only in the
+credential's tag. The gate asserts at least 5 reloads, one commit per reload, the credential seen to
+change, and no more than 8 KiB of arena per reload. Each was shown to fail:
+
+| Defect injected | What went red |
+|---|---|
+| The reload parses into PID 1's arena again | the arena ceiling: 54,580 bytes per reload |
+| `cfg_reload_commit` removed from the load | 0 commits for 12 reloads, and the credential seen to change once, because the next parse overwrote the "old" record with the new one |
+
+The suite's half, `test_config_reload_generations`, goes red on a commit that does not flip, on no
+reset, and on a parse into the default arena. A PID 1 built with `CYRIUS_POISON`, which checks a reset
+arena's blocks for overruns and fills them, ran all 130 properties green. With the commit removed as
+well, the credential read as changed on all 12 reloads instead of 1, which shows the fill was real.
+
+The floors sit well under twelve because SIGHUPs sent before the reactor starts coalesce, and when
+that happens depends on the machine (standing rule 36). Both arches run all twelve here.
+
+### Dependencies
+
+Nothing moved. Two items are now gated on a dep and were filed there, uncommitted:
+
+- **bayan's Unicode tables**, in sigil's `docs/development/issues/`. sigil's fix is necessary and not
+  sufficient: `lib/bayan.cyr` also arrives through `dist/agnostik.cyr` and kybernet's own JSON use.
+- **The entropy wait**, in libro's `docs/development/issues/`. `uuid_v4`'s comment says a predictable
+  id makes the chain forgeable, and whether that is so is libro's call, not kybernet's.
+
+### Binary
+
+| | 1.8.3 | 1.9.0 | |
+|---|---:|---:|---:|
+| `kybernet` x86_64 | 1,114,096 | 1,114,200 | +104 |
+| `kybernet-aarch64` | 2,662,000 | 2,662,120 | +120 |
+
+---
+
 ## [1.8.3] — 2026-11-01
 
 **The gates measure the code.** The roadmap's four 1.8.3 items. Three benchmarks that looked

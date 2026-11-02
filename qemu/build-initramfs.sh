@@ -600,6 +600,14 @@ cat > "${INITRAMFS_DIR}/etc/kybernet/config.json" << 'CFGEOF'
       }
     },
     {
+      "name": "kyb-hup",
+      "description": "rotates the credential across twelve SIGHUPs; nothing else runs the reload path (1.9.0)",
+      "binary": "/usr/bin/kyb-svc-fixture",
+      "args": ["hup", "12", "/etc/kybernet/reload-a.json", "/etc/kybernet/reload-b.json"],
+      "type": "simple",
+      "restart": "never"
+    },
+    {
       "name": "kyb-ready-ok",
       "description": "a ready_check that passes, the control for kyb-ready-fail (1.7.5)",
       "binary": "/bin/sleep",
@@ -644,6 +652,15 @@ CFGEOF
 # kybernet ignores top-level keys it does not know; "comment" is one.
 _PAD="$(printf 'kybernet ignores this key; it makes this file larger than 16 KiB. %.0s' $(seq 1 200))"
 sed -i "1a\\  \"comment\": \"${_PAD}\"," "${INITRAMFS_DIR}/etc/kybernet/config.json"
+# The two configs kyb-hup rotates between (1.9.0): this one plus a credential, identical
+# but for the tag, so both parse to the same shape. No KDF runs at load, and nothing
+# here requires the credential.
+_HUP_REC='v1$1$8192$1$00112233445566778899aabbccddeeff$'
+for _v in a b; do
+    _TAG="$(printf "${_v}%.0s" $(seq 1 64))"
+    sed "1a\\  \"emergency_password_hash\": \"${_HUP_REC}${_TAG}\"," \
+        "${INITRAMFS_DIR}/etc/kybernet/config.json" > "${INITRAMFS_DIR}/etc/kybernet/reload-${_v}.json"
+done
 # Counted, not hardcoded — it said "2 services" from 1.5.0 until 1.6.1
 # while staging nine, which is the kind of stale number that makes a log
 # line worse than no log line.

@@ -313,6 +313,8 @@ cat > "$ROOT/etc/kybernet/config.json" << 'CFGEOF'
       "security": { "seccomp": "basic", "no_new_privs": true, "capabilities": [] },
       "health_check": { "type": "command", "target": "/usr/bin/kyb-svc-fixture status",
                         "interval_ms": 1000, "timeout_ms": 800, "retries": 10 } },
+    { "name": "kyb-hup", "binary": "/usr/bin/kyb-svc-fixture", "args": ["hup", "12", "/etc/kybernet/reload-a.json", "/etc/kybernet/reload-b.json"],
+      "type": "simple", "restart": "never" },
     { "name": "kyb-nonroot", "binary": "/usr/bin/kyb-svc-fixture", "args": ["status"],
       "type": "oneshot", "restart": "never",
       "security": { "uid": 65534, "gid": 65534, "no_new_privs": true } },
@@ -368,6 +370,15 @@ CFGEOF
 # reports. kybernet ignores top-level keys it does not know; "comment" is one.
 _PAD="$(printf 'kybernet ignores this key; it makes this file larger than 16 KiB. %.0s' $(seq 1 200))"
 sed -i "1a\\  \"comment\": \"${_PAD}\"," "$ROOT/etc/kybernet/config.json"
+# The two configs kyb-hup rotates between (1.9.0): this one plus a credential, identical
+# but for the tag, so both parse to the same shape. No KDF runs at load, and nothing
+# here requires the credential.
+_HUP_REC='v1$1$8192$1$00112233445566778899aabbccddeeff$'
+for _v in a b; do
+    _TAG="$(printf "${_v}%.0s" $(seq 1 64))"
+    sed "1a\\  \"emergency_password_hash\": \"${_HUP_REC}${_TAG}\"," \
+        "$ROOT/etc/kybernet/config.json" > "$ROOT/etc/kybernet/reload-${_v}.json"
+done
 # kyb-env's env_files entry (1.7.5), the same file the x86 image stages.
 cat > "$ROOT/etc/kybernet/kyb-env.env" << 'ENVEOF'
 # kyb-env's environment file
@@ -807,8 +818,8 @@ fi
 # Each assertion mirrors the x86 harness's assertion of the same name. The reasoning
 # behind each one lives there; what is new here is that it RUNS on aarch64, where
 # the syscall numbers, the seccomp allowlist and the struct layouts differ.
-_prop "config: services parsed: 25" \
-    'kybernet: config: services parsed: 25([^0-9]|$)' "$OUT1"
+_prop "config: services parsed: 26" \
+    'kybernet: config: services parsed: 26([^0-9]|$)' "$OUT1"
 # 1.7.8: the config above is padded past the old 16 KiB limit. Check the size kybernet
 # itself reports, so a fixture that shrank back under 16 KiB fails here rather than
 # proving nothing.
@@ -824,8 +835,8 @@ _prop "completed (oneshot): kyb-dep" 'completed \(oneshot\): kyb-dep' "$OUT1"
 _prop "completed (oneshot): kyb-svc, after its dependency" 'completed \(oneshot\): kyb-svc' "$OUT1"
 _prop "started: kyb-live" 'started: kyb-live' "$OUT1"
 # 23, not 24: kyb-prereq-dep is skipped, so no cgroup is ever made for it.
-_prop "removed service cgroups: 24 (every started service, torn down)" \
-    'kybernet: removed service cgroups: 24([^0-9]|$)' "$OUT1" 'removed service cgroups'
+_prop "removed service cgroups: 25 (every started service, torn down)" \
+    'kybernet: removed service cgroups: 25([^0-9]|$)' "$OUT1" 'removed service cgroups'
 
 # ⚠ THE LABEL IS THE PLACEMENT CHECK. svc-fixture labels its report with the leaf
 # of its OWN cgroup path, so a service whose child-side join failed (standing rule
@@ -988,6 +999,47 @@ _assert_no_panic "$OUT2" "reactor"
 _prop "crash restart scheduled (not run inline)" 'restart scheduled: kyb-crash' "$OUT2" 'kyb-crash'
 _prop "the restart tick performed the relaunch" 'restarted: kyb-crash' "$OUT2" 'kyb-crash'
 _prop "PID 1 reaped a child it did not start (orphan)" 'reaped orphans: [1-9]' "$OUT2" 'orphan|reaped'
+# The reload path, which no gate ran until 1.9.0: kyb-hup sends SIGHUP twelve times,
+# swapping between two configs that differ only in their credential, and a reload's tree
+# now lives in a generation that gets reset. Same assertions as x86.
+_RELOADS="$(grep -acF 'config reload successful' "$OUT2" || true)"
+if [ "${_RELOADS:-0}" -ge 5 ]; then
+    echo "  OK: PID 1 reloaded its config ${_RELOADS} times"
+else
+    echo "  FAIL: expected at least 5 reloads, saw ${_RELOADS:-0}"
+    grep -aE 'SIGHUP|reload' "$OUT2" | head -6 | sed 's/^/        /' || true
+    fail=1
+fi
+_COMMITS="$(sed -n 's/.*config reload: generations committed: \([0-9][0-9]*\).*/\1/p' "$OUT2" | tail -1)"
+if [ "${_COMMITS:-0}" = "$_RELOADS" ]; then
+    echo "  OK: every reload moved to its new generation (${_COMMITS})"
+else
+    echo "  FAIL: ${_RELOADS} reloads but ${_COMMITS:-0} generation commits; the next one resets a tree in use"
+    fail=1
+fi
+_ROTATED="$(grep -acF 'config reload: emergency credential CHANGED' "$OUT2" || true)"
+if [ "${_ROTATED:-0}" -ge 4 ]; then
+    echo "  OK: reloads saw the credential change ${_ROTATED} times, the old one read from the previous tree"
+else
+    echo "  FAIL: the credential changed on ${_ROTATED:-0} reloads; a tree reset too early reads the new record as the old one"
+    fail=1
+fi
+_ARENA="$(sed -n 's/.*config reload: arena bytes in use: \([0-9][0-9]*\).*/\1/p' "$OUT2")"
+_A2="$(echo "$_ARENA" | sed -n 2p)"
+_AN="$(echo "$_ARENA" | tail -1)"
+_AC="$(echo "$_ARENA" | grep -c . || true)"
+if [ -n "$_A2" ] && [ "${_AC:-0}" -ge 3 ]; then
+    _PER=$(( (_AN - _A2) / (_AC - 2) ))
+    if [ "$_PER" -le 8192 ]; then
+        echo "  OK: a reload adds ${_PER} bytes to PID 1's arena (ceiling 8192)"
+    else
+        echo "  FAIL: a reload adds ${_PER} bytes to PID 1's arena, the parse is leaking again"
+        fail=1
+    fi
+else
+    echo "  FAIL: no arena figures from the reloads (${_AC:-0} lines)"
+    fail=1
+fi
 # A command check runs under its service's confinement (argonaut 1.18.0), through
 # kyb_pre_exec. The service only sleeps, so these can come only from its check, and the
 # ST label is the check's own cgroup. Same assertions as the x86 reactor gate.

@@ -3,7 +3,7 @@
 Forward work only. What shipped is in [CHANGELOG.md](../../CHANGELOG.md), and what is true
 right now, gate counts included, is in [state.md](state.md).
 
-**Current release: 1.8.3** (cyrius 6.7.18, argonaut 1.18.0, libro 2.11.3, agnostik 2.0.0,
+**Current release: 1.9.0** (cyrius 6.7.18, argonaut 1.18.0, libro 2.11.3, agnostik 2.0.0,
 sigil 3.13.15).
 
 **Every open item has a target release.** The order is the dependency order: a later release
@@ -13,7 +13,7 @@ under a release or under Gated, never in a list of its own. A finished item is d
 a finished release's section goes with it. A version is for code: docs and roadmap changes
 never take one, and a comment-only item ships with a release that has code in it.
 
-**Open: 17** (`grep -c '^- \[ \]'` against this file).
+**Open: 15** (`grep -c '^- \[ \]'` against this file).
 
 ---
 
@@ -21,11 +21,10 @@ never take one, and a comment-only item ships with a release that has code in it
 
 | Release | Theme | Items | Waits on |
 |---|---|---:|---|
-| [1.9.0](#190--what-pid-1-pays) | What PID 1 pays: memory, size, boot wait | 5 | a sigil tag, a libro tag, and argonaut carrying both |
-| [1.10.0](#1100--service-config-surface) | Service config surface | 3 | 1.9.0's reload path |
+| [1.10.0](#1100--service-config-surface) | Service config surface | 4 | nothing |
 | [1.11.0](#1110--edge-boot-under-emulation) | Edge boot under emulation | 3 | `swtpm` in the harness and in CI |
 | [1.12.0](#1120--non-root-default-services) | Non-root default services | 1 | agnosticos' config, argonaut's `default_services` |
-| [Gated](#gated) | Unnumbered until the gate opens | 5 | hardware, or a consumer |
+| [Gated](#gated) | Unnumbered until the gate opens | 7 | hardware, a consumer, or a dep's release |
 
 **Every release:** the full release gates in CLAUDE.md, including the benchmark gate, then the
 sibling-free reproduction.
@@ -38,47 +37,15 @@ compiler-emitted call, and replay `ci.yml` in the runner's image (CHANGELOG [1.8
 
 ---
 
-## 1.9.0 — What PID 1 pays
-
-The memory, file size and boot time PID 1 spends and never gets back. A minor, because the
-reload path changes. The Unicode and entropy items are dep-first: the dep's fix, then **the
-user tags it**, then kybernet takes the tag.
-
-- [ ] **`strlen(52 chars)` can lose its layout exemption.** The sweep behind 1.8.3 shows the same
-      cause as `agent_config`: 36-38 or 25-26 ns by the literal's alignment, period 8 bytes.
-      `_bench_aligned` should make it gateable. Re-sweep, then drop it from `LAYOUT_SENSITIVE`.
-- [ ] **Every config load, SIGHUP included, costs about 4 bytes of arena per config
-      byte.** `json_v_parse_buf` allocates 35,904 bytes to parse an 8,983-byte config
-      (measured at 1.7.8), and PID 1's arena is never reset. The 256 KiB config limit
-      bounds one reload at about 1 MiB. Fix: parse into a region the reload can release,
-      `bayan_json_v_parse_ctx_a` into an `arena_new` arena, reset once the scalars and
-      the credential are copied out.
-- [ ] **bayan's Unicode tables cost PID 1 about 284 KB of file size it never reads.** cyrius
-      6.7.18's bayan added a markdown parser whose `# Requires` pulls seven `lib/unicode/`
-      files of top-level string `var`s, and bayan reaches kybernet through sigil-mldsa's
-      `# Requires`, for the legacy `u256_*` names only. DCE removes functions, not global
-      initializers, so kybernet went 787,336 → 1,095,824 B from the toolchain alone, the
-      data segment 209 → 493 KB. libro and argonaut measured the same. Fix it in sigil:
-      require `bayan-bigint` and call `bayan_u256_*`. Or have DCE drop unread initializers.
-- [ ] **kybernet and argonaut now carry the same Argon2id verifier.** argonaut 1.16.2's
-      `verify_emergency_auth` verifies the `v1$` record with kybernet's bounds, on a
-      private `mmap` it unmaps before the verdict, so a verification grows the arena by
-      0 bytes. kybernet's `_emerg_verify_argon2id` still uses `alloc()`, which PID 1 never
-      gets back, and both are linked. Decide whether to delegate; standing rules 24 to 26
-      are written around kybernet's copy.
-- [ ] **PID 1 waits about 0.9 s for entropy at the first service start on an RNG-less
-      board.** cyrius 6.6.7 stopped the stdlib hash seed blocking at phase 6, and the wait
-      moved to libro's `uuid_v4` (`getrandom(…, 0)`), reached from argonaut's
-      `audit_log_record` on the first `init_start_service`: 914 ms under TCG at 1.7.10,
-      about 870 ms at 1.8.0 and 1.8.1 (standing rule 51). libro also exits 74 there if
-      `getrandom` fails, which in PID 1 is a panic. Decide in libro whether an audit
-      record's id needs a seeded CRNG, or whether it can draw with `GRND_INSECURE` as the
-      hash seed does.
-
 ## 1.10.0 — Service config surface
 
-What argonaut now offers and config.json cannot reach. It follows 1.9.0 because new keys go
-through the reload path that release changes.
+What argonaut now offers and config.json cannot reach. New keys go through the reload path
+1.9.0 changed, so a key that keeps a string has to obey standing rule 30.
+
+- [ ] **A reload still adds 574 to 1,476 bytes to PID 1's arena.** The parse no longer does:
+      this is what is allocated around it, and the credential accounts for the difference.
+      Small next to the 54,580 it replaces, but it is still per SIGHUP for the life of the
+      system, and this release adds keys to that path.
 
 - [ ] **A config key for argonaut's 90 s start timeout.** argonaut 1.16.1 kills a
       oneshot or forking start after 90 s, which bounds what was an unbounded wait in
@@ -134,6 +101,29 @@ spans the distribution: argonaut's `default_services` and agnosticos' config mov
 ## Gated
 
 Each takes the next free number when its gate opens.
+
+**Gate: a sigil tag, and then a decision about the other two routes.**
+
+- [ ] **bayan's Unicode tables cost PID 1 about 284 KB of file size it never reads.** cyrius
+      6.7.18's bayan added a markdown parser whose `# Requires` pulls seven `lib/unicode/`
+      files of top-level string `var`s, and DCE removes functions, not global initializers.
+      kybernet went 787,336 → 1,095,824 B from the toolchain alone, the data segment 209 →
+      493 KB, and libro and argonaut measured the same. sigil's half is filed in its repo,
+      `docs/development/issues/2026-11-01-sigil-mldsa-pulls-bayans-unicode-tables.md`. It is
+      necessary, not sufficient: `lib/bayan.cyr` also arrives through `dist/agnostik.cyr`'s
+      `# Requires` and through kybernet's own `bayan` stdlib entry, which it needs for JSON.
+      DCE dropping unread initializers would settle all three at once.
+
+**Gate: libro's answer on what an audit id needs.**
+
+- [ ] **PID 1 waits about 0.9 s for entropy at the first service start on an RNG-less
+      board.** cyrius 6.6.7 stopped the stdlib hash seed blocking at phase 6, and the wait
+      moved to libro's `uuid_v4` (`getrandom(…, 0)`), reached from argonaut's
+      `audit_log_record` on the first `init_start_service`: 914 ms under TCG at 1.7.10,
+      about 870 ms at 1.8.0 and 1.8.1 (standing rule 51). libro also exits 74 there if
+      `getrandom` fails, which in PID 1 is a panic. Filed in its repo,
+      `docs/development/issues/2026-11-01-uuid-v4-waits-for-the-crng-in-pid-1.md`, because
+      its comment says a predictable id makes the chain forgeable, and that is its call.
 
 **Gate: real hardware on the bench.**
 
