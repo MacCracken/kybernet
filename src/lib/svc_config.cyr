@@ -848,6 +848,32 @@ fn edge_config_from_json(root, ec) {
     if (rh != 0) { have = have + 1; }
     if (have != 0 && have != 3) { return 0; }
 
+    # --- the verified root's mount, and the unlocked volume's name (1.11.0) ---
+    # A mount point without the verity triple has nothing to mount. The defaults are
+    # kept where this load keeps things: a str_from here would cost every reload 16
+    # bytes of the arena PID 1 never resets.
+    var ln = _cfg_str(eb, "luks_name", 0);
+    var rm = _cfg_str(eb, "root_mount", 0);
+    var rf = _cfg_str(eb, "root_fstype", 0);
+    if (ln != 0 && validate_mapper_name(ln) == 0) {
+        klog("config: edge.luks_name must be 1..32 of [A-Za-z0-9_-], not starting with '-' - REJECTED");
+        return 0;
+    }
+    if (rm != 0 && edge_mount_path_ok(rm) == 0) {
+        klog("config: edge.root_mount must be an absolute path without '..' - REJECTED");
+        return 0;
+    }
+    if (rm != 0 && have != 3) {
+        klog("config: edge.root_mount needs root_device, hash_device and root_hash - REJECTED");
+        return 0;
+    }
+    if (rf != 0 && edge_fstype_ok(rf) == 0) {
+        klog("config: edge.root_fstype must be 1..16 of [a-z0-9] - REJECTED");
+        return 0;
+    }
+    if (ln == 0) { ln = str_new_a(cfg_keep(), "agnos-data", 10); }
+    if (rf == 0) { rf = str_new_a(cfg_keep(), "ext4", 4); }
+
     # ⚠ NOT COMMITTED YET. 1.6.16 LOW-1.
     #
     # `edge_set_devices` used to fire here, before the `expected_pcrs` block
@@ -890,6 +916,7 @@ fn edge_config_from_json(root, ec) {
     # globals, so every `return 0` path leaves them exactly as
     # `edge_reset_devices` left them.
     edge_set_devices(rd, hd, rh, ld);
+    edge_set_mounts(ln, rm, rf);
     if (pv != 0) { edge_set_expected_pcrs(pv); }
 
     return 1;

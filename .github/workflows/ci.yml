@@ -498,7 +498,13 @@ jobs:
           # that CLAUDE.md rule 26 says are gated. The job went green having
           # tested a quarter of what it advertises.
           sudo apt-get install -y --no-install-recommends \
-            qemu-system-x86 cpio cryptsetup-bin busybox-static python3
+            qemu-system-x86 cpio cryptsetup-bin busybox-static python3 \
+            swtpm swtpm-tools tpm2-tools systemd-cryptsetup e2fsprogs kmod
+          # The second line is the TPM board (1.11.0): swtpm and swtpm_setup, the
+          # tpm2-tools the board runs, systemd-cryptenroll and its LUKS2 token plugin,
+          # mkfs.ext4 -d and debugfs for the verified root, and depmod's modules.dep for
+          # the runner kernel's dm-crypt and dm-verity. Without them build-initramfs.sh
+          # builds no board and HARNESS_STRICT fails the run, which is the point.
           # python3, NOT python3-minimal: build-initramfs.sh imports `json` and
           # `pathlib`, and neither is in the minimal subset (they live in
           # libpython3.x-stdlib). `file` and `xxd` were listed here briefly and

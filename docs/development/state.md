@@ -6,6 +6,14 @@
 
 ## Version
 
+**1.11.0**: edge boot under emulation. A TPM board boots on swtpm in the x86 harness: PCR 7
+attestation, the verified root opened by dm-verity and mounted read-only, the root hash measured into
+PCR 15 before the LUKS2 token unlock and capped after it, so the key goes to this root once per boot
+(argonaut note 005). `luks_enabled` refuses a boot now, where it logged "deferred to hardware" and
+booted on. The first attestation found that a lowercase PCR baseline had never matched (since 1.5.7).
+New keys `root_mount`, `root_fstype` and `luks_name`. aarch64 runs the code ungated: roadmap 1.11.1.
+Suite 1056 / 1051. Harness 180, aarch64 boot gate 205.
+
 **1.10.1**: the reactor spends nothing. argonaut 1.19.0 and kybernet's own restart path stop taking
 from the arena PID 1 never resets, past the first event of each kind: a healthy service probed every
 5 s had cost 830 KB a day. Both boot gates require that the last exit, failed probe and restart each
@@ -301,7 +309,10 @@ thread) and the JSON slice trap (134, fuzzed, CHANGELOG [1.8.1]). `mldsa65_sign`
 2.10.0's `/dev/urandom` open, which exited 74 without the device node, a panic in init.
 It waits for the CRNG, and since cyrius 6.6.7 it is the FIRST thing in PID 1 that does: the
 stdlib hash seed no longer blocks. The aarch64 gate boots with no entropy seed and shows the
-wait at the first service start (standing rule 51).
+wait at the first service start (standing rule 51). 1.11.0 made three functions live, all on the LUKS
+edge path: sigil's `sha256` and `sha256_hex` and argonaut's `validate_mapper_name`. None can exit.
+`sha256` takes a `cbank()` lane, so on a LUKS board the measurement at phase 6c is PID 1's first
+crypto call, ahead of any Argon2.
 
 `refusing to overwrite stdlib leaf 'patra'` is structural and expected. 1.6.20 explained
 it as a stale libro pin, which was wrong: at 6.7.18 the pin and the fold are both 1.16.6
@@ -311,8 +322,8 @@ and byte-identical, and the warning still fires.
 
 | Arch | Bytes | `e_machine` |
 |---|---|---|
-| x86_64 (`CYRIUS_DCE=1`) | 1,123,576 | `0x3e` |
-| aarch64 (`CYRIUS_DCE=1`) | 2,663,264 | `0xb7` |
+| x86_64 (`CYRIUS_DCE=1`) | 1,129,392 | `0x3e` |
+| aarch64 (`CYRIUS_DCE=1`) | 2,730,520 | `0xb7` |
 | agnos-init x86_64 (`CYRIUS_DCE=1`) | 565,608 | `0x3e` |
 | agnos-init aarch64 (`CYRIUS_DCE=1`) | 2,592,832 | `0xb7` |
 
@@ -334,16 +345,16 @@ the build; that is standing rule 32.
 
 | Gate | Count | Enforcement |
 |---|---|---|
-| `cyrius test src/test.cyr` | **1021** assertions | floor read from CLAUDE.md; a shrinking suite fails |
-| `bash scripts/aarch64-exec-gate.sh` | **1016** assertions + 5 syscall probes | executes aarch64 under `qemu-user`; its own declared floor |
+| `cyrius test src/test.cyr` | **1056** assertions | floor read from CLAUDE.md; a shrinking suite fails |
+| `bash scripts/aarch64-exec-gate.sh` | **1051** assertions + 5 syscall probes | executes aarch64 under `qemu-user`; its own declared floor |
 | `bash qemu/boot-test-aarch64.sh` | **205** properties, all 6 passes, 32 services | boots `kybernet-aarch64` as PID 1 (TCG), entropy-starved; needs host `veritysetup` |
-| `bash qemu/boot-test.sh` | **149** properties, 6 passes | `HARNESS_STRICT=1` in CI makes a skip a failure |
+| `bash qemu/boot-test.sh` | **180** properties, 7 passes, the TPM board's five boots among them | `HARNESS_STRICT=1` in CI makes a skip a failure, a missing swtpm included |
 | `bash scripts/verify-lock.sh` | 2 halves, 5 commit pins | the committed lock (HEAD's, not the working tree's) vs a fresh resolve |
 | `bash scripts/bench-history.sh` | **56** benchmarks (1 reported-not-gated) | ≥15% flag against history, decided by a same-machine A/B against the previous tag; `LAYOUT_SENSITIVE` names the two exempt ones |
 | `cyrius lint` | 0 warnings, **0 untracked deferrals** | HARD GATE, both halves |
 | `cyrius fmt --check` | clean | non-mutating; never `diff <(cyrius fmt …)` |
 
-⚠ **1021 and 1016 are both correct, and neither floor gates the other.** Six assertions are
+⚠ **1056 and 1051 are both correct, and neither floor gates the other.** Six assertions are
 x86-only (`BS_OPEN`/`BS_STAT`/`BS_LSTAT`/`BS_PIPE`/`BS_POLL`/`BS_NANOSLEEP`) and one is
 aarch64-only (`BS_PPOLL`). Both floors are declared in CLAUDE.md and must be bumped
 together. **Do not pad the short arch to equalise them.**
@@ -379,18 +390,17 @@ stricter bar on the next sweep.**
 
 ## In flight
 
-1.10.1 is cut in the working tree, not yet committed or tagged. 1.10.0 is tagged, and so is argonaut
-1.19.0. Two issue files sit uncommitted in sibling repos: sigil's Unicode-tables issue and libro's
-`uuid_v4` issue.
+1.11.0 is cut in the working tree, not yet committed or tagged. 1.10.1 is tagged. No dep moved. Two
+issue files sit uncommitted in sibling repos: sigil's Unicode-tables issue and libro's `uuid_v4` issue.
 
 ## Next
 
-**1.11.0, edge boot under emulation**, then the rest of the release plan in
-[roadmap.md](roadmap.md), where each of the 13 open items has a target release or a named gate.
+**1.11.1, the TPM board on aarch64**, then the rest of the release plan in
+[roadmap.md](roadmap.md), where each of the 11 open items has a target release or a named gate.
 
 | Release | Theme |
 |---|---|
-| 1.11.0 | Edge boot under emulation |
+| 1.11.1 | The TPM board on aarch64 |
 | 1.12.0 | Non-root default services |
 
 ## Release order (cross-repo)

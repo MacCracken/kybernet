@@ -22,6 +22,10 @@
 #                    b, then a, in place first (1.9.0)
 #   write <path> <line>  write that line to a file, for a service that starts later
 #                    (1.10.0)
+#   read <path>      report the first line of a file as `READ-<path>=<line>`, or
+#                    `READ-<path>-ERRNO=<n>` when it cannot be opened or read. The
+#                    observer for the verified root: dm-verity fails a corrupted
+#                    block with EIO, 5 (1.11.0). Exits 3 on an error.
 #   status           report this process's own confinement, see below
 #   relay <file>     copy a status report from a file to the console
 #   stat <path>...   report each path as `STAT-<path>=<kind> <mode> <uid>:<gid>`, kind
@@ -372,6 +376,36 @@ fn do_write(path, line) {
     return 0;
 }
 
+# The first line of `path`, reported on the console. Exits 3 if it cannot be read.
+fn do_read(path) {
+    if (path == 0) { return 3; }
+    if (open_sink() < 0) { return 3; }
+    line_add("READ-");
+    line_add(path);
+    var fd = sys_open(path, O_RDONLY | O_CLOEXEC, 0);
+    if (fd < 0) {
+        line_add("-ERRNO=");
+        add_dec(0 - fd);
+        line_emit();
+        return 3;
+    }
+    var n = sys_read(fd, &_VAL, 500);
+    sys_close(fd);
+    if (n < 0) {
+        line_add("-ERRNO=");
+        add_dec(0 - n);
+        line_emit();
+        return 3;
+    }
+    var k = 0;
+    while (k < n && load8(&_VAL + k) != 10) { k = k + 1; }
+    store8(&_VAL + k, 0);
+    line_add("=");
+    line_add(&_VAL);
+    line_emit();
+    return 0;
+}
+
 # Where descriptor `n` points, from the /proc/self/fd/<n> symlink. CLOSED when
 # there is no such descriptor.
 fn report_fd(n, key) {
@@ -541,6 +575,10 @@ fn main() {
         return do_hup(hups, argv_at(3), argv_at(4));
     }
     if (streq(mode, "write") == 1) { return do_write(argv_at(2), argv_at(3)); }
+    if (streq(mode, "read") == 1) {
+        load_cgroup();
+        return do_read(argv_at(2));
+    }
     if (streq(mode, "status") == 1) { return do_status(); }
     if (streq(mode, "stat") == 1) {
         load_cgroup();

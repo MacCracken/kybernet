@@ -1,5 +1,5 @@
-# qemu/preinit-fixture.cyr — give the aarch64 edge board its disks, then exec
-# kybernet as PID 1. (1.7.3)
+# qemu/preinit-fixture.cyr — prepare an edge board: its disks, and since 1.11.0 its
+# device-mapper modules, then exec kybernet as PID 1. (1.7.3)
 #
 # WHY THIS EXISTS
 # ---------------
@@ -26,6 +26,14 @@
 # (kybernet.harness=1), so the kernel passes none of them to init either way, and
 # kybernet reads them from /proc/cmdline.
 #
+# MODULES (1.11.0). dm-verity and dm-crypt are modules in every kernel a harness
+# boots, and kybernet carries no module loader: a board's kernel is built for it.
+# This program is not PID 1's code: it runs before kybernet exists. When /kyb-board/modules lists them, one path
+# per line in dependency order, it loads each with finit_module, flag
+# MODULE_INIT_COMPRESSED_FILE when the name ends in .zst or .xz, so the kernel
+# decompresses it (CONFIG_MODULE_DECOMPRESS) and no decompressor is staged. A module
+# already loaded (EEXIST) is not a failure.
+#
 # ⚠ A BOARD THAT WAS NOT PREPARED MUST NOT READ AS A VERDICT. An empty RAM disk
 # fails verification, so a copy that failed quietly would make every
 # corrupted-image assertion pass for the wrong reason. The last line printed before
@@ -35,6 +43,7 @@
 
 # GLOBAL scope: `var X[N]` is N SLOTS, i.e. N * 8 bytes (standing rule 2).
 var _BUF[8192];      # the copy buffer: 65536 bytes
+var _MODS[512];      # /kyb-board/modules: 4096 bytes
 var _LN[64];         # one report line: 512 bytes
 var _NUM[4];         # fmt_int_buf scratch: 32 bytes
 var _ARGV[2];        # execve argv: "/sbin/init", NULL
@@ -147,13 +156,74 @@ fn copy_to(src, dst, shown) {
     return total;
 }
 
+# finit_module(2). Not in the stdlib. x86_64 only: the aarch64 board loads no modules,
+# and a gated native aarch64 number is exactly what standing rule 1 warns the syscall
+# ladder can rewrite.
+#ifdef CYRIUS_ARCH_X86
+var SYS_FINIT_MODULE_NR = 313;
+#endif
+var MODULE_INIT_COMPRESSED_FILE = 4;
+var EEXIST_NR = 17;
+
+fn ends_with(s, n, tail) {
+    var k = strlen(tail);
+    if (n < k) { return 0; }
+    return memeq(s + n - k, tail, k);
+}
+
+fn load_one(path, n) {
+    var fd = sys_open(path, O_RDONLY | O_CLOEXEC, 0);
+    if (fd < 0) { return fail("cannot open module", path, fd); }
+    var flags = 0;
+    if (ends_with(path, n, ".zst") == 1) { flags = MODULE_INIT_COMPRESSED_FILE; }
+    if (ends_with(path, n, ".xz") == 1) { flags = MODULE_INIT_COMPRESSED_FILE; }
+    var r = 0 - 38;
+    #ifdef CYRIUS_ARCH_X86
+    r = syscall(SYS_FINIT_MODULE_NR, fd, "", flags);
+    #endif
+    sys_close(fd);
+    if (r != 0 && r != 0 - EEXIST_NR) { return fail("finit_module failed for", path, r); }
+    ln_add("PREINIT: module ");
+    ln_add(path);
+    if (r == 0) { ln_add(" loaded"); } else { ln_add(" already loaded"); }
+    ln_emit();
+    return 0;
+}
+
+# Every module /kyb-board/modules names, in its order. No list is no modules.
+fn load_modules() {
+    var fd = sys_open("/kyb-board/modules", O_RDONLY | O_CLOEXEC, 0);
+    if (fd < 0) { return 0; }
+    var n = sys_read(fd, &_MODS, 4095);
+    sys_close(fd);
+    if (n < 0) { return fail("cannot read", "/kyb-board/modules", n); }
+    store8(&_MODS + n, 0);
+    var p = &_MODS;
+    var end = &_MODS + n;
+    while (p < end) {
+        var q = p;
+        while (q < end && load8(q) != 10) { q = q + 1; }
+        store8(q, 0);
+        if (q > p) { load_one(p, q - p); }
+        p = q + 1;
+    }
+    return 0;
+}
+
+# A RAM disk is filled only when the board ships the image for it.
+fn copy_if(src, dst, shown) {
+    if (sys_access(src, 0) != 0) { return 0; }
+    return copy_to(src, dst, shown);
+}
+
 fn main() {
     sys_mkdir(PRIV, 448);   # 0700
     var m = sys_mount("devtmpfs", PRIV, "devtmpfs", 0, 0);
     if (m == 0) {
         _con = sys_open("/kyb-preinit-dev/console", O_WRONLY | O_CLOEXEC | O_NOCTTY_FLAG, 0);
-        copy_to("/kyb-board/data.img", "/kyb-preinit-dev/ram0", "/dev/ram0");
-        copy_to("/kyb-board/hash.img", "/kyb-preinit-dev/ram1", "/dev/ram1");
+        load_modules();
+        copy_if("/kyb-board/data.img", "/kyb-preinit-dev/ram0", "/dev/ram0");
+        copy_if("/kyb-board/hash.img", "/kyb-preinit-dev/ram1", "/dev/ram1");
         var u = sys_umount2(PRIV, MNT_DETACH_FLAG);
         if (u != 0) { fail("cannot detach", PRIV, u); }
     } else {

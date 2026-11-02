@@ -54,6 +54,8 @@ Phase 5b: Bind the sd_notify socket, publish $NOTIFY_SOCKET      (1.5.4)
 Phase 6 : Load /etc/kybernet/config.json, initialize argonaut
 Phase 6c: Edge-boot pre-flight — capability detect, PCR read,
           dm-verity integrity verification                       (1.2.0/1.5.7)
+          then dm-verity open + read-only mount, and the PCR 15
+          measure, LUKS2 token unlock and cap                    (1.11.0)
 Phase 7 : Run boot stages (OK / SKIP / FAIL per stage)           (1.5.1)
 Phase 8 : Start services (wave-based, cgroup + limits before fork)
 Phase 9 : Enter the epoll event loop
@@ -85,7 +87,7 @@ All under `src/lib/`, included by `src/main.cyr`.
 | `svc_config.cyr` | JSON → `ServiceDefinition`, security / limits / edge blocks |
 | `boot_stages.cyr` | Per-stage work with OK / SKIP / FAIL status |
 | `restart_queue.cyr` | Deferred service restarts, static storage |
-| `edge_boot.cyr` | Verified-boot pre-flight: TPM, PCR, dm-verity verification |
+| `edge_boot.cyr` | Verified-boot pre-flight: TPM, PCR, dm-verity verify and open, read-only root mount, PCR 15 measure → LUKS2 unlock → cap |
 | `emergency_auth.cyr` | Emergency-shell credential: `v1$t$m$p$salt$tag` Argon2id record, parameter bounds, legacy-digest migration (1.5.9) |
 
 ## Dependencies

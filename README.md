@@ -46,7 +46,7 @@ Requires Cyrius 6.7.18 (`cyriusly install 6.7.18 && cyriusly use 6.7.18`).
 cyrius deps                                # Resolve deps from cyrius.cyml into lib/
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet   # Build (DCE recommended)
 CYRIUS_DCE=1 cyrius build src/agnos_init.cyr build/agnos-init   # agnos-init (see below)
-cyrius test src/test.cyr                   # Run 1021 tests
+cyrius test src/test.cyr                   # Run 1056 tests
 cyrius bench src/bench.cyr                 # Run benchmarks
 ```
 
@@ -61,8 +61,8 @@ services expect at boot: `/run` is a fresh tmpfs every boot, so `/run/agnos/agen
 | Module | Lines | What |
 |--------|-------|------|
 | main | 2119 | Boot sequence, argonaut init, event loop, emergency shell, shutdown |
-| svc_config | 1486 | JSON → ServiceDefinition; security, limits and edge blocks; config-read classification |
-| edge_boot | 767 | Verified-boot pre-flight: TPM PCR, dm-verity verification |
+| svc_config | 1513 | JSON → ServiceDefinition; security, limits and edge blocks; config-read classification |
+| edge_boot | 1001 | Verified-boot pre-flight: TPM PCR, dm-verity verify and open, the PCR 15 measure, LUKS2 unlock and cap |
 | emergency_auth | 687 | Argon2id credential: record format, parameter bounds, legacy migration, file-vs-key source |
 | cgroup | 629 | Cgroup v2 controllers, paths, limits, move, kill, teardown |
 | notify | 517 | sd_notify socket (READY, STOPPING, WATCHDOG, STATUS, RELOADING) |
@@ -106,9 +106,16 @@ services expect at boot: `/run` is a fresh tmpfs every boot, so `/run/agnos/agen
 - **Verified boot (edge mode)** — TPM detection and PCR read, plus dm-verity
   **integrity verification** against an operator-pinned root hash via
   `veritysetup verify`, which walks the hash tree in pure userspace and so needs
-  no device-mapper. PCR baselines are compared and reported, deliberately not
-  enforced. `kybernet.edge=permissive` / `=off` are the cmdline escape hatches.
-  An absent `edge` config block means detection-only.
+  no device-mapper. With `root_mount` set (1.11.0) the verified root is then
+  opened as a dm-verity target and mounted read-only, so a corrupted block reads
+  as EIO for the life of the system. With `luks_enabled` the root hash is
+  measured into PCR 15 before the LUKS2 token unlock and a fixed marker is
+  extended after it, so the data volume's key, enrolled to PCR 7 + 15, is
+  released only to this root and only once per boot (argonaut's architecture
+  note 005). PCR baselines are compared and reported, deliberately not
+  enforced: the sealing is what enforces. `kybernet.edge=permissive` / `=off`
+  are the cmdline escape hatches. An absent `edge` config block means
+  detection-only.
 - **Deferred restarts** — a crash-looping service is re-launched on argonaut's
   exponential backoff from a reactor tick, not synchronously from the SIGCHLD
   handler.
@@ -143,7 +150,7 @@ services expect at boot: `/run` is a fresh tmpfs every boot, so `/run/agnos/agen
 - **Data-driven mount table** — not hardcoded per-mount calls
 - **sd_notify compatible** — READY, STOPPING, WATCHDOG, STATUS, RELOADING messages via epoll
 - **String builder** for path construction and logging
-- **1021 tests** (1016 on aarch64 — the seccomp allowlist is arch-specific), 56 benchmarks
+- **1056 tests** (1051 on aarch64 — the seccomp allowlist is arch-specific), 56 benchmarks
 
 ## Dependencies
 
@@ -182,18 +189,22 @@ boot. With the working lane moved onto the caller's arena it costs +25 KB.
 ## Testing
 
 ```sh
-cyrius test src/test.cyr            # 1021 assertions (1016 on aarch64)
+cyrius test src/test.cyr            # 1056 assertions (1051 on aarch64)
 bash scripts/bench-history.sh       # 56 benchmarks, load-tolerant regression gate
 bash qemu/boot-test.sh              # PID-1 boot harness, x86_64 (needs KVM)
 bash qemu/boot-test-aarch64.sh      # PID-1 boot harness, aarch64 (TCG, no KVM)
 ```
 
 The QEMU harness is the gate that matters: it boots kybernet as real PID 1 and
-asserts 149 properties across six passes — the boot sequence, the reactor
+asserts 180 properties across seven passes — the boot sequence, the reactor
 (that it sleeps rather than spins, and that a SIGHUP spends no arena), dm-verity
 verification against a real image pair on virtio disks, the emergency-auth prompt
-with a password fed over the serial line, and the start timeout killing a oneshot
-that overruns it. Pass 4 runs against **both** credential formats: the
+with a password fed over the serial line, the start timeout killing a oneshot
+that overruns it, and a TPM board. That board boots on swtpm, a real TPM 2.0. It
+attests PCR 7, opens and mounts its verified root read-only, and unlocks a LUKS2
+volume whose token is sealed to PCR 7 + 15. From inside, after the cap, a second
+unseal must fail. A swapped root that is valid against its own hash must get no key.
+A corrupted root must read EIO from the bad block and still read the good one. Pass 4 runs against **both** credential formats: the
 deprecated unsalted SHA-256 digest, and an Argon2id `v1` record. It also boots a
 group-readable `emergency.cred` with the right record in `config.json` as well,
 and asserts that the correct password does **not** get in: a refused credential
@@ -241,6 +252,12 @@ operator tool, and CI still exercises its parameter validation.
   boot at all, for ten releases, because of an upstream syscall mis-emission.
 - Cyrius 6.7.18 (`~/.cyrius/bin/cyrius`)
 - No C, no Rust, no libc
+- Edge boards only, on the board itself: `veritysetup` to verify the root, and for
+  `root_mount` a kernel with dm-verity built in or loaded before kybernet starts
+  (kybernet loads no modules). `tpm2_pcrread` for attestation. For `luks_enabled`,
+  `tpm2_pcrextend`, `cryptsetup` and systemd's LUKS2 TPM2 token plugin with its
+  tpm2-tss libraries, and dm-crypt. The x86 harness gates all of it on a TPM board.
+  aarch64 runs the same code with no gate yet (roadmap 1.11.1).
 - OpenSSL 3.2+ — **provisioning only**, for `scripts/mkcred.sh`. Nothing kybernet
   runs at boot depends on it; the verifier is sigil's own Argon2id.
 

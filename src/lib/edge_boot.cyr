@@ -25,15 +25,19 @@
 #     enforced at the end when a hard prerequisite is set (1.5.3)
 #   - `kybernet.edge=off` / `=permissive` cmdline escape hatches (1.5.7)
 #
-# STILL OPEN — roadmap release 1.11.0, "Edge boot under emulation". No gate runs
-# these today: dm is a module in the kernels the harnesses boot, nothing in their
-# initramfs can load one, and no harness has a TPM:
-#   - `veritysetup open` + read-only mount of the verified target. This is
-#     what catches corruption at READ time, as opposed to verifying the
-#     image once at boot. Needs a device-mapper stack this init cannot
-#     assume. argonaut's verify_rootfs_integrity already builds the command.
-#   - LUKS unlock. argonaut's unlock_luks builds a `--token-only` cryptsetup
-#     invocation, which needs a TPM-sealed LUKS2 token.
+# SINCE 1.11.0, gated under swtpm by the x86 harness's TPM pass:
+#   - `veritysetup open` + a read-only mount of the verified target at
+#     `root_mount`, which catches corruption at READ time rather than once at
+#     boot. A corrupted block reads as EIO: `--restart-on-corruption`, which
+#     argonaut's verify_rootfs_integrity uses, would reboot a board with one bad
+#     block into the same bad block for ever.
+#   - LUKS unlock, with argonaut architecture note 005's key policy: the verified
+#     root hash is measured into PCR 15 before the unlock and PCR 15 is capped
+#     after it, so a token enrolled to PCR 7 + 15 releases its key only for this
+#     root, and only once per boot.
+# The modules these need are loaded before PID 1 starts, never by it.
+#
+# STILL OPEN:
 #   - PCR baseline ENFORCEMENT against `expected_pcrs`. ⚠ Note the word:
 #     COMPARISON is done and is live — `_eb_compare_pcrs` runs at every edge
 #     boot with a TPM and reports drift to dmesg. What is left is acting on a
@@ -61,6 +65,12 @@ var _eb_root_device = 0;      # Str, 0 = unset
 var _eb_hash_device = 0;      # Str
 var _eb_root_hash = 0;        # Str, 64 hex chars
 var _eb_luks_device = 0;      # Str
+# 1.11.0. Str, 0 = unset. The mapper name of the unlocked volume (validated like
+# argonaut's validate_mapper_name), where to mount the verified root read-only (0 =
+# verify only, as before 1.11.0), and its filesystem type.
+var _eb_luks_name = 0;
+var _eb_root_mount = 0;
+var _eb_root_fstype = 0;
 # ⚠ dm-verity VERIFICATION GETS ITS OWN BOUND. 1.6.14 HIGH-8.
 #
 # It used to borrow `max_boot_ms`, with `var vbudget = 10000;` as the
@@ -112,6 +122,13 @@ fn edge_set_devices(root_dev, hash_dev, root_hash, luks_dev) {
 
 fn edge_set_expected_pcrs(v) { _eb_expected_pcrs = v; return 0; }
 
+fn edge_set_mounts(luks_name, root_mount, root_fstype) {
+    _eb_luks_name = luks_name;
+    _eb_root_mount = root_mount;
+    _eb_root_fstype = root_fstype;
+    return 0;
+}
+
 # Clear every piece of edge state kybernet owns. 1.6.16 LOW-1.
 #
 # `edge_apply_defaults` resets argonaut's EdgeBootConfig; these five globals are
@@ -124,6 +141,9 @@ fn edge_reset_devices() {
     _eb_root_hash = 0;
     _eb_luks_device = 0;
     _eb_expected_pcrs = 0;
+    _eb_luks_name = 0;
+    _eb_root_mount = 0;
+    _eb_root_fstype = 0;
     return 0;
 }
 fn edge_set_verify_timeout(ms) { _eb_verify_timeout_ms = ms; return 0; }
@@ -156,6 +176,64 @@ fn edge_device_path_ok(p) {
         # No "..", even though the charset above already excludes '.'.
         # Kept explicit so relaxing the charset cannot silently reopen it.
         if (c == 46) { return 0; }
+    }
+    return 1;
+}
+
+# Where the verified root may be mounted (1.11.0): absolute, at most 255 bytes,
+# [A-Za-z0-9/_.-], not "/" itself, and no "..".
+fn edge_mount_path_ok(p) {
+    if (p == 0) { return 0; }
+    var len = str_len(p);
+    if (len < 2 || len > 255) { return 0; }
+    var d = str_data(p);
+    if (load8(d) != 47) { return 0; }
+    for (var i = 0; i < len; i = i + 1) {
+        var c = load8(d + i);
+        var ok = 0;
+        if (c >= 48 && c <= 57)  { ok = 1; }
+        if (c >= 65 && c <= 90)  { ok = 1; }
+        if (c >= 97 && c <= 122) { ok = 1; }
+        if (c == 47 || c == 45 || c == 95 || c == 46) { ok = 1; }
+        if (ok == 0) { return 0; }
+        if (c == 46 && i + 1 < len && load8(d + i + 1) == 46) { return 0; }
+    }
+    return 1;
+}
+
+# A filesystem type the kernel is asked to mount: [a-z0-9], 1..16 bytes.
+fn edge_fstype_ok(f) {
+    if (f == 0) { return 0; }
+    var len = str_len(f);
+    if (len < 1 || len > 16) { return 0; }
+    var d = str_data(f);
+    for (var i = 0; i < len; i = i + 1) {
+        var c = load8(d + i);
+        var ok = 0;
+        if (c >= 48 && c <= 57)  { ok = 1; }
+        if (c >= 97 && c <= 122) { ok = 1; }
+        if (ok == 0) { return 0; }
+    }
+    return 1;
+}
+
+# 1 if two hex Strs are the same digest, whatever their case. ⚠ IT WAS str_eq UNTIL
+# 1.11.0, AND NO LOWERCASE BASELINE COULD MATCH. tpm2_pcrread prints uppercase hex and
+# sigil keeps its bytes as printed, while an operator writes a baseline the way
+# sha256sum does, lowercase. So the comparison reported a MISMATCH for the right PCR,
+# found the first time anything ran it (the TPM board, standing rule 27).
+fn edge_hex_eq(a, b) {
+    if (a == 0 || b == 0) { return 0; }
+    var n = str_len(a);
+    if (str_len(b) != n) { return 0; }
+    var da = str_data(a);
+    var db = str_data(b);
+    for (var i = 0; i < n; i = i + 1) {
+        var ca = load8(da + i);
+        var cb = load8(db + i);
+        if (ca >= 65 && ca <= 70) { ca = ca + 32; }
+        if (cb >= 65 && cb <= 70) { cb = cb + 32; }
+        if (ca != cb) { return 0; }
     }
     return 1;
 }
@@ -287,8 +365,9 @@ fn _eb_over_budget(start_ms, max_ms) {
 # no device-mapper, no kernel module and no /dev/mapper node — which is what
 # makes it usable here, and testable in an initramfs where dm is a module
 # that nothing can load. `veritysetup open` (which argonaut's
-# verify_rootfs_integrity builds) does need all of that, and is what stays
-# for roadmap release 1.11.0.
+# verify_rootfs_integrity builds) does need all of that. Since 1.11.0 a board
+# with `root_mount` also opens and mounts the root, after this verify
+# (_eb_mount_root), and the x86 harness's TPM pass gates it.
 #
 # This is the honest half of the 1.2.0 deferral: kybernet can now say "the
 # rootfs image matches the root hash the operator pinned", which is the
@@ -335,6 +414,126 @@ fn _eb_verity_verify(budget_ms) {
     return 2;
 }
 
+# ================================================================
+# The verified root, mounted; and the data volume, unlocked (1.11.0)
+# ================================================================
+#
+# argonaut architecture note 005 (CVE-2026-32606 class): a LUKS key sealed only to
+# PCR 7 + 11 is released to ANY root that boots under the same signed kernel, so an
+# attacker who swaps the root partition gets the data unlocked. Two steps close it:
+#   1. after dm-verity has verified the root, extend SHA-256 of its 32-byte root
+#      hash into PCR 15 before the unlock, and enrol the token to PCR 7 + 15, so a
+#      different root reproduces no PCR 15 the token accepts;
+#   2. after the unlock, extend PCR 15 again with a fixed marker, so nothing later
+#      in the same boot, the emergency shell included, can unseal it a second time.
+# The PCR value a token is enrolled to is therefore
+#   PCR15 = SHA-256(32 zero bytes || edge_root_measurement(root_hash)).
+var EB_PCR_ROOT = 15;
+var EB_ROOT_MAPPER = "verified-root";
+# SHA-256 of the ASCII "kybernet: data volume unlocked".
+var EB_PCR_CAP = "217f4bd060b1c04be04de5146ed209d54068b162c60260e55a2bea9803360e6e";
+var EB_MS_RDONLY = 1;
+var EB_TPM_TIMEOUT_MS = 10000;
+var EB_OPEN_TIMEOUT_MS = 30000;
+
+# The digest kybernet extends into PCR 15 for a verified root: SHA-256 of the root
+# hash's 32 bytes, as a 64-hex cstr, or 0 for anything that is not a 64-hex Str.
+fn edge_root_measurement(root_hash) {
+    if (edge_is_hex64_str(root_hash) == 0) { return 0; }
+    var raw[32];
+    if (hex_decode_into(str_data(root_hash), 64, &raw) != 1) { return 0; }   # 1 = decoded
+    return sha256_hex(&raw, 32);
+}
+
+# The time a step may take: its own bound, cut down to what `max_boot_ms` leaves.
+fn _eb_step_budget(start_ms, max_ms, own) {
+    if (max_ms <= 0) { return own; }
+    var remain = max_ms - (monotonic_ms() - start_ms);
+    if (remain < 500) { remain = 500; }
+    if (remain < own) { return remain; }
+    return own;
+}
+
+# tpm2_pcrextend <index>:sha256=<hex>, bounded. 0 on success.
+fn _eb_pcr_extend(index, hex, budget_ms) {
+    var sb = str_builder_new();
+    str_builder_add_int(sb, index);
+    str_builder_add_cstr(sb, ":sha256=");
+    str_builder_add_cstr(sb, hex);
+    var cmd = safe_cmd_new(str_from("tpm2_pcrextend"));
+    safe_cmd_add_arg(cmd, str_builder_build(sb));
+    return run_safe_cmd_timeout(cmd, budget_ms);
+}
+
+# veritysetup open: the verified root as a device-mapper target that checks every
+# block it reads. 0 on success.
+fn _eb_verity_open(budget_ms) {
+    var cmd = safe_cmd_new(str_from("veritysetup"));
+    safe_cmd_add_arg(cmd, str_from("open"));
+    safe_cmd_add_arg(cmd, str_from("--"));
+    safe_cmd_add_arg(cmd, _eb_root_device);
+    safe_cmd_add_arg(cmd, str_from(EB_ROOT_MAPPER));
+    safe_cmd_add_arg(cmd, _eb_hash_device);
+    safe_cmd_add_arg(cmd, _eb_root_hash);
+    return run_safe_cmd_timeout(cmd, budget_ms);
+}
+
+# argonaut's unlock_luks, built here because its module is not in the link: one
+# attempt, the token's key only, no passphrase fallback. 0 on success.
+fn _eb_luks_open(budget_ms) {
+    var cmd = safe_cmd_new(str_from("cryptsetup"));
+    safe_cmd_add_arg(cmd, str_from("open"));
+    safe_cmd_add_arg(cmd, str_from("--type"));
+    safe_cmd_add_arg(cmd, str_from("luks2"));
+    safe_cmd_add_arg(cmd, str_from("--token-only"));
+    safe_cmd_add_arg(cmd, str_from("--token-id"));
+    safe_cmd_add_arg(cmd, str_from("0"));
+    safe_cmd_add_arg(cmd, str_from("--tries"));
+    safe_cmd_add_arg(cmd, str_from("1"));
+    safe_cmd_add_arg(cmd, str_from("--"));
+    safe_cmd_add_arg(cmd, _eb_luks_device);
+    safe_cmd_add_arg(cmd, _eb_luks_name);
+    return run_safe_cmd_timeout(cmd, budget_ms);
+}
+
+# Open the verified root and mount it read-only at `root_mount`. 1 on success.
+fn _eb_mount_root(budget_ms) {
+    var rc = _eb_verity_open(budget_ms);
+    if (rc != 0) {
+        klog2("edge boot: veritysetup open FAILED, exit ", _u64_str(rc));
+        return 0;
+    }
+    sys_mkdir(str_data(_eb_root_mount), 0x1ED);   # 0755; an existing directory is fine
+    var m = sys_mount("/dev/mapper/verified-root", str_data(_eb_root_mount),
+      str_data(_eb_root_fstype), EB_MS_RDONLY, 0);
+    if (m != 0) {
+        klog2("edge boot: read-only mount of the verified root FAILED, errno ", _u64_str(0 - m));
+        return 0;
+    }
+    klog2("edge boot: verified root mounted read-only at ", str_data(_eb_root_mount));
+    return 1;
+}
+
+# Measure, unlock, cap. 0 when every step succeeded, else which failed:
+# 1 measure, 2 unlock, 3 cap (after a successful unlock).
+fn _eb_unlock_measured(start_ms, max_ms) {
+    var meas = edge_root_measurement(_eb_root_hash);
+    if (meas == 0) { return 1; }
+    if (_eb_pcr_extend(EB_PCR_ROOT, meas, _eb_step_budget(start_ms, max_ms, EB_TPM_TIMEOUT_MS)) != 0) {
+        return 1;
+    }
+    klog("edge boot: verified root measured into PCR 15");
+    var u = _eb_luks_open(_eb_step_budget(start_ms, max_ms, EB_OPEN_TIMEOUT_MS));
+    # The cap runs whatever the unlock did: after this point no state of this boot
+    # may unseal the key, and a refused unlock is still an attempt something could
+    # repeat from a shell.
+    var c = _eb_pcr_extend(EB_PCR_ROOT, EB_PCR_CAP, _eb_step_budget(start_ms, max_ms, EB_TPM_TIMEOUT_MS));
+    if (u != 0) { return 2; }
+    if (c != 0) { return 3; }
+    klog("edge boot: PCR 15 capped");
+    return 0;
+}
+
 # Compare the live PCR readings against the configured baselines.
 #
 # REPORT-ONLY, deliberately, and this is a policy decision rather than an
@@ -345,7 +544,8 @@ fn _eb_verity_verify(budget_ms) {
 # verification, whose output sigil's parser zero-fills wherever it cannot
 # read it. A control that is defeated by replacing a file must not be able
 # to permanently brick a board. The hardware-rooted version of this is TPM
-# *sealing*, which fails soft: roadmap release 1.11.0.
+# *sealing*: since 1.11.0 the LUKS key is sealed to PCR 7 + 15, and a board whose
+# PCRs moved gets no key and refuses, without this compare deciding anything.
 #
 # So: operators get fleet drift in dmesg, before it can cost them a boot.
 # Returns the number of MISMATCHES (0 = all matched or nothing to compare).
@@ -407,7 +607,7 @@ fn _eb_compare_pcrs(values, indices) {
                 # so all-zero means "unread", not "read as zero".
                 klog("edge boot: PCR read back all-zero - UNREADABLE, not a match");
                 mismatches = mismatches + 1;
-            } elif (str_eq(got, want) == 0) {
+            } elif (edge_hex_eq(got, want) == 0) {
                 klog("edge boot: PCR MISMATCH vs configured baseline");
                 kmsg("kybernet: edge boot: PCR mismatch vs baseline (report-only)");
                 mismatches = mismatches + 1;
@@ -658,22 +858,6 @@ fn edge_boot_run(config) {
         }
     }
 
-    # ---- LUKS unlock — roadmap release 1.11.0 ----
-    #
-    # argonaut's unlock_luks builds a `cryptsetup open --token-only` call,
-    # which needs a TPM-sealed LUKS2 token. There is nothing to unlock
-    # against in an initramfs, and a synthetic passphrase volume would
-    # exercise cryptsetup without exercising the thing that matters. The
-    # device path is parsed and validated so the config surface is stable.
-    if (luks_req == 1) {
-        if (_eb_luks_device != 0) {
-            klog2("edge boot: LUKS device configured, unlock deferred to hardware: ",  # roadmap 1.11.0
-              str_data(_eb_luks_device));
-        } else {
-            klog("edge boot: luks_enabled set but no luks_device configured");
-        }
-    }
-
     # ---- dm-verity integrity verification (1.5.7) ----
     #
     # Runs whenever devices are configured, independently of whether the
@@ -735,6 +919,56 @@ fn edge_boot_run(config) {
         klog("edge boot: readonly_rootfs set but no verity device config");
         klog("edge boot: integrity NOT verified");
         kmsg("kybernet: edge boot: readonly_rootfs set without device config, integrity NOT verified");
+    }
+
+    # ---- The verified root, read-only (1.11.0) ----
+    #
+    # Whenever it is configured and the boot got this far: verified, or not verified
+    # and allowed on. dm-verity checks each block as it is read, so a root that failed
+    # its boot-time verify still reads as EIO wherever it is corrupt, which is
+    # strictly safer than reading the device with nothing checking it.
+    if (_eb_root_mount != 0 && _eb_root_device != 0) {
+        if (_eb_mount_root(_eb_step_budget(start_ms, max_ms, EB_OPEN_TIMEOUT_MS)) == 0) {
+            if (readonly_req == 1) {
+                return _eb_refuse("FATAL: the verified root could not be opened and mounted read-only",
+                  "edge-boot REFUSED: verified root open or mount failed");
+            }
+            klog("WARNING: the verified root is not mounted, but readonly_rootfs not required");
+        }
+    }
+
+    # ---- LUKS: measure, unlock, cap (1.11.0) ----
+    #
+    # Each refusal names its reason, because each has a different fix: an
+    # unverified root, no TPM, a TPM that would not release the key (a different
+    # root, or a token enrolled to other values), or a cap that did not land.
+    if (luks_req == 1) {
+        if (_eb_luks_device == 0) {
+            return _eb_refuse("FATAL: luks_enabled set but no luks_device configured",
+              "edge-boot REFUSED: luks_enabled without luks_device");
+        }
+        if (_eb_verity_verified == 0) {
+            return _eb_refuse("FATAL: LUKS unlock needs a verified root - its key is bound to that root's measurement",
+              "edge-boot REFUSED: no verified root to measure before the LUKS unlock");
+        }
+        if (_eb_tpm_present == 0) {
+            return _eb_refuse("FATAL: LUKS unlock needs a TPM, and there is none",
+              "edge-boot REFUSED: LUKS unlock needs a TPM");
+        }
+        var lu = _eb_unlock_measured(start_ms, max_ms);
+        if (lu == 1) {
+            return _eb_refuse("FATAL: the verified root could not be measured into PCR 15",
+              "edge-boot REFUSED: PCR 15 measurement failed");
+        }
+        if (lu == 2) {
+            return _eb_refuse("FATAL: LUKS unlock FAILED - the TPM released no key for this root",
+              "edge-boot REFUSED: LUKS unlock failed (wrong root, or the token is enrolled to other PCRs)");
+        }
+        if (lu == 3) {
+            return _eb_refuse("FATAL: PCR 15 could not be capped after the unlock - the key could be unsealed again",
+              "edge-boot REFUSED: PCR 15 cap failed after the LUKS unlock");
+        }
+        klog2("edge boot: data volume unlocked: /dev/mapper/", str_data(_eb_luks_name));
     }
 
     # ---- Budget check ----

@@ -2575,6 +2575,75 @@ fn test_edge_boot_pcr_parser() {
 # path. An operator who never configured a budget inherited a 3-second one,
 # and `veritysetup verify` hashes the whole rootfs image against it — so a
 # poweroff was reachable purely by omission. Rule 19's exact complaint.
+# 1.11.0. What PCR 15 holds after a verified root is measured, and the three keys
+# that open, mount and unlock. The vector is the swtpm one: a root hash of 64 'c'
+# measured c2f480d4..., and extending that into a zeroed PCR 15 gave 8a6f049b..., the
+# value the harness enrols its token to.
+fn _edge_doc(inner) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"boot_mode\":\"edge\",\"edge\":{\"root_device\":\"/dev/vda\",");
+    str_builder_add_cstr(sb, "\"hash_device\":\"/dev/vdb\",\"root_hash\":\"");
+    str_builder_add_cstr(sb, _rep(99, 64));
+    str_builder_add_cstr(sb, "\"");
+    str_builder_add_cstr(sb, inner);
+    str_builder_add_cstr(sb, "}}");
+    return json_v_parse(str_builder_build(sb));
+}
+
+# An edge block with the verity triple plus `inner`, loaded into `ec`.
+fn _edge_keys(inner, ec) {
+    return edge_config_from_json(_edge_doc(inner), ec);
+}
+
+fn test_edge_measure_and_mount_keys() {
+    println("--- edge root measurement, mount and LUKS keys (1.11.0) ---");
+    var m = edge_root_measurement(str_from(_rep(99, 64)));
+    assert(m != 0, "measure: a 64-hex root hash measures");
+    assert(streq(m, "c2f480d4dda9f4522b9f6d590011636d904accfe59f12f9d66a0221c2558e3a2") == 1,
+      "measure: SHA-256 of the hash's 32 bytes, not of its hex");
+    var pcr[64];
+    memset(&pcr, 0, 32);
+    hex_decode_into(m, 64, &pcr + 32);
+    assert(streq(sha256_hex(&pcr, 64), "8a6f049b27f70033962f5df5ec4336983a8c83a144e40d67ae0cc90f693bff88") == 1,
+      "measure: extended into a zeroed PCR 15 it is the value a token is enrolled to");
+    assert_eq(edge_root_measurement(str_from("cccc")), 0, "measure: a short hash measures nothing");
+    assert_eq(edge_root_measurement(str_from(_rep(103, 64))), 0, "measure: a non-hex hash measures nothing");
+    assert_eq(edge_root_measurement(0), 0, "measure: no hash measures nothing");
+    assert(streq(EB_PCR_CAP, sha256_hex("kybernet: data volume unlocked", 30)) == 1,
+      "measure: the cap is the marker it says it is");
+    assert(streq(EB_PCR_CAP, m) == 0, "measure: and is no root's measurement");
+
+    var ec = alloc(48);
+    assert_eq(_edge_keys("", ec), 1, "keys: a block without them is accepted");
+    assert_eq(_eb_root_mount, 0, "keys: no root_mount is verify only");
+    assert(str_eq_cstr(_eb_luks_name, "agnos-data") == 1, "keys: luks_name defaults to agnos-data");
+    assert(str_eq_cstr(_eb_root_fstype, "ext4") == 1, "keys: root_fstype defaults to ext4");
+    assert_eq(_edge_keys(",\"root_mount\":\"/sysroot\",\"root_fstype\":\"erofs\",\"luks_name\":\"kyb_data-1\"", ec), 1,
+      "keys: all three accepted");
+    assert(str_eq_cstr(_eb_root_mount, "/sysroot") == 1, "keys: root_mount kept");
+    assert(str_eq_cstr(_eb_root_fstype, "erofs") == 1, "keys: root_fstype kept");
+    assert(str_eq_cstr(_eb_luks_name, "kyb_data-1") == 1, "keys: luks_name kept");
+    assert_eq(edge_config_from_json(json_v_parse(str_from("{\"boot_mode\":\"edge\"}")), ec), 1, "keys: no edge block");
+    assert_eq(_eb_root_mount, 0, "keys: a load without the block resets root_mount");
+    assert_eq(_eb_luks_name, 0, "keys: and luks_name");
+
+    assert_eq(_edge_keys(",\"root_mount\":\"sysroot\"", ec), 0, "keys: a relative root_mount is refused");
+    assert_eq(_edge_keys(",\"root_mount\":\"/\"", ec), 0, "keys: root_mount / is refused");
+    assert_eq(_edge_keys(",\"root_mount\":\"/a/../b\"", ec), 0, "keys: a root_mount with .. is refused");
+    assert_eq(_edge_keys(",\"root_mount\":\"/a b\"", ec), 0, "keys: a root_mount with a space is refused");
+    assert_eq(edge_config_from_json(json_v_parse(str_from("{\"edge\":{\"root_mount\":\"/sysroot\"}}")), ec), 0,
+      "keys: a root_mount without the verity triple is refused");
+    assert_eq(_edge_keys(",\"root_fstype\":\"EXT4\"", ec), 0, "keys: an uppercase fstype is refused");
+    assert_eq(_edge_keys(",\"root_fstype\":\"ext4,ro\"", ec), 0, "keys: an fstype with options is refused");
+    assert_eq(_edge_keys(",\"root_fstype\":\"abcdefghijklmnopq\"", ec), 0, "keys: a 17-byte fstype is refused");
+    assert_eq(_edge_keys(",\"luks_name\":\"-x\"", ec), 0, "keys: a luks_name like an option is refused");
+    assert_eq(_edge_keys(",\"luks_name\":\"a/b\"", ec), 0, "keys: a luks_name with a slash is refused");
+    assert_eq(_edge_keys(",\"luks_name\":\"\"", ec), 0, "keys: an empty luks_name is refused");
+    assert_eq(_eb_root_mount, 0, "keys: a refused block commits nothing");
+    edge_reset_devices();
+    return 0;
+}
+
 fn test_edge_defaults_clear_all_five() {
     println("--- edge defaults clear all five fields (1.6.0) ---");
     var ec = alloc(48);
@@ -3651,6 +3720,16 @@ fn test_edge_compare_pcrs_cstr() {
     edge_set_expected_pcrs(exp);
     assert_eq(_eb_compare_pcrs(vals, idx), 0, "pcr: raw cstr digest matches baseline");
 
+    # tpm2_pcrread prints uppercase and sigil keeps it; a baseline is lowercase, as
+    # sha256sum writes it. They are the same digest (1.11.0, the TPM board).
+    var up = "AABBCCDDEEFF00112233445566778899AABBCCDDEEFF001122334455667788FF";
+    var vals_up = vec_new();
+    vec_push(vals_up, tpm_pcr_value_new(7, TPM_SHA256, _test_sigil_style_cstr(up)));
+    assert_eq(_eb_compare_pcrs(vals_up, idx), 0, "pcr: an uppercase reading matches a lowercase baseline");
+    assert_eq(edge_hex_eq(str_from("aB"), str_from("Ab")), 1, "pcr: hex compare ignores case");
+    assert_eq(edge_hex_eq(str_from("ab"), str_from("ac")), 0, "pcr: and still compares the digits");
+    assert_eq(edge_hex_eq(str_from("ab"), str_from("abc")), 0, "pcr: and the length");
+
     # Same shape, different digest: exactly one mismatch.
     var vals2 = vec_new();
     vec_push(vals2, tpm_pcr_value_new(7, TPM_SHA256, _test_sigil_style_cstr(d14)));
@@ -4259,6 +4338,7 @@ fn main() {
     test_cgroup_path_cache();
     test_edge_boot_pcr_parser();
     test_edge_config_parse();
+    test_edge_measure_and_mount_keys();
     test_edge_defaults_clear_all_five();
     test_unsafe_service_name_refused();
     test_edge_config_rejects();

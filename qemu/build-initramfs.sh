@@ -775,7 +775,7 @@ sudo chmod 666 "${INITRAMFS_DIR}/dev/console" "${INITRAMFS_DIR}/dev/null" "${INI
 # so it runs in an initramfs where dm is a module nothing can load. That is
 # the whole reason kybernet verifies with `verify` rather than `open`.
 # It CANNOT prove `veritysetup open` or a LUKS unlock; those need a real dm
-# stack and belong on hardware (roadmap v1.2.2).
+# stack, which the TPM board below has (1.11.0).
 #
 # Verified unprivileged on the host before this was written: format emits a
 # root hash, and verify returns 0 on a good pair, 1 on a wrong root hash,
@@ -1065,6 +1065,166 @@ REFPY
 else
     echo "  veritysetup not found — edge pass will SKIP (not a failure)"
     _drop_stale_fixtures "veritysetup not found"
+fi
+
+# ============================================================
+# The TPM board (1.11.0): swtpm, a sealed LUKS2 token, and dm-verity open.
+#
+# What the edge image above cannot prove: `veritysetup open` and a LUKS unlock need a
+# device-mapper stack, and dm is a module in every kernel these harnesses boot. This
+# board loads dm-crypt and dm-verity BEFORE PID 1: qemu/preinit-fixture.cyr is its
+# rdinit, and it finit_module()s the list in /kyb-board/modules, then execs kybernet.
+# The modules come from the kernel being booted, matched by the release string in its
+# own header, so a host whose installed modules are for another kernel builds nothing.
+#
+# The token is enrolled by boot-test.sh, not here: it is sealed to the firmware's PCR
+# 7, which only a boot can read, and to the PCR 15 kybernet's measurement of this
+# root will produce. So this builds the image and the disks, and boot-test.sh adds a
+# small cpio with each boot's config after it (a later archive overrides an earlier
+# one's files).
+#
+# Every input is a host tool CI installs (swtpm, swtpm-tools, tpm2-tools,
+# systemd-cryptsetup, cryptsetup-bin, e2fsprogs) or a file of the booted kernel's.
+# A missing one is a SKIP with its reason in tpm-board/why, never a half-built board
+# (standing rules 33, 39).
+TPM_BOARD="${SCRIPT_DIR}/tpm-board"
+TPM_STAGE="${SCRIPT_DIR}/initramfs-tpm"
+rm -rf "$TPM_BOARD" "$TPM_STAGE" "${SCRIPT_DIR}/initramfs-tpm.cpio.gz"
+mkdir -p "$TPM_BOARD"
+
+# The release of a bzImage, from its own header: setup_header.kernel_version, a 16-bit
+# offset at 0x20E, relative to 0x200. "" when the file is not one.
+_bzimage_release() {
+    local off
+    off=$(od -An -tu2 -j $((0x20E)) -N2 "$1" 2>/dev/null | tr -d ' ')
+    [ -n "$off" ] || return 0
+    dd if="$1" bs=1 skip=$((off + 0x200)) count=96 status=none 2>/dev/null | tr '\0' '\n' | head -1 | awk '{print $1}'
+}
+
+# A binary or library at its own path, with its shared-library closure and loader at
+# theirs (the multiarch paths matter, see the edge block above).
+_tpm_stage_closure() {
+    local f lib
+    for f in "$@"; do
+        mkdir -p "${TPM_STAGE}$(dirname "$f")"
+        cp -L "$f" "${TPM_STAGE}${f}" || return 1
+        for lib in $(ldd "$f" 2>/dev/null | awk '/=> \//{print $3} /^[[:space:]]*\//{print $1}'); do
+            [ -f "${TPM_STAGE}${lib}" ] && continue
+            mkdir -p "${TPM_STAGE}$(dirname "$lib")"
+            cp -L "$lib" "${TPM_STAGE}${lib}" || return 1
+        done
+    done
+    return 0
+}
+
+# A module and, first, every module modules.dep says it needs. Built-in modules are in
+# modules.builtin and need nothing.
+_tpm_add_module() {
+    local name="$1" line rel dep
+    line=$(grep -E "(^|/)${name}\.ko(\.[a-z]+)?:" "${KMOD_DIR}/modules.dep" | head -1)
+    if [ -z "$line" ]; then
+        grep -qE "(^|/)${name}\.ko" "${KMOD_DIR}/modules.builtin" 2>/dev/null && return 0
+        echo "the kernel has no ${name} module" > "${TPM_BOARD}/why"
+        return 1
+    fi
+    rel="${line%%:*}"
+    for dep in ${line#*:}; do
+        _tpm_add_module "$(basename "$dep" | sed 's/\.ko.*//')" || return 1
+    done
+    grep -qx "/kyb-board/m/$(basename "$rel")" "${TPM_STAGE}/kyb-board/modules" 2>/dev/null && return 0
+    cp "${KMOD_DIR}/${rel}" "${TPM_STAGE}/kyb-board/m/" || return 1
+    echo "/kyb-board/m/$(basename "$rel")" >> "${TPM_STAGE}/kyb-board/modules"
+    return 0
+}
+
+# One ext4 root for dm-verity: two files in two blocks, so a corruption in one leaves
+# the other readable, and the gate can see that dm-verity checks per block.
+_tpm_make_root() {
+    local tree="$1" img="$2" hello="$3"
+    rm -rf "$tree"; mkdir -p "$tree"
+    echo "$hello" > "${tree}/hello.txt"
+    echo "KYB-SECOND-BLOCK" > "${tree}/other.txt"
+    mkfs.ext4 -q -F -b 4096 -O ^has_journal -E root_owner=0:0 -d "$tree" "$img" 4M
+}
+
+_tpm_board_build() {
+    local t
+    for t in swtpm swtpm_setup tpm2_pcrextend tpm2_pcrread cryptsetup veritysetup \
+             systemd-cryptenroll mkfs.ext4 debugfs sha256sum od; do
+        command -v "$t" >/dev/null 2>&1 || { echo "${t} is not installed" > "${TPM_BOARD}/why"; return 1; }
+    done
+    TPM_PLUGIN=""
+    for t in /usr/lib/x86_64-linux-gnu/cryptsetup /usr/lib/cryptsetup /usr/lib64/cryptsetup; do
+        [ -f "${t}/libcryptsetup-token-systemd-tpm2.so" ] && { TPM_PLUGIN="${t}/libcryptsetup-token-systemd-tpm2.so"; break; }
+    done
+    [ -n "$TPM_PLUGIN" ] || { echo "no cryptsetup systemd-tpm2 token plugin" > "${TPM_BOARD}/why"; return 1; }
+    TSS_DIR=""
+    for t in /usr/lib/x86_64-linux-gnu /usr/lib /usr/lib64; do
+        [ -f "${t}/libtss2-esys.so.0" ] && [ -f "${t}/libtss2-tcti-device.so.0" ] && { TSS_DIR="$t"; break; }
+    done
+    [ -n "$TSS_DIR" ] || { echo "no tpm2-tss libraries (libtss2-esys, libtss2-tcti-device)" > "${TPM_BOARD}/why"; return 1; }
+    local krel
+    krel=$(_bzimage_release "${KYB_KERNEL:-}")
+    [ -n "$krel" ] || { echo "cannot read the kernel release from ${KYB_KERNEL:-no kernel given}" > "${TPM_BOARD}/why"; return 1; }
+    KMOD_DIR=""
+    for t in "/lib/modules/${krel}" "/usr/lib/modules/${krel}"; do
+        [ -f "${t}/modules.dep" ] && { KMOD_DIR="$t"; break; }
+    done
+    [ -n "$KMOD_DIR" ] || { echo "no modules installed for kernel ${krel}" > "${TPM_BOARD}/why"; return 1; }
+
+    # The main image, plus what the board needs.
+    tar -cf - -C "${INITRAMFS_DIR}" --exclude=./dev . | tar -xf - -C "$TPM_STAGE" 2>/dev/null \
+        || { mkdir -p "$TPM_STAGE"; tar -cf - -C "${INITRAMFS_DIR}" --exclude=./dev . | tar -xf - -C "$TPM_STAGE"; }
+    mkdir -p "${TPM_STAGE}/dev" "${TPM_STAGE}/kyb-board/m" "${TPM_STAGE}/usr/bin"
+    : > "${TPM_STAGE}/kyb-board/modules"
+    _tpm_stage_closure "$(command -v veritysetup)" "$(command -v cryptsetup)" || { echo "cannot stage veritysetup/cryptsetup" > "${TPM_BOARD}/why"; return 1; }
+    # sigil reads PCRs through this exact path.
+    cp -L "$(command -v tpm2_pcrread)" "${TPM_STAGE}/usr/bin/tpm2_pcrread"
+    cp -L "$(command -v tpm2_pcrextend)" "${TPM_STAGE}/usr/bin/tpm2_pcrextend"
+    _tpm_stage_closure "$(command -v tpm2_pcrread)" "$TPM_PLUGIN" || { echo "cannot stage tpm2-tools or the token plugin" > "${TPM_BOARD}/why"; return 1; }
+    # dlopen()ed, so no ldd closure finds them.
+    for t in libtss2-esys.so.0 libtss2-rc.so.0 libtss2-mu.so.0 libtss2-tctildr.so.0 libtss2-tcti-device.so.0; do
+        [ -f "${TSS_DIR}/${t}" ] || { echo "no ${TSS_DIR}/${t}" > "${TPM_BOARD}/why"; return 1; }
+        _tpm_stage_closure "${TSS_DIR}/${t}" || return 1
+    done
+    # tpm_tis is built in on Arch's and Ubuntu's generic kernels, where this adds nothing;
+    # a kernel that ships it as a module would otherwise boot a board with no TPM.
+    _tpm_add_module tpm_tis || return 1
+    _tpm_add_module dm-crypt || return 1
+    _tpm_add_module dm-verity || return 1
+    local pre="${PROJECT_DIR}/build/preinit-fixture"
+    (cd "$PROJECT_DIR" && cyrius build qemu/preinit-fixture.cyr "$pre" >/dev/null) \
+        || { echo "qemu/preinit-fixture.cyr does not build" > "${TPM_BOARD}/why"; return 1; }
+    cp "$pre" "${TPM_STAGE}/kyb-preinit"; chmod +x "${TPM_STAGE}/kyb-preinit"
+
+    # Two roots with valid hash trees: the board's own, and an attacker's.
+    _tpm_make_root "${TPM_BOARD}/tree" "${TPM_BOARD}/data.img" "KYB-VERIFIED-ROOT" || return 1
+    _tpm_make_root "${TPM_BOARD}/tree2" "${TPM_BOARD}/data2.img" "KYB-SWAPPED-ROOT" || return 1
+    local i
+    for i in "" 2; do
+        truncate -s 1M "${TPM_BOARD}/hash${i}.img"
+        veritysetup format "${TPM_BOARD}/data${i}.img" "${TPM_BOARD}/hash${i}.img" 2>/dev/null \
+            | awk '/Root hash/{print $3}' > "${TPM_BOARD}/root_hash${i}.txt"
+        [ "$(wc -c < "${TPM_BOARD}/root_hash${i}.txt")" -eq 65 ] || { echo "veritysetup format failed" > "${TPM_BOARD}/why"; return 1; }
+    done
+    # The board's root with hello.txt's block overwritten: verify fails, and once open,
+    # that file reads as EIO while other.txt still reads.
+    local blk
+    blk=$(debugfs -R "blocks /hello.txt" "${TPM_BOARD}/data.img" 2>/dev/null | awk '{print $1}')
+    [ -n "$blk" ] || { echo "debugfs found no block for hello.txt" > "${TPM_BOARD}/why"; return 1; }
+    cp "${TPM_BOARD}/data.img" "${TPM_BOARD}/data-corrupt.img"
+    printf 'KYB-CORRUPTED-BLOCK' | dd of="${TPM_BOARD}/data-corrupt.img" bs=1 seek=$((blk * 4096)) conv=notrunc status=none
+    rm -rf "${TPM_BOARD}/tree" "${TPM_BOARD}/tree2"
+
+    echo "$krel" > "${TPM_BOARD}/kernel.txt"
+    ( cd "$TPM_STAGE" && find . | cpio -o -H newc 2>/dev/null | gzip > "${SCRIPT_DIR}/initramfs-tpm.cpio.gz" )
+    echo "  staged TPM board for kernel ${krel}: $(wc -l < "${TPM_STAGE}/kyb-board/modules") modules, root ${blk:+hello.txt in block ${blk}}"
+    return 0
+}
+
+if ! _tpm_board_build; then
+    rm -f "${SCRIPT_DIR}/initramfs-tpm.cpio.gz"
+    echo "  TPM board NOT built: $(cat "${TPM_BOARD}/why" 2>/dev/null || echo 'reason unstated') - that pass will SKIP"
 fi
 
 # A second image identical to the first except `"log_to_console": false`, for

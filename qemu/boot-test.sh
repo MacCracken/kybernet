@@ -193,10 +193,13 @@ _initramfs_stale() {
              "${SCRIPT_DIR}/build-initramfs.sh" "${SCRIPT_DIR}"/*.cyr; do
         [ -e "$f" ] && [ "$f" -nt "$INITRAMFS" ] && return 0
     done
+    # The TPM board stages the booted kernel's own modules (1.11.0).
+    [ "$(cat "${SCRIPT_DIR}/.harness-kernel" 2>/dev/null)" = "$KERNEL" ] || return 0
     return 1
 }
 if _initramfs_stale; then
-    bash "${SCRIPT_DIR}/build-initramfs.sh"
+    KYB_KERNEL="$KERNEL" bash "${SCRIPT_DIR}/build-initramfs.sh"
+    echo "$KERNEL" > "${SCRIPT_DIR}/.harness-kernel"
 fi
 
 # argonaut needs KVM (sakshi invariant-TSC); kybernet's transitive
@@ -1616,6 +1619,252 @@ else
 fi
 
 # ============================================================
+# TPM board gate (1.11.0) — swtpm: attestation, PCR 15, a sealed LUKS2 token, and
+# dm-verity open.
+#
+# No pass had ever run any of these. The board is a real TPM 2.0 (swtpm, the same
+# emulator libvirt uses), a real LUKS2 token (systemd-cryptenroll's), and the booted
+# kernel's own dm-crypt and dm-verity, loaded by the pre-init before kybernet starts.
+#
+# The token is enrolled to PCR 7 + PCR 15 (argonaut architecture note 005). PCR 7 is
+# whatever this machine's firmware measures, so a first boot reads it. PCR 15 is what
+# kybernet's measurement of THIS root produces, which the gate computes independently:
+# SHA-256(32 zero bytes || SHA-256(the root hash's 32 bytes)). Then:
+#   - the board's own root must attest, open, mount read-only, measure, unlock and cap,
+#     and after the cap a second unseal must be refused, from inside, as an attacker's
+#     shell would try it;
+#   - a swapped root, valid against its own hash, must get no key;
+#   - the board's own hash over a corrupted root must get no key either, because
+#     what is measured is the pinned hash, so only refusing an unverified root stops it;
+#   - a corrupted root, allowed on, must read EIO from the bad block and still read
+#     the good one: dm-verity checks at read time, which `verify` alone cannot show.
+# ============================================================
+TPM_INITRD="${SCRIPT_DIR}/initramfs-tpm.cpio.gz"
+TB="${SCRIPT_DIR}/tpm-board"
+echo ""
+echo "=== TPM board gate (swtpm: attestation, PCR 15, a sealed LUKS2 token, dm-verity open) ==="
+if [ ! -f "$TPM_INITRD" ]; then
+    _skip_or_fail "no TPM board: $(cat "${TB}/why" 2>/dev/null || echo 'it was not built')"
+else
+    TW=$(mktemp -d /tmp/kybernet-tpm.XXXXXX)
+    _hexbin() { printf "$(printf '%s' "$1" | sed 's/../\\x&/g')"; }
+    # SHA-256 of the bytes a hex string encodes, and a PCR extend: SHA-256(old || digest).
+    _sha_hex() { _hexbin "$1" | sha256sum | cut -c1-64; }
+    _extend() { { _hexbin "$1"; _hexbin "$2"; } | sha256sum | cut -c1-64; }
+    _lower() { tr 'A-F' 'a-f'; }
+    _tpm_unpacked() {
+        if grep -aqF "Initramfs unpacking failed" <<< "$2"; then
+            echo "  FAIL: [$1] the kernel could not unpack the board's initrd, so its config never landed"
+            fail=1
+        fi
+    }
+    _tpm_has() {
+        if grep -aqF "$2" <<< "$3"; then
+            echo "  OK: [$1] $2"
+        else
+            echo "  FAIL: [$1] missing: $2"
+            echo "$3" | grep -aE 'edge boot|PREINIT|READ-|FAILED|REFUSED|ST\[' | head -12 | sed 's/^/        /' || true
+            fail=1
+        fi
+    }
+    _tpm_lacks() {
+        if grep -aqF "$2" <<< "$3"; then
+            echo "  FAIL: [$1] present: $2"
+            fail=1
+        else
+            echo "  OK: [$1] absent: $2"
+        fi
+    }
+    # A boot's initrd: the staged board with this boot's config, as one archive.
+    #
+    # ⚠ NOT AN OVERLAY APPENDED TO THE IMAGE. A cpio appended after the gzip'd board,
+    # compressed or not, made the kernel log "Initramfs unpacking failed: write error"
+    # on some boots and not others, depending on the config, and the board then ran on
+    # its image's own config. A whole archive per boot costs seconds and has no such
+    # case, and _tpm_unpacked still checks every boot.
+    TPM_STAGE_DIR="${SCRIPT_DIR}/initramfs-tpm"
+    _tpm_initrd() {
+        cp "$1" "${TPM_STAGE_DIR}/etc/kybernet/config.json"
+        ( cd "$TPM_STAGE_DIR" && find . | cpio -o -H newc 2>/dev/null | gzip -1 ) > "${TW}/boot.cpio.gz"
+    }
+    # One boot on the swtpm. $1 data image, $2 hash image, $3 extra cmdline.
+    #
+    # ⚠ 1 GiB, NOT THE 512 MiB EVERY OTHER PASS BOOTS. This board unpacks to 48 MB
+    # (libsystemd-shared, libcrypto, gnutls), and at 512 MiB under Ubuntu's kernel 5 of 6
+    # boots logged "Initramfs unpacking failed: write error" and ran on a partial tree.
+    # 1 GiB failed 0 of 6. _tpm_unpacked checks every boot in case the image outgrows it.
+    _tpm_boot() {
+        rm -f "${TW}/q.ctrl" "${TW}/swtpm.pid"
+        swtpm socket --tpm2 --tpmstate "dir=${TW}/state" --ctrl "type=unixio,path=${TW}/q.ctrl" \
+            --terminate --daemon --pid "file=${TW}/swtpm.pid" > "${TW}/swtpm.log" 2>&1 || true
+        local i=0
+        while [ ! -S "${TW}/q.ctrl" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+        # On stderr, so it reaches the log rather than the captured boot: without it a
+        # swtpm that never started reads as a wall of missing kybernet markers (rule 50).
+        if [ ! -S "${TW}/q.ctrl" ]; then
+            echo "  FAIL: [env] swtpm did not start, so this boot has no TPM:" >&2
+            tail -3 "${TW}/swtpm.log" 2>/dev/null | sed 's/^/        /' >&2 || true
+        fi
+        timeout "$TIMEOUT" qemu-system-x86_64 -kernel "$KERNEL" -initrd "${TW}/boot.cpio.gz" \
+            -append "console=ttyS0 panic=5 rdinit=/kyb-preinit kybernet.harness=1 loglevel=3 $3" \
+            -chardev "socket,id=chrtpm,path=${TW}/q.ctrl" -tpmdev emulator,id=tpm0,chardev=chrtpm \
+            -device tpm-tis,tpmdev=tpm0 \
+            -drive "file=$1,if=virtio,format=raw" -drive "file=$2,if=virtio,format=raw" \
+            -drive "file=${TW}/luks.img,if=virtio,format=raw" \
+            $ACCEL_FLAGS -m 1024M -nographic -no-reboot -serial mon:stdio < /dev/null 2>&1 \
+            | cat -v | tr '\r' '\n' || true
+        if [ -f "${TW}/swtpm.pid" ]; then kill "$(cat "${TW}/swtpm.pid")" 2>/dev/null || true; fi
+    }
+    # $1 file, $2 root hash, $3 readonly, $4 luks, $5 extra edge keys, $6 services
+    _tpm_cfg() {
+        cat > "$1" << TPMCFG
+{
+  "boot_mode": "edge",
+  "verify_boot": true,
+  "shutdown_timeout_ms": 400,
+  "edge": {
+    "readonly_rootfs": $3,
+    "luks_enabled": $4,
+    "max_boot_ms": 60000,
+    "root_device": "/dev/vda",
+    "hash_device": "/dev/vdb",
+    "luks_device": "/dev/vdc",
+    "root_hash": "$2"$5
+  },
+  "services": [$6
+  ]
+}
+TPMCFG
+    }
+    _svc() { printf '\n    { "name": "%s", "binary": "%s", "args": [%s], "type": "oneshot", "restart": "never" }%s' "$1" "$2" "$3" "$4"; }
+    FX=/usr/bin/kyb-svc-fixture
+    CS=$(command -v cryptsetup)
+    RH=$(cat "${TB}/root_hash.txt")
+    RH2=$(cat "${TB}/root_hash2.txt")
+    _tpm_ok=1
+    mkdir -p "${TW}/state"
+    swtpm_setup --tpm2 --tpmstate "${TW}/state" > "${TW}/setup.log" 2>&1 || _tpm_ok=0
+    truncate -s 32M "${TW}/luks.img"
+    printf 'kyb-bootstrap' > "${TW}/pw"; chmod 600 "${TW}/pw"
+    cryptsetup luksFormat --type luks2 --batch-mode --key-file "${TW}/pw" --pbkdf pbkdf2 \
+        --pbkdf-force-iterations 1000 "${TW}/luks.img" > "${TW}/luks.log" 2>&1 || _tpm_ok=0
+    if [ "$_tpm_ok" != 1 ]; then
+        echo "  FAIL: the TPM board could not be prepared: swtpm_setup or luksFormat failed"
+        cat "${TW}/setup.log" "${TW}/luks.log" 2>/dev/null | tail -4 | sed 's/^/        /' || true
+        fail=1
+    else
+        # 1. Read the firmware's PCR 7, which the token is sealed to.
+        _tpm_cfg "${TW}/c.json" "$RH" true false "" "$(_svc kyb-pcr7 "$FX" '"read", "/sys/class/tpm/tpm0/pcr-sha256/7"' '')"
+        _tpm_initrd "${TW}/c.json"
+        T1=$(_tpm_boot "${TB}/data.img" "${TB}/hash.img" "")
+        _assert_no_panic "$T1" "tpm measure"
+        _tpm_unpacked "tpm measure" "$T1"
+        _tpm_has "tpm measure" "PREINIT-OK" "$T1"
+        _tpm_has "tpm measure" "edge boot: TPM detected" "$T1"
+        P7=$(sed -n 's/.*READ-\/sys\/class\/tpm\/tpm0\/pcr-sha256\/7=\([0-9A-Fa-f]\{64\}\).*/\1/p' <<< "$T1" | head -1 | _lower)
+        if [ -z "$P7" ]; then
+            echo "  FAIL: [tpm measure] no PCR 7 from the board, so nothing can be enrolled"
+            fail=1
+        else
+            echo "  OK: [tpm measure] the firmware's PCR 7: ${P7}"
+            Z=$(printf '0%.0s' $(seq 1 64))
+            MEAS=$(_sha_hex "$RH")
+            P15=$(_extend "$Z" "$MEAS")
+            CAP=$(printf '%s' "kybernet: data volume unlocked" | sha256sum | cut -c1-64)
+            P15CAP=$(_extend "$P15" "$CAP")
+            # 2. Enrol the token on the host, to PCR 7 + the PCR 15 this root measures.
+            rm -f "${TW}/e.sock" "${TW}/e.sock.ctrl" "${TW}/e.pid"
+            swtpm socket --tpm2 --tpmstate "dir=${TW}/state" --server "type=unixio,path=${TW}/e.sock" \
+                --ctrl "type=unixio,path=${TW}/e.sock.ctrl" --flags startup-clear --daemon \
+                --pid "file=${TW}/e.pid" > "${TW}/swtpm-e.log" 2>&1 || true
+            i=0; while [ ! -S "${TW}/e.sock" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+            ENR=$(systemd-cryptenroll "--tpm2-device=swtpm:path=${TW}/e.sock" "--unlock-key-file=${TW}/pw" \
+                "--tpm2-pcrs=7:sha256=${P7}+15:sha256=${P15}" "${TW}/luks.img" 2>&1 || true)
+            if [ -f "${TW}/e.pid" ]; then kill "$(cat "${TW}/e.pid")" 2>/dev/null || true; fi
+            sleep 0.3
+            if grep -aqF "New TPM2 token enrolled" <<< "$ENR"; then
+                echo "  OK: [tpm enrol] New TPM2 token enrolled"
+            else
+                echo "  FAIL: [tpm enrol] systemd-cryptenroll enrolled no token (the host side, not kybernet):"
+                { echo "$ENR"; cat "${TW}/swtpm-e.log" 2>/dev/null; } | tail -4 | sed 's/^/        /' || true
+                fail=1
+            fi
+
+            # 3. The board's own root.
+            SV="$(_svc kyb-read-root "$FX" '"read", "/verified/hello.txt"' ',')"
+            SV="${SV}$(_svc kyb-ro-write "$FX" '"write", "/verified/kyb-write", "x"' ',')"
+            SV="${SV}$(_svc kyb-pcr15 "$FX" '"read", "/sys/class/tpm/tpm0/pcr-sha256/15"' ',')"
+            SV="${SV}$(_svc kyb-mapper "$FX" '"stat", "/dev/mapper/agnos-data", "/dev/mapper/verified-root"' ',')"
+            SV="${SV}$(_svc kyb-cap-check "$CS" '"open", "--test-passphrase", "--type", "luks2", "--token-only", "--token-id", "0", "--tries", "1", "--", "/dev/vdc"' '')"
+            _tpm_cfg "${TW}/c.json" "$RH" true true ", \"tpm_attestation\": true, \"pcr_bindings\": \"7\", \"expected_pcrs\": [\"${P7}\"], \"root_mount\": \"/verified\"" "$SV"
+            _tpm_initrd "${TW}/c.json"
+            T2=$(_tpm_boot "${TB}/data.img" "${TB}/hash.img" "")
+            _assert_no_panic "$T2" "tpm board"
+            _tpm_unpacked "tpm board" "$T2"
+            _tpm_has "tpm board" "PREINIT-OK" "$T2"
+            _tpm_has "tpm board" "all configured PCR baselines MATCH" "$T2"
+            _tpm_has "tpm board" "dm-verity integrity VERIFIED" "$T2"
+            _tpm_has "tpm board" "verified root mounted read-only at /verified" "$T2"
+            _tpm_has "tpm board" "verified root measured into PCR 15" "$T2"
+            _tpm_has "tpm board" "edge boot: data volume unlocked: /dev/mapper/agnos-data" "$T2"
+            _tpm_has "tpm board" "edge boot: PCR 15 capped" "$T2"
+            _tpm_has "tpm board" "READ-/verified/hello.txt=KYB-VERIFIED-ROOT" "$T2"
+            _tpm_has "tpm board" "FAILED to start: kyb-ro-write" "$T2"
+            _tpm_has "tpm board" "ST[kyb-mapper]-STAT-/dev/mapper/agnos-data=other" "$T2"
+            GOT15=$(sed -n 's/.*READ-\/sys\/class\/tpm\/tpm0\/pcr-sha256\/15=\([0-9A-Fa-f]\{64\}\).*/\1/p' <<< "$T2" | head -1 | _lower)
+            if [ "$GOT15" = "$P15CAP" ]; then
+                echo "  OK: [tpm board] PCR 15 is the enrolled value extended by the cap: ${GOT15}"
+            else
+                echo "  FAIL: [tpm board] PCR 15 is '${GOT15}', expected the cap over the enrolled ${P15}: ${P15CAP}"
+                fail=1
+            fi
+            _tpm_has "tpm board" "FAILED to start: kyb-cap-check" "$T2"
+            _tpm_lacks "tpm board" "completed (oneshot): kyb-cap-check" "$T2"
+
+            # 4. A swapped root, valid against its own hash: no key.
+            _tpm_cfg "${TW}/c.json" "$RH2" true true "" ""
+            _tpm_initrd "${TW}/c.json"
+            T3=$(_tpm_boot "${TB}/data2.img" "${TB}/hash2.img" "")
+            _assert_no_panic "$T3" "tpm swap"
+            _tpm_unpacked "tpm swap" "$T3"
+            _tpm_has "tpm swap" "dm-verity integrity VERIFIED" "$T3"
+            _tpm_has "tpm swap" "verified root measured into PCR 15" "$T3"
+            _tpm_has "tpm swap" "LUKS unlock FAILED" "$T3"
+            _tpm_has "tpm swap" "FATAL: LUKS unlock FAILED - the TPM released no key for this root" "$T3"
+            _tpm_has "tpm swap" "refusing to continue boot without edge prerequisites" "$T3"
+            _tpm_lacks "tpm swap" "data volume unlocked" "$T3"
+
+            # 5. The board's own hash over a corrupted root. kybernet measures the hash
+            # the config pins, not the disk, so this root would measure to the enrolled
+            # PCR 15 and get the key: only the refusal of an unverified root stops it.
+            _tpm_cfg "${TW}/c.json" "$RH" false true "" ""
+            _tpm_initrd "${TW}/c.json"
+            T5=$(_tpm_boot "${TB}/data-corrupt.img" "${TB}/hash.img" "")
+            _assert_no_panic "$T5" "tpm unverified"
+            _tpm_unpacked "tpm unverified" "$T5"
+            _tpm_has "tpm unverified" "dm-verity verification FAILED" "$T5"
+            _tpm_has "tpm unverified" "FATAL: LUKS unlock needs a verified root" "$T5"
+            _tpm_lacks "tpm unverified" "verified root measured into PCR 15" "$T5"
+            _tpm_lacks "tpm unverified" "data volume unlocked" "$T5"
+        fi
+
+        # 6. A corrupted root, allowed on: EIO from the bad block only.
+        SV="$(_svc kyb-read-root "$FX" '"read", "/verified/hello.txt"' ',')"
+        SV="${SV}$(_svc kyb-read-other "$FX" '"read", "/verified/other.txt"' '')"
+        _tpm_cfg "${TW}/c.json" "$RH" false false ", \"root_mount\": \"/verified\"" "$SV"
+        _tpm_initrd "${TW}/c.json"
+        T4=$(_tpm_boot "${TB}/data-corrupt.img" "${TB}/hash.img" "")
+        _assert_no_panic "$T4" "tpm corrupt"
+        _tpm_unpacked "tpm corrupt" "$T4"
+        _tpm_has "tpm corrupt" "dm-verity verification FAILED" "$T4"
+        _tpm_has "tpm corrupt" "verified root mounted read-only at /verified" "$T4"
+        _tpm_has "tpm corrupt" "READ-/verified/hello.txt-ERRNO=5" "$T4"
+        _tpm_has "tpm corrupt" "READ-/verified/other.txt=KYB-SECOND-BLOCK" "$T4"
+    fi
+    rm -rf "$TW"
+fi
+
+# ============================================================
 # Edge-boot gate (1.5.7)
 #
 # Runs against a SEPARATE initramfs (initramfs-edge.cpio.gz) staged by
@@ -1632,9 +1881,8 @@ fi
 #
 # WHAT IT DOES NOT PROVE: `veritysetup open`, the read-only mount of the
 # verified target, LUKS unlock, and PCR baseline comparison. Those need a
-# real device-mapper stack and a real TPM. They are hardware work
-# (roadmap v1.2.2) and are NOT covered here — do not let this gate's green
-# be read as covering them.
+# real device-mapper stack and a real TPM, and the TPM board gate above has
+# both (1.11.0). Do not read this pass's green as covering them.
 # ⚠ STRICT MODE — the answer to "a skip and a pass look the same".
 #
 # Three of this harness's four passes are guarded on a fixture existing, and

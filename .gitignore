@@ -37,6 +37,10 @@
 /qemu/initramfs-quiet.cpio.gz
 /qemu/initramfs-slow/
 /qemu/initramfs-slow.cpio.gz
+/qemu/initramfs-tpm/
+/qemu/initramfs-tpm.cpio.gz
+/qemu/tpm-board/
+/qemu/.harness-kernel
 /qemu/edge/
 
 # IDE

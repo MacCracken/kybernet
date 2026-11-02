@@ -7,6 +7,143 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.11.0] — 2026-11-02
+
+**Edge boot under emulation.** The edge paths no gate had ever run now boot on a real TPM 2.0
+(swtpm): attestation, the root measured into PCR 15 before the LUKS2 token unlock and capped after it
+(argonaut architecture note 005), and `veritysetup open` with a read-only mount of the verified root.
+The board's first attestation found that a lowercase PCR baseline had never matched. Suite 1056 /
+1051. Harness 180, aarch64 boot gate 205.
+
+### Added — the data volume's key goes to this root, once per boot
+
+argonaut's note 005 (the CVE-2026-32606 class) leaves this to kybernet. A key sealed to PCR 7 + 11
+alone is released to any root that boots under the same signed kernel. With `luks_enabled`, phase 6c
+now does three things in order:
+
+1. It extends PCR 15 with SHA-256 of the verified root hash's 32 bytes.
+2. It opens the volume with its token only: `cryptsetup open --type luks2 --token-only --token-id 0
+   --tries 1`, with no passphrase fallback.
+3. It extends PCR 15 with SHA-256 of `kybernet: data volume unlocked`, whatever the unlock did.
+
+A token enrolled to PCR 7 + 15 is then released only to the root whose hash the config pins, and only
+before the cap, so nothing started later in the same boot can unseal it again. To enrol one, compute
+PCR 15 as SHA-256(32 zero bytes ‖ measurement) and give it to `systemd-cryptenroll
+--tpm2-pcrs=7+15:sha256=<that>`. `test_edge_measure_and_mount_keys` carries a worked vector.
+
+Each refusal names its reason, because each has a different fix: no `luks_device`, a root that did not
+verify, no TPM, a measurement that failed, a TPM that released no key, or a cap that did not land.
+
+⚠ **`luks_enabled: true` now refuses a boot.** Until 1.10.1 it logged "unlock deferred to hardware" and
+booted on, so a board that demanded LUKS ran without it. It still defaults to 0 (standing rule 19).
+
+⚠ **What is measured is the hash the config pins, not the disk.** So the key is only as safe as the
+refusal of a root that failed `verify`, and the TPM board boots the board's own hash over a corrupted
+root to hold that refusal.
+
+### Added — the verified root, opened and mounted read-only
+
+With `root_mount`, after `veritysetup verify`, phase 6c opens the root as the dm-verity target
+`verified-root` and mounts it read-only at that path. From then on dm-verity checks every block on
+every read, which a verify at boot cannot. It opens with the kernel's default, where a corrupted block
+reads as EIO, and not with argonaut's `--restart-on-corruption`, which reboots on one bad block and
+boots back into it. A root that failed `verify` and was allowed on (`readonly_rootfs: false`) is still
+mounted through the target, because a read that checks every block is strictly safer than one that
+checks none. With `readonly_rootfs: true` a failed open or mount refuses.
+
+Three new edge keys, each validated at load (standing rule 19):
+
+| Key | Default | Accepts |
+|---|---|---|
+| `root_mount` | unset, which is verify only | an absolute path of 2..255 bytes of `[A-Za-z0-9/_.-]`, no `..`, with the verity triple |
+| `root_fstype` | `ext4` | 1..16 bytes of `[a-z0-9]` |
+| `luks_name` | `agnos-data` | argonaut's `validate_mapper_name`: 1..32 bytes of `[A-Za-z0-9_-]`, not starting `-` |
+
+Every command runs under argonaut's `run_safe_cmd_timeout` (standing rule 17), bounded by its own limit
+and by what `max_boot_ms` leaves: 10 s for a PCR extend, 30 s for an open. kybernet loads no modules,
+so dm-verity and dm-crypt must be built in or loaded before it starts.
+
+Newly live in PID 1, by the DCE list: sigil's `sha256` and `sha256_hex`, and argonaut's
+`validate_mapper_name`. None of them can exit. `sha256` takes a lane through `cbank()`, whose exit-70
+refusal was already in the link, and single-threaded PID 1 cannot reach it.
+
+### Fixed — a lowercase PCR baseline never matched
+
+`_eb_compare_pcrs` compared with `str_eq`. tpm2_pcrread prints uppercase hex and sigil keeps it as
+printed, while a baseline is usually written the way sha256sum prints it, lowercase. So from 1.5.7 to
+1.10.1 the right baseline reported MISMATCH. The compare is report-only, so no board refused, but every
+board configured that way reported drift it did not have. `edge_hex_eq` ignores case. The unit test had
+fed lowercase on both sides (standing rule 46).
+
+### Gates
+
+**The TPM board**, a new pass in `qemu/boot-test.sh`, x86 only. swtpm, the TPM 2.0 emulator libvirt
+uses, sits behind QEMU's `tpm-tis` device. The LUKS2 volume is real, with a token systemd-cryptenroll
+enrolls, and dm-crypt and dm-verity are the booted kernel's own modules. The pre-init fixture loads
+them with `finit_module` before kybernet starts. Five boots:
+
+| Boot | What it must show |
+|---|---|
+| measure | the firmware's PCR 7, from sysfs. The token is enrolled to it and to the PCR 15 the gate computes on its own |
+| the board | baselines MATCH; verified, mounted read-only (a write fails), measured, unlocked and capped; PCR 15 exactly the enrolled value extended by the cap; and from inside, after the cap, a second unseal fails |
+| a swapped root | valid against its own hash: verified and measured, then no key, and the boot refused |
+| an unverified root | the board's own hash over a corrupted root: refused before anything is measured |
+| a corrupted root, allowed on | EIO from the corrupted block, and the other block still reads |
+
+⚠ **It boots with 1 GiB.** The board's initrd unpacks to 48 MB (libsystemd-shared, libcrypto, gnutls).
+At the harness's usual 512 MB, 5 of 6 boots logged `Initramfs unpacking failed: write error` and ran on
+a partial tree with the image's own config. That first looked like a config overlay that did not apply.
+At 1 GiB, 0 of 6 failed, and every TPM boot checks for the line.
+
+CI installs swtpm, swtpm-tools, tpm2-tools, systemd-cryptsetup, e2fsprogs and kmod, and `HARNESS_STRICT=1`
+fails the run without them. The runner's azure kernel, 7.0.0-1019, was checked from its package:
+dm-crypt and dm-verity are zstd modules under `CONFIG_MODULE_DECOMPRESS=y`, and tpm_tis is built in.
+Ubuntu confines swtpm with AppArmor. The profile's `user-tmp` abstraction covers the owner-held `/tmp`
+directory the pass works in, but a docker replay cannot run AppArmor, so CI's run is the first check of
+that. A swtpm that does not start is reported as an environment failure, not as missing markers
+(standing rule 50). Replaying every `ci.yml` step in `ubuntu:26.04`, booting the azure kernel with its
+modules package and `depmod` run as a runner has them, passed 23 of 23 steps, the TPM pass 31 of 31.
+
+Defects injected, each in its own tree, through the whole harness:
+
+| Defect injected | What went red |
+|---|---|
+| No cap after the unlock | PCR 15 was not the cap's value, and the second unseal from inside succeeded |
+| No measurement before the unlock | the TPM released no key, so the board refused |
+| The root hash's 64 hex characters measured, not its 32 bytes | the same: no key, and refused |
+| A refused unlock not refused | the swapped root booted on and logged `data volume unlocked` |
+| An unverified root allowed to unlock | the board's own hash over a corrupted root got the key |
+| Opened with argonaut's `--restart-on-corruption` | the corrupted read rebooted the board, so `hello.txt` never read EIO |
+| Baselines compared by case again | `all configured PCR baselines MATCH` |
+| Mounted without `MS_RDONLY` | the kernel refuses a read-write mount of a verity target, so the board refused |
+| The raw root device mounted instead of the target | the mount failed while dm-verity held the device, so the board refused |
+
+The last two went red because the kernel refused before kybernet's own check could. `kyb-ro-write`,
+which writes into the mounted root, never got a chance to fail: it holds the property itself, whatever
+the mechanism, and no defect tried here got past the kernel to reach it.
+
+The aarch64 boot gate passes all 205 properties with the changed pre-init and service fixtures, but it
+boots no TPM, so the new code runs there ungated (roadmap 1.11.1). `kyb-svc-fixture read <path>`
+prints a file's first line, which is how the board reads its PCRs from sysfs and its root from inside.
+
+The bench gate ran at load 13, mostly another project's work on the box, and flagged nothing:
+`_calibration` read 117 ns against the 264 of 1.10.1's row, which was recorded at load 16. No
+benchmark touches the edge path.
+
+### Binary
+
+| Arch | 1.10.1 | 1.11.0 |
+|---|---:|---:|
+| x86_64 | 1,123,576 | 1,129,392 |
+| aarch64 | 2,663,264 | 2,730,520 |
+| agnos-init x86_64 | 565,608 | 565,608 |
+| agnos-init aarch64 | 2,592,832 | 2,592,832 |
+
+Both arches gained the same 7,440 bytes of code and 1,720 of data. On aarch64 that moved the data
+segment across a 64 KiB boundary (`0x210000` → `0x220000`), which is the rest of its +67,256.
+
+---
+
 ## [1.10.1] — 2026-11-02
 
 **The reactor spends nothing.** Reloads stopped costing PID 1's arena at 1.10.0, which is what made the
