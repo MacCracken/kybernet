@@ -47,8 +47,10 @@ opens itself with `O_NOCTTY`, as a plain process with no controlling terminal. A
 
 ### Not done here
 
-- **argonaut runs agnos-init in BOOT_DESKTOP only.** On a BOOT_MINIMAL board nothing grants the
-  console, and agnoshi exits 1 with EACCES. The roadmap's Gated item now names that as its gate.
+- **argonaut 1.20.0 runs agnos-init in BOOT_DESKTOP only**, so on a BOOT_MINIMAL board nothing
+  grants the console yet, and agnoshi exits 1 with EACCES. argonaut's unreleased tree adds it to
+  BOOT_MINIMAL. kybernet takes that when it moves its argonaut pin to the tag, which is the
+  roadmap's Gated item.
 
 ## [1.12.0] — 2026-11-02
 
