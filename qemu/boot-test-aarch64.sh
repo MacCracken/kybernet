@@ -383,23 +383,28 @@ cat > "$ROOT/etc/kybernet/config.json" << 'CFGEOF'
     { "name": "kyb-agnos-dirs", "binary": "/usr/bin/kyb-svc-fixture",
       "args": ["stat", "/run/agnos/agents", "/run/agnos/plugins", "/run/user/1000",
                "/var/lib/agnos/agents", "/var/lib/agnos/agent-memory", "/var/lib/agnos/models",
-               "/var/log/agnos", "/dev/input/event90", "/dev/fb0", "/sys/fs/cgroup/kybernet.slice"],
+               "/var/log/agnos", "/dev/input/event90", "/dev/fb0", "/sys/fs/cgroup/kybernet.slice",
+               "/dev/console"],
       "type": "oneshot", "restart": "never", "depends_on": ["agnos-init"] },
     { "name": "kyb-grant", "binary": "/usr/bin/kyb-svc-fixture",
       "args": ["open", "/dev/input/event90", "/dev/fb0"], "type": "oneshot", "restart": "never",
       "depends_on": ["agnos-init"], "security": { "uid": 900, "gid": 900, "groups": [44, 104] } },
     { "name": "kyb-nogrant", "binary": "/usr/bin/kyb-svc-fixture",
-      "args": ["open", "/dev/input/event90", "/dev/fb0"], "type": "oneshot", "restart": "never",
+      "args": ["open", "/dev/input/event90", "/dev/fb0", "/dev/console"], "type": "oneshot", "restart": "never",
       "depends_on": ["agnos-init"], "security": { "uid": 900, "gid": 900 } },
+    { "name": "kyb-grant-user", "binary": "/usr/bin/kyb-svc-fixture",
+      "args": ["open", "/dev/console"], "type": "oneshot", "restart": "never",
+      "depends_on": ["agnos-init"], "security": { "uid": 1000, "gid": 1000 } },
     { "name": "kyb-deleg", "binary": "/usr/bin/kyb-svc-fixture", "args": ["cgdelegate"],
       "type": "oneshot", "restart": "never", "security": { "uid": 900, "gid": 900, "delegate": true } },
     { "name": "kyb-nodeleg", "binary": "/usr/bin/kyb-svc-fixture", "args": ["cgdelegate"],
       "type": "oneshot", "restart": "never", "security": { "uid": 900, "gid": 900 } },
     { "name": "kyb-id-relay", "binary": "/usr/bin/kyb-svc-fixture",
       "args": ["relay", "/dev/shm/kyb-st-kyb-grant.txt", "/dev/shm/kyb-st-kyb-nogrant.txt",
-               "/dev/shm/kyb-st-kyb-deleg.txt", "/dev/shm/kyb-st-kyb-nodeleg.txt"],
+               "/dev/shm/kyb-st-kyb-deleg.txt", "/dev/shm/kyb-st-kyb-nodeleg.txt",
+               "/dev/shm/kyb-st-kyb-grant-user.txt"],
       "type": "oneshot", "restart": "never",
-      "depends_on": ["kyb-grant", "kyb-nogrant", "kyb-deleg", "kyb-nodeleg"] }
+      "depends_on": ["kyb-grant", "kyb-nogrant", "kyb-deleg", "kyb-nodeleg", "kyb-grant-user"] }
   ]
 }
 CFGEOF
@@ -897,8 +902,8 @@ fi
 # Each assertion mirrors the x86 harness's assertion of the same name. The reasoning
 # behind each one lives there; what is new here is that it RUNS on aarch64, where
 # the syscall numbers, the seccomp allowlist and the struct layouts differ.
-_prop "config: services parsed: 38" \
-    'kybernet: config: services parsed: 38([^0-9]|$)' "$OUT1"
+_prop "config: services parsed: 39" \
+    'kybernet: config: services parsed: 39([^0-9]|$)' "$OUT1"
 # 1.7.8: the config above is padded past the old 16 KiB limit. Check the size kybernet
 # itself reports, so a fixture that shrank back under 16 KiB fails here rather than
 # proving nothing.
@@ -914,8 +919,8 @@ _prop "completed (oneshot): kyb-dep" 'completed \(oneshot\): kyb-dep' "$OUT1"
 _prop "completed (oneshot): kyb-svc, after its dependency" 'completed \(oneshot\): kyb-svc' "$OUT1"
 _prop "started: kyb-live" 'started: kyb-live' "$OUT1"
 # 23, not 24: kyb-prereq-dep is skipped, so no cgroup is ever made for it.
-_prop "removed service cgroups: 37 (every started service, torn down, a delegated one's child first)" \
-    'kybernet: removed service cgroups: 37([^0-9]|$)' "$OUT1" 'removed service cgroups'
+_prop "removed service cgroups: 38 (every started service, torn down, a delegated one's child first)" \
+    'kybernet: removed service cgroups: 38([^0-9]|$)' "$OUT1" 'removed service cgroups'
 
 # ⚠ THE LABEL IS THE PLACEMENT CHECK. svc-fixture labels its report with the leaf
 # of its OWN cgroup path, so a service whose child-side join failed (standing rule
@@ -998,6 +1003,8 @@ _prop "agnos-init: /dev/input/event90 granted to input (104), 0660" \
     'ST\[kyb-agnos-dirs\]-STAT-/dev/input/event90=other 0660 0:104' "$OUT1" 'MKNOD|kyb-agnos-dirs\].*/dev/'
 _prop "agnos-init: /dev/fb0 granted to video (44), 0660" \
     'ST\[kyb-agnos-dirs\]-STAT-/dev/fb0=other 0660 0:44' "$OUT1" 'MKNOD|kyb-agnos-dirs\].*/dev/'
+_prop "agnos-init: /dev/console granted to the interactive user's group (1000), 0660" \
+    'ST\[kyb-agnos-dirs\]-STAT-/dev/console=other 0660 0:1000' "$OUT1" 'kyb-agnos-dirs\].*/dev/'
 _prop "the slice is 0711: a delegated service can walk to its own cgroup" \
     'ST\[kyb-agnos-dirs\]-STAT-/sys/fs/cgroup/kybernet.slice=dir 0711 0:0' "$OUT1"
 _prop "agnos-init: /run/user/1000, 0700, uid 1000 with passwd's gid 1001" \
@@ -1022,6 +1029,11 @@ _prop "kyb-grant opens past the permission check on /dev/fb0" \
 _prop "kyb-nogrant (no groups) is refused the input node" \
     'ST\[kyb-nogrant\]-OPEN-/dev/input/event90=ERRNO=13([^0-9]|$)' "$OUT1"
 _prop "kyb-nogrant (no groups) is refused /dev/fb0" 'ST\[kyb-nogrant\]-OPEN-/dev/fb0=ERRNO=13([^0-9]|$)' "$OUT1"
+_prop "kyb-nogrant (uid 900) is refused the console" \
+    'ST\[kyb-nogrant\]-OPEN-/dev/console=ERRNO=13([^0-9]|$)' "$OUT1"
+_prop "kyb-grant-user runs as agnoshi does, 1000:1000" 'ST\[kyb-grant-user\]-Uid=1000 1000 1000 1000' "$OUT1" \
+    'ST\[kyb-grant-user\]'
+_prop "kyb-grant-user (gid 1000) opens the granted console" 'ST\[kyb-grant-user\]-OPEN-/dev/console=OK' "$OUT1"
 _prop "kyb-deleg's cgroup was delegated" 'cgroup delegated: kyb-deleg' "$OUT1" 'delegat'
 _prop "kyb-deleg made a cgroup below its own" 'ST\[kyb-deleg\]-CGD-MKDIR=OK' "$OUT1" 'ST\[kyb-(deleg|nodeleg)\]'
 _prop "kyb-deleg moved itself into it" 'ST\[kyb-deleg\]-CGD-MOVE=OK' "$OUT1"

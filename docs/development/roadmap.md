@@ -85,12 +85,15 @@ Each takes the next free number when its gate opens.
       agnosticos, its data directory in agnos-init's layout, and the ids in argonaut's
       `default_services`, checked by `test_agnos_identity_contract`.
 
-**Gate: a design, in argonaut, for a service that owns a terminal.**
+**Gate: argonaut running agnos-init in BOOT_MINIMAL.**
 
-- [ ] **agnoshi has no terminal as a service.** Every service's stdin, stdout and stderr are
-      `/dev/null` (standing rule 20), and agnoshi reads its commands from fd 0, so the default
-      agnoshi reads EOF and exits, as root or as user 1000. A console shell needs a service that
-      is given a tty, with the tty's ownership and its group to match its uid.
+- [ ] **The console shell on a minimal board.** Nothing owns the terminal: since agnoshi 2.1.2 a
+      session started with `/dev/null` on stdin and stdout (standing rule 20) opens `/dev/console`
+      itself, with `O_NOCTTY`, and agnos-init (unreleased, after 1.12.0) grants the console to
+      group 1000 so agnoshi's uid can open it. But argonaut's `default_services` runs agnos-init
+      in BOOT_DESKTOP only, so on a BOOT_MINIMAL board nothing grants the console, and agnoshi
+      exits 1 with EACCES. argonaut needs agnos-init in BOOT_MINIMAL, with the minimal agnoshi
+      depending on it, as the desktop one does through aethersafha.
 
 **Gate: a device manager, or a decision that kybernet listens for uevents.**
 

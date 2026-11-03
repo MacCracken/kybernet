@@ -7,6 +7,49 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [Unreleased]
+
+**The console, to the interactive user's group.** Nothing owns the terminal. agnoshi 2.1.2 runs a
+session started with `/dev/null` on stdin and stdout (standing rule 20) on `/dev/console`, which it
+opens itself with `O_NOCTTY`, as a plain process with no controlling terminal. As 1000:1000 (argonaut
+1.20.0) it needs a console that uid can open, and devtmpfs makes it `root:root 0600`.
+
+### Added — agnos-init grants /dev/console
+
+- **`agnos_devices_grant` gives `/dev/console` to group 1000, mode 0660**, owner left root. This is
+  the same `_ad_grant_node` path as `/dev/fb0` and `/dev/input/event*`: the node must be a
+  character device itself, and a missing one is reported, not a failure.
+  - `AD_GID_USER = 1000` is agnoshi's gid in argonaut's default services.
+    `test_agnos_identity_contract` now fails if the two disagree.
+- **Nothing else reads the console while a uid-1000 process can.** kybernet's emergency prompt reads
+  it only from `drop_to_emergency`, and that runs in three places:
+  - the edge pre-flight (phase 6c), before any service;
+  - a failed boot stage (phase 7), before any service;
+  - after every service failed to start, so no agnoshi is running.
+
+### Tests
+
+- **Suite 1096 → 1098:**
+  - The contract assertion above.
+  - A regular file where `/dev/console` belongs is left alone, not chmod'd.
+- **aarch64 exec gate:** 1,093 assertions, floor 1,091.
+- **Harness, both arches.** These checks are written but **not run here**: building the image needs
+  sudo, and the TPM pass needs swtpm.
+  - The `kyb-agnos-dirs` observer stats `/dev/console` and expects `other 0660 0:1000`.
+  - A new `kyb-grant-user` probe has agnoshi's identity, 1000:1000 with no groups. It runs Uid/Gid
+    1000 and opens the console `=OK`.
+  - The `kyb-nogrant` control arm (900:900, no groups) is refused it with `ERRNO=13`.
+  - The relay carries the fifth probe.
+  - Per standing rule 27, `services parsed` moves from 39 to 40 (aarch64 38 → 39), and
+    `removed service cgroups` from 38 to 39 (aarch64 37 → 38).
+- **`svc-fixture`'s `open` probe passes `O_NOCTTY`.** The probe is a session leader, and without it,
+  opening the console would make it the probe's controlling terminal.
+
+### Not done here
+
+- **argonaut runs agnos-init in BOOT_DESKTOP only.** On a BOOT_MINIMAL board nothing grants the
+  console, and agnoshi exits 1 with EACCES. The roadmap's Gated item now names that as its gate.
+
 ## [1.12.0] — 2026-11-02
 
 **Non-root default services.** argonaut 1.20.0 gives a service definition an identity, and the four

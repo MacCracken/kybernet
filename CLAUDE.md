@@ -22,7 +22,7 @@ The helmsman that steers the Argo. Manages system boot, essential mounts, signal
 cyrius deps                                  # Resolve deps from cyrius.cyml into lib/
 CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet   # Build (DCE recommended)
 CYRIUS_DCE=1 cyrius build src/agnos_init.cyr build/agnos-init   # agnos-init, the layout oneshot (1.7.6)
-cyrius test src/test.cyr                     # Run 1096 tests
+cyrius test src/test.cyr                     # Run 1098 tests
 cyrius bench src/bench.cyr                   # Run benchmarks
 bash scripts/bench-history.sh                # Record bench history + ≥15% regression gate (MANDATORY on every release)
 CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr build/kybernet-aarch64   # Cross-build aarch64 (DCE, as CI and release.yml ship it)
@@ -40,7 +40,7 @@ kybernet/
 ├── src/
 │   ├── main.cyr           # Globals + boot sequence + event loop + harness gate
 │   ├── agnos_init.cyr     # agnos-init: a SEPARATE program, run as a oneshot (1.7.6)
-│   ├── test.cyr           # Integration tests (1096 assertions)
+│   ├── test.cyr           # Integration tests (1098 assertions)
 │   ├── bench.cyr          # Microbenchmarks
 │   └── lib/               # 21 modules
 │       ├── log.cyr        # klog / klog2 / kmsg / slog (factored out at 1.2.0)
@@ -131,7 +131,7 @@ Do **not** add a `path = "../<dep>"` alongside `git`/`tag`. When `path` resolves
 
 1. Make changes to `src/main.cyr` or `src/lib/*.cyr`
 2. Build: `CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet`
-3. Test: `cyrius test src/test.cyr` (1096 tests must pass)
+3. Test: `cyrius test src/test.cyr` (1098 tests must pass)
 4. Cross-build: `CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr build/kybernet-aarch64` (verify both arches). ⚠ Keep `CYRIUS_DCE=1`: on aarch64 DCE NOP-fills dead code rather than removing it, so a build without it is the same SIZE with different BYTES, and a gate run against it tests a binary CI and `release.yml` do not ship (1.7.3).
 5. Harness (needs KVM): `bash qemu/boot-test.sh` — 200 properties across seven passes: boot markers + budget, the reactor gate, dm-verity verification, the emergency-auth prompt against BOTH credential formats plus a refused credential file that must not fall back to the config key (1.7.1) and the emergency shell's own descriptors, signal mask and environment (1.7.3), the quiet gate (log_to_console=false), the start-timeout gate (`start_timeout_ms`, 1.10.0), and the TPM board gate (1.11.0): attestation, the PCR 15 measure and cap, a sealed LUKS2 token, and `veritysetup open` with a read-only mount, under swtpm, which with tpm2-tools, systemd-cryptsetup and e2fsprogs must be installed (CI installs them)
 5a. **aarch64 boot: `bash qemu/boot-test-aarch64.sh`** — 258 properties: seven passes (the edge, auth and quiet passes since 1.7.3, see rule 52; the TPM board since 1.11.1), 32 services built from the Cyrius fixtures (1.7.2), on an entropy-starved machine (`dtb-randomness=off`). Needs the host's `veritysetup` to format the edge image. EXECUTES `kybernet-aarch64` as PID 1 under TCG (no KVM; an x86 host cannot accelerate aarch64) against a **pinned, sha256-checked** Alpine netboot kernel cached in `qemu/.cache/`. ⚠ `phase 4: signals ready` is its **CRITICAL-1 sentinel** — that marker's absence has one known cause, and no syscall probe would catch it because the probe tests signalfd in isolation rather than inside init's real startup. ⚠ **Pass 7, the TPM board, boots a different kernel and firmware** (1.11.1): neither Alpine aarch64 kernel builds a TPM TIS driver, so it boots Debian trixie's cloud-arm64 kernel through Debian's AAVMF, with Debian's arm64 veritysetup, cryptsetup, tpm2-tools and token plugin, all pinned by sha256 to one snapshot.debian.org timestamp in `qemu/tpm-board-aarch64.pins`. CI caches them keyed on that file (1.12.0): snapshot.debian.org throttles a burst with HTTP 503. The firmware is what measures PCR 7, and only AAVMF's secure-boot build has TPM2 support. Host side it needs swtpm, systemd-cryptenroll with the tpm2-tss libraries it `dlopen()`s (tpm2-tools brings them), e2fsprogs, depmod, dpkg-deb, python3 and curl; a missing one fails pass 7 with its name, and `ALLOW_A64_TPM_SKIP=1` acknowledges it did not run. This host has no swtpm, so run it in the container (memory: ref-tpm-dev-container).
@@ -251,7 +251,7 @@ CYRIUS_DCE=1 cyrius build src/main.cyr build/kybernet
 CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr build/kybernet-aarch64
 CYRIUS_DCE=1 cyrius build src/agnos_init.cyr build/agnos-init
 CYRIUS_DCE=1 cyrius build --aarch64 src/agnos_init.cyr build/agnos-init-aarch64
-cyrius test src/test.cyr                            # 1096 tests, 0 failed
+cyrius test src/test.cyr                            # 1098 tests, 0 failed
 bash scripts/aarch64-exec-gate.sh                   # EXECUTES aarch64 (needs qemu-user); aarch64 test floor: 1091
 bash scripts/bench-history.sh                       # ≥15% regression gate
 bash qemu/boot-test.sh                              # needs KVM; its TPM pass needs swtpm
@@ -271,4 +271,4 @@ Plus a **sibling-free reproduction** — the only gate that catches a tag which 
 - Do not add C, Rust, or assembly files — everything is Cyrius
 - Do not reference `../cyrius/` repo — use installed toolchain at `~/.cyrius/`
 - Do not bump a dep tag to a value > the highest existing git tag (CI clones from `git + tag`; an unreleased VERSION-file value fails resolution — see 1.1.0 CHANGELOG note)
-- Test after every change (1096 tests + both harnesses when KVM available)
+- Test after every change (1098 tests + both harnesses when KVM available)

@@ -2136,6 +2136,8 @@ fn test_agnos_identity_contract() {
     }
     assert_eq(has_video, 1, "contract: aethersafha holds the group agnos-init grants /dev/fb0 to");
     assert_eq(has_input, 1, "contract: and the one it grants /dev/input/event* to");
+    assert_eq(svc_def_gid(_ai_find(dsk, "agnoshi")), AD_GID_USER,
+      "contract: agnoshi runs as the group agnos-init grants /dev/console to");
     assert_eq(svc_def_delegate(dm), 1, "contract: daimon's cgroup is delegated (it contains agents)");
     assert_eq(svc_def_uid(_ai_find(dsk, "agnos-init")), 0 - 1, "contract: agnos-init itself stays root");
     return 0;
@@ -2149,6 +2151,7 @@ fn test_agnos_devices_grant() {
     println("--- agnos-init device grants (1.12.0) ---");
     agnos_dirs_set_log(0 - 1, 0);
     var root = "/tmp/kyb-agnos-dev-test";
+    sys_unlink(_cat2(root, "/dev/console"));
     sys_unlink(_cat2(root, "/dev/input/event0"));
     sys_unlink(_cat2(root, "/dev/input/mice"));
     sys_unlink(_cat2(root, "/dev/fb0"));
@@ -2161,10 +2164,14 @@ fn test_agnos_devices_grant() {
     sys_mkdir(_cat2(root, "/dev/input"), 493);
     _write_file(_cat2(root, "/dev/input/event0"), "x", 384);
     _write_file(_cat2(root, "/dev/input/mice"), "x", 384);
+    _write_file(_cat2(root, "/dev/console"), "x", 384);
     sys_symlink(_cat2(root, "/dev/input/event0"), _cat2(root, "/dev/fb0"));
     assert_eq(agnos_devices_grant(root), 0, "devices: a file or a symlink in a node's place is not granted");
     assert_eq(_ad_t_mode(_cat2(root, "/dev/input/event0")) & 0xFFF, 384, "devices: the file was not chmod'd");
     assert_eq(_ad_t_mode(_cat2(root, "/dev/input/mice")) & 0xFFF, 384, "devices: a non-event entry is not touched");
+    assert_eq(_ad_t_mode(_cat2(root, "/dev/console")) & 0xFFF, 384,
+      "devices: a file where the console belongs is not chmod'd");
+    sys_unlink(_cat2(root, "/dev/console"));
     sys_unlink(_cat2(root, "/dev/fb0"));
     sys_unlink(_cat2(root, "/dev/input/event0"));
     sys_unlink(_cat2(root, "/dev/input/mice"));

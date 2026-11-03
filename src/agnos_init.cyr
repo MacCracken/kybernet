@@ -16,8 +16,9 @@ fn main() {
     alloc_init();
     agnos_dirs_set_log(2, 1);
     var failed = agnos_dirs_setup("");
-    # The devices the compositor opens, to the groups it holds (1.12.0). Reported,
-    # never a failure: see agnos_devices_grant.
+    # The devices the compositor opens, to the groups it holds (1.12.0), and the console
+    # to the interactive user's group, for agnoshi (unreleased). Reported, never a
+    # failure: see agnos_devices_grant.
     agnos_devices_grant("");
     if (failed != 0) {
         _ad_report("the directory layout is INCOMPLETE; see the lines above", "");

@@ -355,6 +355,8 @@ fn relay_all() {
 }
 
 # This process's identity, then each path from argv[2] on opened read-only.
+enum FxOpenFlag { FX_O_NOCTTY = 256; }   # octal 0400 on x86_64 and aarch64 Linux
+
 fn do_open() {
     load_cgroup();
     if (open_sink() < 0) { return 3; }
@@ -366,7 +368,9 @@ fn do_open() {
         line_add(_leaf);
         line_add("]-OPEN-");
         line_add(p);
-        var fd = sys_open(p, O_RDONLY | O_CLOEXEC, 0);
+        # O_NOCTTY: the probe is a session leader (argonaut's setsid), and /dev/console
+        # opened without it would become its controlling terminal.
+        var fd = sys_open(p, O_RDONLY | O_CLOEXEC | FX_O_NOCTTY, 0);
         if (fd >= 0) {
             sys_close(fd);
             line_add("=OK");

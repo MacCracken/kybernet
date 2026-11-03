@@ -44,6 +44,7 @@ var AD_S_IFCHR = 0x2000;
 var AD_UID_AGNOS = 900;
 var AD_UID_AGNOS_LLM = 901;
 var AD_UID_USER = 1000;
+var AD_GID_USER = 1000;     # the interactive user's gid, as argonaut runs agnoshi (1000:1000)
 var AD_GID_VIDEO = 44;
 var AD_GID_INPUT = 104;
 
@@ -310,6 +311,13 @@ fn _ad_own(root, full, kind, who) {
 # appears later (a keyboard plugged in after boot) stays root-only. Following hotplug
 # is udev's job, and this is not a udev. A missing node is reported, not a failure:
 # a board can boot without a framebuffer, and the compositor then fails on its own.
+#
+# /dev/console goes to the interactive user's group (unreleased, after 1.12.0). argonaut
+# runs agnoshi as 1000:1000 with /dev/null on its stdio (standing rule 20), and since
+# agnoshi 2.1.2 a session started that way opens /dev/console itself, with O_NOCTTY: a
+# plain process, no controlling terminal. A 0600 console refused it with EACCES. Nothing
+# else reads the console while a service runs: kybernet's emergency prompt reads it
+# only before the service waves or after every service failed to start.
 var AD_DEV_MODE = 432;      # 0660
 
 # Grant the node at `full` to `gid`. 1 when granted, 0 when it is not there, -1 when
@@ -340,10 +348,16 @@ fn _ad_grant_node(full, gid) {
     return 1;
 }
 
-# Grant every device node aethersafha needs under `root`. Returns how many were
-# granted; nothing here fails the run.
+# Grant every device node aethersafha and agnoshi need under `root`. Returns how many
+# were granted; nothing here fails the run.
 fn agnos_devices_grant(root) {
     var granted = 0;
+    var con = _ad_join(root, "/dev/console");
+    if (con != 0) {
+        var gc = _ad_grant_node(con, AD_GID_USER);
+        if (gc == 1) { granted = granted + 1; }
+        if (gc == 0) { _ad_report("no console to grant: ", con); }
+    }
     var fb = _ad_join(root, "/dev/fb0");
     if (fb != 0) {
         var g = _ad_grant_node(fb, AD_GID_VIDEO);

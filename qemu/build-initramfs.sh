@@ -714,7 +714,8 @@ cat > "${INITRAMFS_DIR}/etc/kybernet/config.json" << 'CFGEOF'
       "binary": "/usr/bin/kyb-svc-fixture",
       "args": ["stat", "/run/agnos/agents", "/run/agnos/plugins", "/run/user/1000",
                "/var/lib/agnos/agents", "/var/lib/agnos/agent-memory", "/var/lib/agnos/models",
-               "/var/log/agnos", "/dev/input/event90", "/dev/fb0", "/sys/fs/cgroup/kybernet.slice"],
+               "/var/log/agnos", "/dev/input/event90", "/dev/fb0", "/sys/fs/cgroup/kybernet.slice",
+               "/dev/console"],
       "type": "oneshot",
       "restart": "never",
       "depends_on": ["agnos-init"]
@@ -731,13 +732,23 @@ cat > "${INITRAMFS_DIR}/etc/kybernet/config.json" << 'CFGEOF'
     },
     {
       "name": "kyb-nogrant",
-      "description": "1.12.0: control arm, the same uid with no groups: EACCES on both",
+      "description": "1.12.0: control arm, the same uid with no groups: EACCES on all three",
       "binary": "/usr/bin/kyb-svc-fixture",
-      "args": ["open", "/dev/input/event90", "/dev/fb0"],
+      "args": ["open", "/dev/input/event90", "/dev/fb0", "/dev/console"],
       "type": "oneshot",
       "restart": "never",
       "depends_on": ["agnos-init"],
       "security": { "uid": 900, "gid": 900 }
+    },
+    {
+      "name": "kyb-grant-user",
+      "description": "agnoshi's identity (1000:1000, no groups) opens the console agnos-init grants its group",
+      "binary": "/usr/bin/kyb-svc-fixture",
+      "args": ["open", "/dev/console"],
+      "type": "oneshot",
+      "restart": "never",
+      "depends_on": ["agnos-init"],
+      "security": { "uid": 1000, "gid": 1000 }
     },
     {
       "name": "kyb-deleg",
@@ -759,13 +770,14 @@ cat > "${INITRAMFS_DIR}/etc/kybernet/config.json" << 'CFGEOF'
     },
     {
       "name": "kyb-id-relay",
-      "description": "1.12.0: root relay for the four non-root identity probes",
+      "description": "1.12.0: root relay for the five non-root identity probes",
       "binary": "/usr/bin/kyb-svc-fixture",
       "args": ["relay", "/dev/shm/kyb-st-kyb-grant.txt", "/dev/shm/kyb-st-kyb-nogrant.txt",
-               "/dev/shm/kyb-st-kyb-deleg.txt", "/dev/shm/kyb-st-kyb-nodeleg.txt"],
+               "/dev/shm/kyb-st-kyb-deleg.txt", "/dev/shm/kyb-st-kyb-nodeleg.txt",
+               "/dev/shm/kyb-st-kyb-grant-user.txt"],
       "type": "oneshot",
       "restart": "never",
-      "depends_on": ["kyb-grant", "kyb-nogrant", "kyb-deleg", "kyb-nodeleg"]
+      "depends_on": ["kyb-grant", "kyb-nogrant", "kyb-deleg", "kyb-nodeleg", "kyb-grant-user"]
     }
   ]
 }
